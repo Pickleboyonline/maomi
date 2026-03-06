@@ -1,0 +1,131 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Maomi",
+  "scopeName": "source.maomi",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#function-definition" },
+    { "include": "#builtin-functions" },
+    { "include": "#keywords-import" },
+    { "include": "#keywords-control" },
+    { "include": "#keyword-grad" },
+    { "include": "#keyword-let" },
+    { "include": "#constants-boolean" },
+    { "include": "#types" },
+    { "include": "#numbers-float" },
+    { "include": "#numbers-integer" },
+    { "include": "#qualified-call" },
+    { "include": "#function-call" },
+    { "include": "#operator-arrow" },
+    { "include": "#operators-comparison" },
+    { "include": "#operators-arithmetic" },
+    { "include": "#operator-assignment" },
+    { "include": "#dot-accessor" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "comments": {
+      "match": "//.*$",
+      "name": "comment.line.double-slash.maomi"
+    },
+    "strings": {
+      "begin": "\"",
+      "end": "\"",
+      "name": "string.quoted.double.maomi",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.string.begin.maomi" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.end.maomi" }
+      }
+    },
+    "function-definition": {
+      "match": "\\b(fn)\\s+([a-zA-Z_]\\w*)",
+      "captures": {
+        "1": { "name": "storage.type.function.maomi" },
+        "2": { "name": "entity.name.function.maomi" }
+      }
+    },
+    "builtin-functions": {
+      "match": "\\b(exp|log|tanh|sqrt|abs|mean|sum|callback|transpose)\\b(?=\\s*\\()",
+      "name": "support.function.builtin.maomi"
+    },
+    "keywords-import": {
+      "match": "\\b(import|from|as)\\b",
+      "name": "keyword.control.import.maomi"
+    },
+    "keywords-control": {
+      "match": "\\b(if|else|scan|map|in)\\b",
+      "name": "keyword.control.maomi"
+    },
+    "keyword-grad": {
+      "match": "\\b(grad)\\b",
+      "name": "keyword.other.grad.maomi"
+    },
+    "keyword-let": {
+      "match": "\\blet\\b",
+      "name": "storage.type.maomi"
+    },
+    "constants-boolean": {
+      "match": "\\b(true|false)\\b",
+      "name": "constant.language.boolean.maomi"
+    },
+    "types": {
+      "match": "\\b(f32|f64|i32|i64|bool)\\b",
+      "name": "storage.type.primitive.maomi"
+    },
+    "numbers-float": {
+      "match": "\\b\\d+\\.\\d+([eE][+-]?\\d+)?\\b|\\b\\d+[eE][+-]?\\d+\\b",
+      "name": "constant.numeric.float.maomi"
+    },
+    "numbers-integer": {
+      "match": "\\b\\d+\\b",
+      "name": "constant.numeric.integer.maomi"
+    },
+    "qualified-call": {
+      "match": "\\b([a-zA-Z_]\\w*)(\\.)([a-zA-Z_]\\w*)\\s*(?=\\()",
+      "captures": {
+        "1": { "name": "entity.name.namespace.maomi" },
+        "2": { "name": "punctuation.accessor.dot.maomi" },
+        "3": { "name": "entity.name.function.call.maomi" }
+      }
+    },
+    "function-call": {
+      "match": "\\b([a-zA-Z_]\\w*)\\s*(?=\\()",
+      "captures": {
+        "1": { "name": "entity.name.function.call.maomi" }
+      }
+    },
+    "operator-arrow": {
+      "match": "->",
+      "name": "punctuation.separator.arrow.maomi"
+    },
+    "operators-comparison": {
+      "match": "==|!=|<=|>=|<|>",
+      "name": "keyword.operator.comparison.maomi"
+    },
+    "operators-arithmetic": {
+      "match": "\\*\\*|[+\\-*/]|@",
+      "name": "keyword.operator.arithmetic.maomi"
+    },
+    "operator-assignment": {
+      "match": "(?<![!=])=(?!=)",
+      "name": "keyword.operator.assignment.maomi"
+    },
+    "dot-accessor": {
+      "match": "\\.",
+      "name": "punctuation.accessor.dot.maomi"
+    },
+    "punctuation": {
+      "patterns": [
+        { "match": "[{}]", "name": "punctuation.section.block.maomi" },
+        { "match": "[()]", "name": "punctuation.section.parens.maomi" },
+        { "match": "[\\[\\]]", "name": "punctuation.section.brackets.maomi" },
+        { "match": ",", "name": "punctuation.separator.comma.maomi" },
+        { "match": ":", "name": "punctuation.separator.colon.maomi" },
+        { "match": ";", "name": "punctuation.terminator.statement.maomi" }
+      ]
+    }
+  }
+}

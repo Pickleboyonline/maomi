@@ -451,8 +451,6 @@ class StableHLOCodegen:
     def _slice_element(self, seq_ssa: str, idx_ssa: str, seq_type: ArrayType, elem_type: MaomiType) -> str:
         """Slice a single element from a 1D+ array at a dynamic index, returning scalar or lower-rank."""
         mlir_seq = _mlir_type(seq_type)
-        mlir_i32 = "tensor<i32>"
-        # Slice with size 1 along first dim, full size on remaining dims
         slice_sizes = [1] + [d for d in seq_type.dims[1:]]
         sizes_str = ", ".join(str(s) for s in slice_sizes)
         sliced_dims = tuple(slice_sizes)
@@ -461,9 +459,8 @@ class StableHLOCodegen:
 
         sliced = self._fresh()
         self._emit(
-            f'{sliced} = "stablehlo.dynamic_slice"({seq_ssa}, {idx_ssa}) '
-            f"{{slice_sizes = array<i64: {sizes_str}>}} "
-            f": ({mlir_seq}, {mlir_i32}) -> {mlir_sliced}"
+            f"{sliced} = stablehlo.dynamic_slice {seq_ssa}, {idx_ssa}, "
+            f"sizes = [{sizes_str}] : ({mlir_seq}, tensor<i32>) -> {mlir_sliced}"
         )
         # Reshape to remove the leading 1 dim
         result = self._fresh()
@@ -475,7 +472,6 @@ class StableHLOCodegen:
                          arr_type: ArrayType, elem_type: MaomiType) -> str:
         """Update a single element in an array at a dynamic index."""
         mlir_arr = _mlir_type(arr_type)
-        mlir_i32 = "tensor<i32>"
         # Reshape elem to have leading dim 1
         if isinstance(elem_type, ScalarType):
             update_dims = (1,)
@@ -490,7 +486,7 @@ class StableHLOCodegen:
         result = self._fresh()
         self._emit(
             f"{result} = stablehlo.dynamic_update_slice {arr_ssa}, {reshaped}, {idx_ssa} "
-            f": ({mlir_arr}, {mlir_update}, {mlir_i32}) -> {mlir_arr}"
+            f": ({mlir_arr}, {mlir_update}, tensor<i32>) -> {mlir_arr}"
         )
         return result
 
@@ -525,7 +521,7 @@ class StableHLOCodegen:
         mlir_seqs = [_mlir_type(st) for st in seq_types]
         mlir_i32 = "tensor<i32>"
 
-        # Create initial values
+        # Create initial values outside the while
         counter_var = self._fresh()
         if expr.reverse:
             self._emit(f"{counter_var} = stablehlo.constant dense<{seq_len - 1}> : {mlir_i32}")
@@ -535,50 +531,44 @@ class StableHLOCodegen:
         output_var = self._fresh()
         self._emit(f"{output_var} = stablehlo.constant dense<0.000000e+00> : {mlir_result}")
 
-        # Limit/zero for condition (defined outside while so it's accessible inside)
-        limit_var = self._fresh()
-        if expr.reverse:
-            self._emit(f"{limit_var} = stablehlo.constant dense<0> : {mlir_i32}")
-        else:
-            self._emit(f"{limit_var} = stablehlo.constant dense<{seq_len}> : {mlir_i32}")
-
-        one_var = self._fresh()
-        self._emit(f"{one_var} = stablehlo.constant dense<1> : {mlir_i32}")
-
-        # Build while arg names and types (unique per while loop)
+        # Build while arg names and types
         n_seqs = len(seq_vals)
-        uid = self._counter  # unique prefix to avoid name collisions
-        ctr_name = f"_c{uid}"
-        carry_name = f"_k{uid}"
-        out_name = f"_o{uid}"
-        seq_names = [f"_s{uid}_{i}" for i in range(n_seqs)]
+        uid = self._counter
+        ctr_name = f"iterC{uid}"
+        carry_name = f"iterK{uid}"
+        out_name = f"iterO{uid}"
+        seq_names = [f"iterS{uid}_{i}" for i in range(n_seqs)]
+
         arg_names = [ctr_name, carry_name, out_name] + seq_names
-        init_vals = [counter_var, init_val, output_var] + seq_vals
+        init_vals_list = [counter_var, init_val, output_var] + seq_vals
         arg_types = [mlir_i32, mlir_init, mlir_result] + mlir_seqs
         n_args = len(arg_names)
 
-        # While header: %result:N = stablehlo.while(%a = %v, ...) : types
+        # Emit custom while format: stablehlo.while(%name = %init, ...) : types
         while_result = self._fresh()
-        while_args = ", ".join(f"%{arg_names[i]} = {init_vals[i]}" for i in range(n_args))
+        header_parts = ", ".join(
+            f"%{arg_names[i]} = {init_vals_list[i]}" for i in range(n_args)
+        )
         types_str = ", ".join(arg_types)
-        self._emit(f"{while_result}:{n_args} = stablehlo.while({while_args}) : {types_str}")
+        self._emit(f"{while_result}:{n_args} = stablehlo.while({header_parts}) : {types_str}")
 
-        # Condition region
-        self._indent += 1
+        # Cond region
         self._emit("cond {")
         self._indent += 1
+        limit_v = self._fresh()
         if expr.reverse:
+            self._emit(f"{limit_v} = stablehlo.constant dense<0> : {mlir_i32}")
             c_cmp = self._fresh()
-            self._emit(f"{c_cmp} = stablehlo.compare GE, %{ctr_name}, {limit_var} : ({mlir_i32}, {mlir_i32}) -> tensor<i1>")
+            self._emit(f"{c_cmp} = stablehlo.compare GE, %{ctr_name}, {limit_v}, SIGNED : ({mlir_i32}, {mlir_i32}) -> tensor<i1>")
         else:
+            self._emit(f"{limit_v} = stablehlo.constant dense<{seq_len}> : {mlir_i32}")
             c_cmp = self._fresh()
-            self._emit(f"{c_cmp} = stablehlo.compare LT, %{ctr_name}, {limit_var} : ({mlir_i32}, {mlir_i32}) -> tensor<i1>")
+            self._emit(f"{c_cmp} = stablehlo.compare LT, %{ctr_name}, {limit_v}, SIGNED : ({mlir_i32}, {mlir_i32}) -> tensor<i1>")
         self._emit(f"stablehlo.return {c_cmp} : tensor<i1>")
         self._indent -= 1
-        self._emit("}")
 
         # Body region
-        self._emit("do {")
+        self._emit("} do {")
         self._indent += 1
 
         # Slice elements from each sequence
@@ -594,20 +584,20 @@ class StableHLOCodegen:
         new_output = self._update_element(f"%{out_name}", new_carry, f"%{ctr_name}", result_type, init_type)
 
         # Update counter
+        one_v = self._fresh()
+        self._emit(f"{one_v} = stablehlo.constant dense<1> : {mlir_i32}")
         new_counter = self._fresh()
         if expr.reverse:
-            self._emit(f"{new_counter} = stablehlo.subtract %{ctr_name}, {one_var} : {mlir_i32}")
+            self._emit(f"{new_counter} = stablehlo.subtract %{ctr_name}, {one_v} : {mlir_i32}")
         else:
-            self._emit(f"{new_counter} = stablehlo.add %{ctr_name}, {one_var} : {mlir_i32}")
+            self._emit(f"{new_counter} = stablehlo.add %{ctr_name}, {one_v} : {mlir_i32}")
 
         # Return new values
         new_vals = [new_counter, new_carry, new_output] + [f"%{sn}" for sn in seq_names]
         vals_str = ", ".join(new_vals)
         self._emit(f"stablehlo.return {vals_str} : {types_str}")
-
         self._indent -= 1
         self._emit("}")
-        self._indent -= 1
 
         # Result is the output buffer (index 2 in while results)
         return f"{while_result}#2"
@@ -654,7 +644,7 @@ class StableHLOCodegen:
         mlir_adj = _mlir_type(adj_type)
         mlir_seqs = [_mlir_type(st) for st in seq_types]
 
-        # Initialize outside the while (so accessible inside regions)
+        # Initialize outside the while
         counter_var = self._fresh()
         self._emit(f"{counter_var} = stablehlo.constant dense<{seq_len - 1}> : {mlir_i32}")
 
@@ -667,23 +657,16 @@ class StableHLOCodegen:
             self._emit(f"{v} = stablehlo.constant dense<0.000000e+00> : {ms}")
             adj_seq_inits.append(v)
 
-        zero_var = self._fresh()
-        self._emit(f"{zero_var} = stablehlo.constant dense<0> : {mlir_i32}")
-        one_var = self._fresh()
-        self._emit(f"{one_var} = stablehlo.constant dense<1> : {mlir_i32}")
-
-        # Build while arg names and types (unique per while loop)
-        # State: counter, adj_carry, adj_seq_0..N-1, fwd_carries, seq_0..N-1, adj_array, init_val, zero, one
+        # Build while arg names and types
+        # State: counter, adj_carry, adj_seq_0..N-1, fwd_carries, seq_0..N-1, adj_array, init_val
         uid = self._counter
-        gc_name = f"_gc{uid}"
-        gac_name = f"_gac{uid}"
-        gas_names = [f"_gas{uid}_{i}" for i in range(n_seqs)]
-        gfwd_name = f"_gfwd{uid}"
-        gos_names = [f"_gos{uid}_{i}" for i in range(n_seqs)]
-        gadj_name = f"_gadj{uid}"
-        ginit_name = f"_ginit{uid}"
-        gzero_name = f"_gz{uid}"
-        gone_name = f"_go{uid}"
+        gc_name = f"gC{uid}"
+        gac_name = f"gAC{uid}"
+        gas_names = [f"gAS{uid}_{i}" for i in range(n_seqs)]
+        gfwd_name = f"gFwd{uid}"
+        gos_names = [f"gOS{uid}_{i}" for i in range(n_seqs)]
+        gadj_name = f"gAdj{uid}"
+        ginit_name = f"gInit{uid}"
 
         arg_names = [gc_name, gac_name]
         init_vals = [counter_var, adj_carry_init]
@@ -711,52 +694,30 @@ class StableHLOCodegen:
         init_vals.append(init_val)
         arg_types_list.append(mlir_init)
 
-        # Thread zero/one constants as while args to avoid capture issues
-        arg_names.append(gzero_name)
-        init_vals.append(zero_var)
-        arg_types_list.append(mlir_i32)
-
-        arg_names.append(gone_name)
-        init_vals.append(one_var)
-        arg_types_list.append(mlir_i32)
-
         n_args = len(arg_names)
         types_str = ", ".join(arg_types_list)
 
-        # Use generic format for while to avoid parser issues with named args
+        # Emit custom while format
         while_result = self._fresh()
-        init_operands = ", ".join(init_vals)
-        in_types = ", ".join(arg_types_list)
-        out_types = ", ".join(arg_types_list)
+        header_parts = ", ".join(
+            f"%{arg_names[i]} = {init_vals[i]}" for i in range(n_args)
+        )
+        self._emit(f"{while_result}:{n_args} = stablehlo.while({header_parts}) : {types_str}")
 
-        # Cond region needs DIFFERENT names from body region (MLIR requires unique SSA names)
-        cond_names = [f"{n}c" for n in arg_names]
-        gc_cond = cond_names[0]  # counter in cond
-        gz_cond = cond_names[-2]  # zero in cond
-
-        bb_cond = ", ".join(f"%{cond_names[i]}: {arg_types_list[i]}" for i in range(n_args))
-        bb_body = ", ".join(f"%{arg_names[i]}: {arg_types_list[i]}" for i in range(n_args))
-
-        z = f"%{gzero_name}"
-        o = f"%{gone_name}"
-
-        self._emit(f"{while_result}:{n_args} = \"stablehlo.while\"({init_operands}) ({{")
+        # Cond region: counter >= 0
+        self._emit("cond {")
         self._indent += 1
-        self._emit(f"^bb0({bb_cond}):")
-        self._indent += 1
-
-        # Condition: counter >= 0
+        zero_c = self._fresh()
+        self._emit(f"{zero_c} = stablehlo.constant dense<0> : {mlir_i32}")
         c_cmp = self._fresh()
-        self._emit(f"{c_cmp} = stablehlo.compare GE, %{gc_cond}, %{gz_cond} : ({mlir_i32}, {mlir_i32}) -> tensor<i1>")
+        self._emit(f"{c_cmp} = stablehlo.compare GE, %{gc_name}, {zero_c}, SIGNED : ({mlir_i32}, {mlir_i32}) -> tensor<i1>")
         self._emit(f"stablehlo.return {c_cmp} : tensor<i1>")
         self._indent -= 1
-        self._indent -= 1
-        self._emit("}, {")
-        self._indent += 1
-        self._emit(f"^bb0({bb_body}):")
+
+        # Body region
+        self._emit("} do {")
         self._indent += 1
 
-        # Body
         # Slice adj_t from adj_array
         adj_t = self._slice_element(f"%{gadj_name}", f"%{gc_name}", adj_type, init_type)
 
@@ -765,15 +726,20 @@ class StableHLOCodegen:
         self._emit(f"{adj_total} = stablehlo.add %{gac_name}, {adj_t} : {mlir_init}")
 
         # Compute prev_carry = select(counter > 0, fwd_carries[counter-1], init)
+        one_b = self._fresh()
+        self._emit(f"{one_b} = stablehlo.constant dense<1> : {mlir_i32}")
+        zero_b = self._fresh()
+        self._emit(f"{zero_b} = stablehlo.constant dense<0> : {mlir_i32}")
+
         prev_idx = self._fresh()
-        self._emit(f"{prev_idx} = stablehlo.subtract %{gc_name}, {o} : {mlir_i32}")
+        self._emit(f"{prev_idx} = stablehlo.subtract %{gc_name}, {one_b} : {mlir_i32}")
         clamped_idx = self._fresh()
-        self._emit(f"{clamped_idx} = stablehlo.clamp {z}, {prev_idx}, %{gc_name} : ({mlir_i32}, {mlir_i32}, {mlir_i32}) -> {mlir_i32}")
+        self._emit(f"{clamped_idx} = stablehlo.clamp {zero_b}, {prev_idx}, %{gc_name} : ({mlir_i32}, {mlir_i32}, {mlir_i32}) -> {mlir_i32}")
 
         fwd_prev = self._slice_element(f"%{gfwd_name}", clamped_idx, fwd_type, init_type)
 
         gt_zero = self._fresh()
-        self._emit(f"{gt_zero} = stablehlo.compare GT, %{gc_name}, {z} : ({mlir_i32}, {mlir_i32}) -> tensor<i1>")
+        self._emit(f"{gt_zero} = stablehlo.compare GT, %{gc_name}, {zero_b}, SIGNED : ({mlir_i32}, {mlir_i32}) -> tensor<i1>")
 
         prev_carry = self._fresh()
         self._emit(f"{prev_carry} = stablehlo.select {gt_zero}, {fwd_prev}, %{ginit_name} : (tensor<i1>, {mlir_init}, {mlir_init}) -> {mlir_init}")
@@ -808,18 +774,16 @@ class StableHLOCodegen:
 
         # Decrement counter
         new_counter = self._fresh()
-        self._emit(f"{new_counter} = stablehlo.subtract %{gc_name}, {o} : {mlir_i32}")
+        self._emit(f"{new_counter} = stablehlo.subtract %{gc_name}, {one_b} : {mlir_i32}")
 
-        # Return new values (include zero/one passthrough)
+        # Return new values
         new_vals = [new_counter, new_adj_carry] + new_adj_seqs
         new_vals += [f"%{gfwd_name}"] + [f"%{gos_names[i]}" for i in range(n_seqs)]
-        new_vals += [f"%{gadj_name}", f"%{ginit_name}", z, o]
+        new_vals += [f"%{gadj_name}", f"%{ginit_name}"]
         vals_str = ", ".join(new_vals)
         self._emit(f"stablehlo.return {vals_str} : {types_str}")
-
         self._indent -= 1
-        self._indent -= 1
-        self._emit(f"}}) : ({in_types}) -> ({out_types})")
+        self._emit("}")
 
         # Extract result based on wrt
         if expr.wrt == "__init__":
