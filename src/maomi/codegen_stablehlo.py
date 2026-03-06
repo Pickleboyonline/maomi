@@ -222,24 +222,27 @@ class StableHLOCodegen:
         result_type = self._type_of(expr)
         mlir_result = _mlir_type(result_type)
 
-        # Broadcast if needed
-        lhs = self._maybe_broadcast(lhs, lt, result_type)
-        rhs = self._maybe_broadcast(rhs, rt, result_type)
-
         var = self._fresh()
 
         if op in _COMPARISON_MAP:
             cmp = _COMPARISON_MAP[op]
-            # For comparisons, operands have the broadcast shape of their numeric type
+            # Broadcast operands to a common numeric type (NOT the bool result)
             if isinstance(result_type, ArrayType):
                 operand_type = ArrayType(_base_of_type(lt), result_type.dims)
             else:
                 operand_type = lt if isinstance(lt, ScalarType) else rt
+            lhs = self._maybe_broadcast(lhs, lt, operand_type)
+            rhs = self._maybe_broadcast(rhs, rt, operand_type)
             mlir_operand = _mlir_type(operand_type)
-            self._emit(f"{var} = stablehlo.compare GT, {lhs}, {rhs}, compare_type = FLOAT : {mlir_operand}")
-            # Fix: use the actual comparison type
-            self._lines[-1] = "  " * self._indent + f"{var} = stablehlo.compare {cmp}, {lhs}, {rhs}, compare_type = FLOAT : {mlir_operand}"
+            self._emit(
+                f"{var} = stablehlo.compare {cmp}, {lhs}, {rhs} "
+                f": ({mlir_operand}, {mlir_operand}) -> {mlir_result}"
+            )
             return var
+
+        # Broadcast for arithmetic ops
+        lhs = self._maybe_broadcast(lhs, lt, result_type)
+        rhs = self._maybe_broadcast(rhs, rt, result_type)
 
         op_map = {
             "+": "stablehlo.add",
@@ -305,7 +308,17 @@ class StableHLOCodegen:
             cond = broadcast_cond
 
         var = self._fresh()
-        self._emit(f"{var} = stablehlo.select {cond}, {then_val}, {else_val} : {mlir_result}")
+        # Determine cond type for select signature
+        if isinstance(cond_type, ScalarType) and isinstance(result_type, ArrayType):
+            cond_mlir = _mlir_type(ArrayType("bool", result_type.dims))
+        elif isinstance(cond_type, ArrayType):
+            cond_mlir = _mlir_type(cond_type)
+        else:
+            cond_mlir = _mlir_type(ScalarType("bool"))
+        self._emit(
+            f"{var} = stablehlo.select {cond}, {then_val}, {else_val} "
+            f": ({cond_mlir}, {mlir_result}, {mlir_result}) -> {mlir_result}"
+        )
         return var
 
     def _gen_call(self, expr: CallExpr, env: dict[str, str]) -> str:
@@ -391,9 +404,21 @@ class StableHLOCodegen:
         var = self._fresh()
         self._emit(
             f"{var} = stablehlo.reduce({arg} init: {init_var}) "
-            f"applies stablehlo.add across dimensions = [{dims_str}] "
+            f"across dimensions = [{dims_str}] "
             f": ({_mlir_type(arg_type)}, {mlir_scalar}) -> {mlir_scalar}"
         )
+        # Emit reducer region
+        self._indent += 1
+        a_var = self._fresh()
+        b_var = self._fresh()
+        self._emit(f"reducer({a_var}: {mlir_scalar}, {b_var}: {mlir_scalar}) {{")
+        self._indent += 1
+        sum_var = self._fresh()
+        self._emit(f"{sum_var} = stablehlo.add {a_var}, {b_var} : {mlir_scalar}")
+        self._emit(f"stablehlo.return {sum_var} : {mlir_scalar}")
+        self._indent -= 1
+        self._emit("}")
+        self._indent -= 1
         return var
 
     def _gen_transpose(self, expr: CallExpr, env: dict[str, str]) -> str:
@@ -560,11 +585,59 @@ class StableHLOCodegen:
         seq_val = self._gen_expr(expr.sequence, env)
         seq_type = self._type_of(expr.sequence)
 
-        # For trivially batchable bodies, just bind elem_var to the full sequence
-        # and generate the body — elementwise ops naturally work on batched shapes
+        if not isinstance(seq_type, ArrayType):
+            raise MaomiError("codegen: map sequence must be array", "<codegen>", 0, 0)
+
+        batch_dim = seq_type.dims[0]
+
+        # Lift all body expression types to include the batch dimension
+        self._lift_body_types(expr.body, batch_dim)
+
         body_env = dict(env)
         body_env[expr.elem_var] = seq_val
         return self._gen_block(expr.body, body_env)
+
+    def _lift_body_types(self, block, batch_dim):
+        """Prepend batch_dim to all types in a block for map codegen."""
+        from .ast_nodes import Block, LetStmt, ExprStmt
+        for stmt in block.stmts:
+            if isinstance(stmt, LetStmt):
+                self._lift_expr_type(stmt.value, batch_dim)
+            elif isinstance(stmt, ExprStmt):
+                self._lift_expr_type(stmt.expr, batch_dim)
+        if block.expr is not None:
+            self._lift_expr_type(block.expr, batch_dim)
+
+    def _lift_expr_type(self, expr, batch_dim):
+        """Recursively lift an expression's type to include batch_dim.
+        Literals stay scalar — they'll be broadcast by _maybe_broadcast."""
+        # Don't lift literals — they remain scalar and broadcast naturally
+        if isinstance(expr, (IntLiteral, FloatLiteral, BoolLiteral)):
+            return
+
+        t = self.type_map.get(id(expr))
+        if t is not None:
+            if isinstance(t, ScalarType):
+                self.type_map[id(expr)] = ArrayType(t.base, (batch_dim,))
+            elif isinstance(t, ArrayType):
+                self.type_map[id(expr)] = ArrayType(t.base, (batch_dim,) + t.dims)
+
+        # Recurse into sub-expressions
+        match expr:
+            case BinOp(left=left, right=right):
+                self._lift_expr_type(left, batch_dim)
+                self._lift_expr_type(right, batch_dim)
+            case UnaryOp(operand=operand):
+                self._lift_expr_type(operand, batch_dim)
+            case CallExpr(args=args):
+                for a in args:
+                    self._lift_expr_type(a, batch_dim)
+            case IfExpr():
+                self._lift_expr_type(expr.condition, batch_dim)
+                self._lift_body_types(expr.then_block, batch_dim)
+                self._lift_body_types(expr.else_block, batch_dim)
+            case _:
+                pass
 
     # -- Broadcasting helpers --
 
