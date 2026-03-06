@@ -21,7 +21,17 @@ class ArrayType:
         return f"{self.base}[{dims_str}]"
 
 
-MaomiType = ScalarType | ArrayType
+@dataclass(frozen=True)
+class StructType:
+    name: str
+    fields: tuple[tuple[str, MaomiType], ...]  # ordered (name, type) pairs
+
+    def __str__(self) -> str:
+        fields_str = ", ".join(f"{n}: {t}" for n, t in self.fields)
+        return f"{self.name} {{ {fields_str} }}"
+
+
+MaomiType = ScalarType | ArrayType | StructType
 
 # Convenience constants
 F32 = ScalarType("f32")

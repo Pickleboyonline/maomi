@@ -312,6 +312,57 @@ class TestCallback:
             }
         """)
 
+class TestStructTypes:
+    def test_struct_field_access(self):
+        check_ok("""
+            struct Point { x: f32, y: f32 }
+            fn f(p: Point) -> f32 { p.x }
+        """)
+
+    def test_struct_literal_valid(self):
+        check_ok("""
+            struct Point { x: f32, y: f32 }
+            fn f() -> Point { Point { x: 1.0, y: 2.0 } }
+        """)
+
+    def test_unknown_struct(self):
+        check_err(
+            "fn f(p: Unknown) -> f32 { 0.0 }",
+            "unknown type",
+        )
+
+    def test_wrong_field_name(self):
+        check_err("""
+            struct Point { x: f32, y: f32 }
+            fn f() -> Point { Point { x: 1.0, z: 2.0 } }
+        """, "expected field")
+
+    def test_wrong_field_type(self):
+        check_err("""
+            struct Point { x: f32, y: f32 }
+            fn f() -> Point { Point { x: 1, y: 2.0 } }
+        """, "expected")
+
+    def test_field_access_nonexistent(self):
+        check_err("""
+            struct Point { x: f32 }
+            fn f(p: Point) -> f32 { p.z }
+        """, "no field")
+
+    def test_with_valid(self):
+        check_ok("""
+            struct Point { x: f32, y: f32 }
+            fn f(p: Point) -> Point { p with { x = 1.0 } }
+        """)
+
+    def test_nested_struct(self):
+        check_ok("""
+            struct Inner { w: f32 }
+            struct Outer { inner: Inner, b: f32 }
+            fn f(o: Outer) -> f32 { o.inner.w }
+        """)
+
+
 class TestFixtures:
     fixtures_dir = Path(__file__).parent / "fixtures"
 

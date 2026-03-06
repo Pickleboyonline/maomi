@@ -304,3 +304,17 @@ class TestCallbackAD:
             }
         """)
         assert "func.func @f" in mlir
+
+
+class TestStructAD:
+    def test_grad_through_field_access(self):
+        """grad of s.x * s.x w.r.t. s where s is a struct should compile through codegen."""
+        out = ad_codegen("""
+            struct Params { x: f32, y: f32 }
+            fn f(s: Params) -> Params {
+                let loss = s.x * s.x;
+                grad(loss, s)
+            }
+        """)
+        assert "module {" in out
+        assert "func.func @f" in out

@@ -84,7 +84,7 @@ class _ResolveContext:
 
         # Main file's own functions come last (can call imported ones)
         merged_fns.extend(program.functions)
-        return Program([], merged_fns, program.span)
+        return Program([], program.struct_defs, merged_fns, program.span)
 
     def _load_module(self, mod_path: str, module_name: str) -> list[FnDef]:
         cache_key = f"{mod_path}::{module_name}"

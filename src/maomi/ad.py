@@ -38,11 +38,14 @@ from .ast_nodes import (
     ScanExpr,
     MapExpr,
     GradExpr,
+    StructLiteral,
+    FieldAccess,
+    WithExpr,
     _ScanGrad,
     Span,
     Expr,
 )
-from .types import MaomiType, ScalarType, ArrayType
+from .types import MaomiType, ScalarType, ArrayType, StructType
 from .errors import MaomiError
 
 _DUMMY_SPAN = Span(0, 0, 0, 0)
@@ -95,6 +98,15 @@ def _collect_free_vars_inner(expr: Expr, result: set[str]):
                 for ev in evs:
                     inner.discard(ev)
                 result.update(inner)
+        case StructLiteral(fields=fields):
+            for _, fv in fields:
+                _collect_free_vars_inner(fv, result)
+        case FieldAccess(object=obj):
+            _collect_free_vars_inner(obj, result)
+        case WithExpr(base=base, updates=updates):
+            _collect_free_vars_inner(base, result)
+            for _, ve in updates:
+                _collect_free_vars_inner(ve, result)
 
 
 def transform_grad(program: Program, type_map: dict[int, MaomiType]) -> Program:
@@ -102,7 +114,7 @@ def transform_grad(program: Program, type_map: dict[int, MaomiType]) -> Program:
     fn_defs = {fn.name: fn for fn in program.functions}
     transformer = ADTransform(type_map, fn_defs)
     new_fns = [transformer.transform_fn(fn) for fn in program.functions]
-    return Program(program.imports, new_fns, program.span)
+    return Program(program.imports, program.struct_defs, new_fns, program.span)
 
 
 class ADTransform:
@@ -111,6 +123,7 @@ class ADTransform:
         self.fn_defs = fn_defs
         self._name_counter = 0
         self._inlining_stack: set[str] = set()  # cycle detection for inlining
+        self._tape_exprs: dict[str, Expr] = {}  # tape name -> original AST expression
 
     def _fresh_name(self, prefix: str = "_ad") -> str:
         self._name_counter += 1
@@ -191,6 +204,22 @@ class ADTransform:
                 )
                 self._copy_type(expr, result)
                 return result
+            case StructLiteral(name=name, fields=fields):
+                new_fields = [(fn, self._transform_expr(fv)) for fn, fv in fields]
+                result = StructLiteral(name, new_fields, expr.span)
+                self._copy_type(expr, result)
+                return result
+            case FieldAccess(object=obj, field=field):
+                new_obj = self._transform_expr(obj)
+                result = FieldAccess(new_obj, field, expr.span)
+                self._copy_type(expr, result)
+                return result
+            case WithExpr(base=base, updates=updates):
+                new_base = self._transform_expr(base)
+                new_updates = [(path, self._transform_expr(ve)) for path, ve in updates]
+                result = WithExpr(new_base, new_updates, expr.span)
+                self._copy_type(expr, result)
+                return result
             case _:
                 return expr
 
@@ -208,6 +237,11 @@ class ADTransform:
         tape: list[tuple[str, Expr]] = []  # (name, expr)
         var_map: dict[int, str] = {}  # id(expr) -> tape variable name
         self._linearize(expr, tape, var_map, let_env)
+
+        # Build lookup from tape names to original AST expressions so
+        # backprop can reference intermediate values without creating
+        # Identifiers for internal tape names that codegen doesn't know about.
+        self._tape_exprs = {name: node for name, node in tape}
 
         # The output is the last tape entry
         output_name = var_map[id(expr)]
@@ -305,6 +339,24 @@ class ADTransform:
                 self._linearize(init, tape, var_map, let_env)
                 for s in seqs:
                     self._linearize(s, tape, var_map, let_env)
+                name = self._fresh_name("v")
+                var_map[id(expr)] = name
+                tape.append((name, expr))
+            case FieldAccess(object=obj):
+                self._linearize(obj, tape, var_map, let_env)
+                name = self._fresh_name("v")
+                var_map[id(expr)] = name
+                tape.append((name, expr))
+            case StructLiteral(fields=fields):
+                for _, fv in fields:
+                    self._linearize(fv, tape, var_map, let_env)
+                name = self._fresh_name("v")
+                var_map[id(expr)] = name
+                tape.append((name, expr))
+            case WithExpr(base=base, updates=updates):
+                self._linearize(base, tape, var_map, let_env)
+                for _, ve in updates:
+                    self._linearize(ve, tape, var_map, let_env)
                 name = self._fresh_name("v")
                 var_map[id(expr)] = name
                 tape.append((name, expr))
@@ -407,6 +459,22 @@ class ADTransform:
                 inner_subst = {k: v for k, v in subst.items() if k != cv and k not in evs}
                 new_body = self._substitute_block(body, inner_subst)
                 node = ScanExpr(cv, evs, new_init, new_seqs, new_body, expr.span, expr.reverse)
+                self._copy_type(expr, node)
+                return node
+            case StructLiteral(name=name, fields=fields):
+                new_fields = [(fn, self._substitute(fv, subst)) for fn, fv in fields]
+                node = StructLiteral(name, new_fields, expr.span)
+                self._copy_type(expr, node)
+                return node
+            case FieldAccess(object=obj, field=field):
+                new_obj = self._substitute(obj, subst)
+                node = FieldAccess(new_obj, field, expr.span)
+                self._copy_type(expr, node)
+                return node
+            case WithExpr(base=base, updates=updates):
+                new_base = self._substitute(base, subst)
+                new_updates = [(path, self._substitute(ve, subst)) for path, ve in updates]
+                node = WithExpr(new_base, new_updates, expr.span)
                 self._copy_type(expr, node)
                 return node
             case _:
@@ -515,6 +583,29 @@ class ADTransform:
 
             case ScanExpr(carry_var=cv, elem_vars=evs, init=init, sequences=seqs, body=body):
                 self._backprop_scan(cv, evs, init, seqs, body, adj, adjoints, var_map, node)
+
+            case FieldAccess(object=obj, field=field):
+                # adj of obj += struct with only 'field' set to adj
+                obj_name = var_map[id(obj)]
+                obj_type = self._type_of(obj)
+                if isinstance(obj_type, StructType):
+                    partial = self._make_struct_with_field(obj_type, field, adj)
+                    self._accumulate(adjoints, obj_name, partial)
+
+            case StructLiteral(name=sname, fields=fields):
+                # adj of each field value = extract that field from adj
+                stype = self._type_of(node)
+                if isinstance(stype, StructType):
+                    for i, (fn, fv) in enumerate(fields):
+                        if id(fv) in var_map:
+                            fv_name = var_map[id(fv)]
+                            field_adj = FieldAccess(adj, fn, _DUMMY_SPAN)
+                            ft = dict(stype.fields)[fn]
+                            self.type_map[id(field_adj)] = ft
+                            self._accumulate(adjoints, fv_name, field_adj)
+
+            case WithExpr():
+                pass  # WithExpr gradients are complex; skip for now
 
             case _:
                 raise MaomiError(
@@ -749,6 +840,10 @@ class ADTransform:
         return node
 
     def _make_ref(self, name: str, t: MaomiType | None) -> Expr:
+        # If the name is a tape-internal name, return the original expression
+        # so codegen sees valid AST instead of undefined internal variables.
+        if name in self._tape_exprs:
+            return self._tape_exprs[name]
         node = Identifier(name, _DUMMY_SPAN)
         if t is not None:
             self.type_map[id(node)] = t
@@ -767,6 +862,12 @@ class ADTransform:
                     self.type_map[id(node)] = ArrayType(lt.base, tuple(result_dims))
                 else:
                     self.type_map[id(node)] = ScalarType(lt.base)
+            elif isinstance(lt, ArrayType):
+                self.type_map[id(node)] = lt
+            elif isinstance(rt, ArrayType):
+                self.type_map[id(node)] = rt
+            elif lt is not None:
+                self.type_map[id(node)] = lt
         elif lt is not None and rt is not None:
             # Use the "larger" type (broadcast)
             if isinstance(lt, ArrayType):
@@ -795,6 +896,8 @@ class ADTransform:
             arg_t = self.type_map.get(id(args[0]))
             if isinstance(arg_t, ArrayType) and len(arg_t.dims) == 2:
                 self.type_map[id(node)] = ArrayType(arg_t.base, (arg_t.dims[1], arg_t.dims[0]))
+            elif arg_t is not None:
+                self.type_map[id(node)] = arg_t
         elif args:
             t = self.type_map.get(id(args[0]))
             if t is not None:
@@ -802,14 +905,58 @@ class ADTransform:
         return node
 
     def _make_zero(self, t: MaomiType) -> Expr:
+        if isinstance(t, StructType):
+            return self._make_zero_struct(t)
         node = FloatLiteral(0.0, _DUMMY_SPAN)
         self.type_map[id(node)] = t
+        return node
+
+    def _make_zero_struct(self, t: StructType) -> Expr:
+        """Create a struct literal with all fields zeroed."""
+        fields = []
+        for fn, ft in t.fields:
+            fields.append((fn, self._make_zero(ft)))
+        node = StructLiteral(t.name, fields, _DUMMY_SPAN)
+        self.type_map[id(node)] = t
+        return node
+
+    def _make_struct_with_field(self, stype: StructType, field_name: str, value: Expr) -> Expr:
+        """Create a struct literal with one field set to value, rest zeroed."""
+        fields = []
+        for fn, ft in stype.fields:
+            if fn == field_name:
+                fields.append((fn, value))
+            else:
+                fields.append((fn, self._make_zero(ft)))
+        node = StructLiteral(stype.name, fields, _DUMMY_SPAN)
+        self.type_map[id(node)] = stype
         return node
 
     def _accumulate(self, adjoints: dict[str, Expr], name: str, contribution: Expr):
         """Add contribution to the adjoint of name."""
         if name in adjoints:
             existing = adjoints[name]
-            adjoints[name] = self._make_binop("+", existing, contribution)
+            # For struct-typed adjoints, do field-wise addition
+            existing_type = self.type_map.get(id(existing))
+            if isinstance(existing_type, StructType):
+                adjoints[name] = self._struct_add(existing, contribution, existing_type)
+            else:
+                adjoints[name] = self._make_binop("+", existing, contribution)
         else:
             adjoints[name] = contribution
+
+    def _struct_add(self, a: Expr, b: Expr, stype: StructType) -> Expr:
+        """Field-wise addition of two struct-typed expressions."""
+        fields = []
+        for fn, ft in stype.fields:
+            fa = FieldAccess(a, fn, _DUMMY_SPAN)
+            fb = FieldAccess(b, fn, _DUMMY_SPAN)
+            self.type_map[id(fa)] = ft
+            self.type_map[id(fb)] = ft
+            if isinstance(ft, StructType):
+                fields.append((fn, self._struct_add(fa, fb, ft)))
+            else:
+                fields.append((fn, self._make_binop("+", fa, fb)))
+        node = StructLiteral(stype.name, fields, _DUMMY_SPAN)
+        self.type_map[id(node)] = stype
+        return node

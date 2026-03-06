@@ -348,3 +348,67 @@ class TestGrad:
         fn = prog.functions[0]
         assert isinstance(fn.body.expr, GradExpr)
         assert fn.body.expr.wrt == "w"
+
+
+class TestStructParsing:
+    def test_struct_def(self):
+        prog = parse("struct Point { x: f32, y: f32 } fn f() -> f32 { 0.0 }")
+        assert len(prog.struct_defs) == 1
+        sd = prog.struct_defs[0]
+        assert sd.name == "Point"
+        assert len(sd.fields) == 2
+        assert sd.fields[0][0] == "x"
+        assert sd.fields[1][0] == "y"
+
+    def test_struct_literal(self):
+        prog = parse("struct Point { x: f32, y: f32 } fn f() -> Point { Point { x: 1.0, y: 2.0 } }")
+        fn = prog.functions[0]
+        expr = fn.body.expr
+        assert isinstance(expr, StructLiteral)
+        assert expr.name == "Point"
+        assert len(expr.fields) == 2
+
+    def test_field_access(self):
+        prog = parse("struct Point { x: f32 } fn f(p: Point) -> f32 { p.x }")
+        fn = prog.functions[0]
+        expr = fn.body.expr
+        assert isinstance(expr, FieldAccess)
+        assert expr.field == "x"
+
+    def test_nested_field_access(self):
+        prog = parse("""
+            struct Inner { w: f32 }
+            struct Outer { pcn: Inner }
+            fn f(b: Outer) -> f32 { b.pcn.w }
+        """)
+        fn = prog.functions[0]
+        expr = fn.body.expr
+        assert isinstance(expr, FieldAccess)
+        assert expr.field == "w"
+        assert isinstance(expr.object, FieldAccess)
+        assert expr.object.field == "pcn"
+
+    def test_with_expr(self):
+        prog = parse("struct Point { x: f32, y: f32 } fn f(p: Point) -> Point { p with { x = 1.0 } }")
+        fn = prog.functions[0]
+        expr = fn.body.expr
+        assert isinstance(expr, WithExpr)
+        assert len(expr.updates) == 1
+        assert expr.updates[0][0] == ["x"]
+
+    def test_with_nested_path(self):
+        prog = parse("""
+            struct Inner { w: f32 }
+            struct Outer { pcn: Inner }
+            fn f(b: Outer) -> Outer { b with { pcn.w = 1.0 } }
+        """)
+        fn = prog.functions[0]
+        expr = fn.body.expr
+        assert isinstance(expr, WithExpr)
+        assert expr.updates[0][0] == ["pcn", "w"]
+
+    def test_struct_type_annotation(self):
+        prog = parse("struct Point { x: f32 } fn f(p: Point) -> Point { p }")
+        fn = prog.functions[0]
+        assert fn.params[0].type_annotation.base == "Point"
+        assert fn.return_type.base == "Point"

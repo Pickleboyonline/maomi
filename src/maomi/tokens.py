@@ -24,6 +24,8 @@ class TokenType(StrEnum):
     IMPORT = auto()
     FROM = auto()
     AS = auto()
+    STRUCT = auto()
+    WITH = auto()
 
     # Type keywords
     F32 = auto()
@@ -94,4 +96,6 @@ KEYWORDS: dict[str, TokenType] = {
     "import": TokenType.IMPORT,
     "from": TokenType.FROM,
     "as": TokenType.AS,
+    "struct": TokenType.STRUCT,
+    "with": TokenType.WITH,
 }

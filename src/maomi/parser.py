@@ -23,6 +23,10 @@ from .ast_nodes import (
     ScanExpr,
     MapExpr,
     GradExpr,
+    StructDef,
+    StructLiteral,
+    FieldAccess,
+    WithExpr,
     Expr,
 )
 from .errors import ParseError
@@ -87,10 +91,14 @@ class Parser:
         imports: list[ImportDecl] = []
         while self._check(TokenType.IMPORT) or self._check(TokenType.FROM):
             imports.append(self._parse_import())
+        struct_defs: list[StructDef] = []
         functions: list[FnDef] = []
         while not self._at_end():
-            functions.append(self._parse_fn_def())
-        return Program(imports, functions, self._span_from(start))
+            if self._check(TokenType.STRUCT):
+                struct_defs.append(self._parse_struct_def())
+            else:
+                functions.append(self._parse_fn_def())
+        return Program(imports, struct_defs, functions, self._span_from(start))
 
     # -- Import declarations --
 
@@ -132,6 +140,28 @@ class Parser:
             alias = self._expect(TokenType.IDENT).value
         return (name, alias)
 
+    # -- Struct definition --
+
+    def _parse_struct_def(self) -> StructDef:
+        start = self._expect(TokenType.STRUCT)
+        name = self._expect(TokenType.IDENT).value
+        self._expect(TokenType.LBRACE)
+        fields: list[tuple[str, TypeAnnotation]] = []
+        if not self._check(TokenType.RBRACE):
+            field_name = self._expect(TokenType.IDENT).value
+            self._expect(TokenType.COLON)
+            field_type = self._parse_type()
+            fields.append((field_name, field_type))
+            while self._match(TokenType.COMMA):
+                if self._check(TokenType.RBRACE):
+                    break  # trailing comma
+                field_name = self._expect(TokenType.IDENT).value
+                self._expect(TokenType.COLON)
+                field_type = self._parse_type()
+                fields.append((field_name, field_type))
+        self._expect(TokenType.RBRACE)
+        return StructDef(name, fields, self._span_from(start))
+
     # -- Function definition --
 
     def _parse_fn_def(self) -> FnDef:
@@ -165,16 +195,19 @@ class Parser:
 
     def _parse_type(self) -> TypeAnnotation:
         start = self._current()
-        if start.type not in BASE_TYPES:
-            raise self._error(f"expected type, got {start.type.value}")
-        base = self._advance().value
-        dims = None
-        if self._match(TokenType.LBRACKET):
-            dims = [self._parse_dim()]
-            while self._match(TokenType.COMMA):
-                dims.append(self._parse_dim())
-            self._expect(TokenType.RBRACKET)
-        return TypeAnnotation(base, dims, self._span_from(start))
+        if start.type in BASE_TYPES:
+            base = self._advance().value
+            dims = None
+            if self._match(TokenType.LBRACKET):
+                dims = [self._parse_dim()]
+                while self._match(TokenType.COMMA):
+                    dims.append(self._parse_dim())
+                self._expect(TokenType.RBRACKET)
+            return TypeAnnotation(base, dims, self._span_from(start))
+        if start.type == TokenType.IDENT:
+            base = self._advance().value
+            return TypeAnnotation(base, None, self._span_from(start))
+        raise self._error(f"expected type, got {start.type.value}")
 
     def _parse_dim(self) -> Dim:
         tok = self._current()
@@ -232,7 +265,10 @@ class Parser:
             return self._parse_grad()
         if self._check(TokenType.IF):
             return self._parse_if_expr()
-        return self._parse_comparison()
+        expr = self._parse_comparison()
+        if self._check(TokenType.WITH):
+            return self._parse_with(expr)
+        return expr
 
     def _parse_scan(self) -> ScanExpr:
         start = self._expect(TokenType.SCAN)
@@ -295,6 +331,30 @@ class Parser:
         else_block = self._parse_block()
         return IfExpr(condition, then_block, else_block, self._span_from(start))
 
+    def _parse_with(self, base: Expr) -> WithExpr:
+        start = self._expect(TokenType.WITH)
+        self._expect(TokenType.LBRACE)
+        updates: list[tuple[list[str], Expr]] = []
+        if not self._check(TokenType.RBRACE):
+            path, value = self._parse_with_field()
+            updates.append((path, value))
+            while self._match(TokenType.COMMA):
+                if self._check(TokenType.RBRACE):
+                    break  # trailing comma
+                path, value = self._parse_with_field()
+                updates.append((path, value))
+        self._expect(TokenType.RBRACE)
+        return WithExpr(base, updates, Span(base.span.line_start, base.span.col_start,
+                        self.tokens[self.pos - 1].line, self.tokens[self.pos - 1].col + 1))
+
+    def _parse_with_field(self) -> tuple[list[str], Expr]:
+        path = [self._expect(TokenType.IDENT).value]
+        while self._match(TokenType.DOT):
+            path.append(self._expect(TokenType.IDENT).value)
+        self._expect(TokenType.ASSIGN)
+        value = self._parse_expr()
+        return path, value
+
     def _parse_comparison(self) -> Expr:
         left = self._parse_addition()
         if self._current().type in COMPARISON_OPS:
@@ -340,27 +400,67 @@ class Parser:
             start = self._advance()
             operand = self._parse_unary()
             return UnaryOp("-", operand, self._span_from(start))
-        return self._parse_call()
+        return self._parse_postfix()
 
-    def _parse_call(self) -> Expr:
+    def _parse_postfix(self) -> Expr:
         expr = self._parse_primary()
-        # Handle qualified names: math.relu(...)
-        if isinstance(expr, Identifier) and self._check(TokenType.DOT):
-            self._advance()  # consume dot
-            member = self._expect(TokenType.IDENT)
-            qualified = f"{expr.name}.{member.value}"
-            span = Span(expr.span.line_start, expr.span.col_start, member.line, member.col + len(member.value))
-            expr = Identifier(qualified, span)
-        while self._check(TokenType.LPAREN) and isinstance(expr, Identifier):
-            self._advance()
-            args: list[Expr] = []
-            if not self._check(TokenType.RPAREN):
-                args.append(self._parse_expr())
-                while self._match(TokenType.COMMA):
+        while True:
+            if self._check(TokenType.LPAREN) and isinstance(expr, Identifier):
+                # Function call (including qualified: math.relu(...))
+                self._advance()
+                args: list[Expr] = []
+                if not self._check(TokenType.RPAREN):
                     args.append(self._parse_expr())
-            self._expect(TokenType.RPAREN)
-            expr = CallExpr(expr.name, args, Span(expr.span.line_start, expr.span.col_start, self.tokens[self.pos - 1].line, self.tokens[self.pos - 1].col + 1))
+                    while self._match(TokenType.COMMA):
+                        args.append(self._parse_expr())
+                self._expect(TokenType.RPAREN)
+                expr = CallExpr(expr.name, args, Span(expr.span.line_start, expr.span.col_start, self.tokens[self.pos - 1].line, self.tokens[self.pos - 1].col + 1))
+            elif self._check(TokenType.LBRACE) and isinstance(expr, Identifier) and self._is_struct_literal():
+                # Struct literal: Name { field: expr, ... }
+                expr = self._parse_struct_literal(expr)
+            elif self._check(TokenType.DOT):
+                # DOT: either module-qualified name (math.relu(...)) or struct field access (point.x)
+                self._advance()
+                field_tok = self._expect(TokenType.IDENT)
+                if isinstance(expr, Identifier) and self._check(TokenType.LPAREN):
+                    # Module-qualified call: math.relu(...) — flatten to qualified identifier
+                    qualified = f"{expr.name}.{field_tok.value}"
+                    expr = Identifier(qualified, Span(expr.span.line_start, expr.span.col_start, field_tok.line, field_tok.col + len(field_tok.value)))
+                else:
+                    # Struct field access
+                    expr = FieldAccess(expr, field_tok.value, Span(expr.span.line_start, expr.span.col_start, field_tok.line, field_tok.col + len(field_tok.value)))
+            else:
+                break
         return expr
+
+    def _is_struct_literal(self) -> bool:
+        """Lookahead: check if LBRACE starts a struct literal (IDENT COLON) or a block."""
+        # Current token is LBRACE. Check tokens after it.
+        p = self.pos + 1  # skip LBRACE
+        if p < len(self.tokens) and self.tokens[p].type == TokenType.RBRACE:
+            return True  # empty struct literal: Name {}
+        if p + 1 < len(self.tokens):
+            return (self.tokens[p].type == TokenType.IDENT and
+                    self.tokens[p + 1].type == TokenType.COLON)
+        return False
+
+    def _parse_struct_literal(self, name_expr: Identifier) -> StructLiteral:
+        self._expect(TokenType.LBRACE)
+        fields: list[tuple[str, Expr]] = []
+        if not self._check(TokenType.RBRACE):
+            field_name = self._expect(TokenType.IDENT).value
+            self._expect(TokenType.COLON)
+            value = self._parse_expr()
+            fields.append((field_name, value))
+            while self._match(TokenType.COMMA):
+                if self._check(TokenType.RBRACE):
+                    break  # trailing comma
+                field_name = self._expect(TokenType.IDENT).value
+                self._expect(TokenType.COLON)
+                value = self._parse_expr()
+                fields.append((field_name, value))
+        self._expect(TokenType.RBRACE)
+        return StructLiteral(name_expr.name, fields, Span(name_expr.span.line_start, name_expr.span.col_start, self.tokens[self.pos - 1].line, self.tokens[self.pos - 1].col + 1))
 
     def _parse_primary(self) -> Expr:
         tok = self._current()
