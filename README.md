@@ -1,4 +1,4 @@
-# Maomi 猫咪
+# Maomi 猫咪 🐱
 
 A pure functional ML language that compiles to XLA via StableHLO. **If it compiles, it's fast.**
 
