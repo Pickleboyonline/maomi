@@ -17,6 +17,8 @@ from .ast_nodes import (
     GradExpr,
     UnaryOp,
     BinOp,
+    IndexExpr,
+    IndexComponent,
     Expr,
 )
 from .lexer import Lexer
@@ -192,5 +194,18 @@ def _rewrite_expr(expr: Expr, rename_map: dict[str, str]) -> Expr:
             return MapExpr(expr.elem_var, new_seq, new_body, expr.span)
         case GradExpr():
             return GradExpr(_rewrite_expr(expr.expr, rename_map), expr.wrt, expr.span)
+        case IndexExpr(base=base, indices=indices, span=span):
+            new_base = _rewrite_expr(base, rename_map)
+            new_indices = [
+                IndexComponent(
+                    ic.kind,
+                    _rewrite_expr(ic.value, rename_map) if ic.value is not None else None,
+                    _rewrite_expr(ic.start, rename_map) if ic.start is not None else None,
+                    _rewrite_expr(ic.end, rename_map) if ic.end is not None else None,
+                    ic.span,
+                )
+                for ic in indices
+            ]
+            return IndexExpr(new_base, new_indices, span)
         case _:
             return expr

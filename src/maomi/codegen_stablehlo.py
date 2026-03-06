@@ -19,7 +19,10 @@ from .ast_nodes import (
     StructLiteral,
     FieldAccess,
     WithExpr,
+    IndexExpr,
+    IndexComponent,
     _ScanGrad,
+    _IndexGrad,
     Expr,
 )
 from .types import MaomiType, ScalarType, ArrayType, StructType
@@ -209,8 +212,12 @@ class StableHLOCodegen:
                 return self._gen_field_access(expr, env)
             case WithExpr():
                 return self._gen_with(expr, env)
+            case IndexExpr():
+                return self._gen_index(expr, env)
             case _ScanGrad():
                 return self._gen_scan_grad(expr, env)
+            case _IndexGrad():
+                return self._gen_index_grad(expr, env)
             case _:
                 raise MaomiError(
                     f"codegen: unsupported expression type {type(expr).__name__}",
@@ -547,6 +554,175 @@ class StableHLOCodegen:
         vals_str = ", ".join(field_vals)
         self._emit(f"{var} = stablehlo.tuple {vals_str} : {_mlir_type(stype)}")
         return var
+
+    # -- Index codegen --
+
+    def _gen_index(self, expr: IndexExpr, env: dict[str, str]) -> str:
+        base_ssa = self._gen_expr(expr.base, env)
+        base_type = self._type_of(expr.base)
+        result_type = self._type_of(expr)
+
+        if not isinstance(base_type, ArrayType):
+            raise MaomiError("codegen: indexing non-array", "<codegen>", expr.span.line_start, expr.span.col_start)
+
+        # Build per-dimension start indices and slice sizes
+        start_ssas: list[str] = []
+        slice_sizes: list[int] = []
+        squeezed_axes: list[int] = []  # axes to remove (single-indexed)
+        all_static = True
+
+        for i, ic in enumerate(expr.indices):
+            dim = base_type.dims[i]
+            if ic.kind == "single":
+                idx_ssa = self._gen_expr(ic.value, env)
+                start_ssas.append(idx_ssa)
+                slice_sizes.append(1)
+                squeezed_axes.append(i)
+                if not isinstance(ic.value, IntLiteral):
+                    all_static = False
+            elif ic.kind == "slice":
+                start_val = ic.start.value  # IntLiteral guaranteed by type checker
+                end_val = ic.end.value
+                s = self._gen_literal(start_val, ScalarType("i32"))
+                start_ssas.append(s)
+                slice_sizes.append(end_val - start_val)
+            elif ic.kind == "full":
+                s = self._gen_literal(0, ScalarType("i32"))
+                start_ssas.append(s)
+                if isinstance(dim, int):
+                    slice_sizes.append(dim)
+                else:
+                    raise MaomiError(f"codegen: symbolic dim '{dim}' in index", "<codegen>", 0, 0)
+
+        # Trailing unindexed axes
+        for i in range(len(expr.indices), len(base_type.dims)):
+            dim = base_type.dims[i]
+            s = self._gen_literal(0, ScalarType("i32"))
+            start_ssas.append(s)
+            if isinstance(dim, int):
+                slice_sizes.append(dim)
+            else:
+                raise MaomiError(f"codegen: symbolic dim '{dim}' in index", "<codegen>", 0, 0)
+
+        # Intermediate type: same rank as base, but with size-1 for single-indexed dims
+        inter_dims = tuple(slice_sizes)
+        inter_type = ArrayType(base_type.base, inter_dims)
+        mlir_base = _mlir_type(base_type)
+        mlir_inter = _mlir_type(inter_type)
+
+        # Check if all starts are static IntLiterals → use stablehlo.slice
+        if all_static and all(isinstance(ic.value, IntLiteral) for ic in expr.indices if ic.kind == "single"):
+            # Build static slice: stablehlo.slice %x [start:start+size:1, ...]
+            starts = []
+            limits = []
+            for i in range(len(base_type.dims)):
+                if i < len(expr.indices):
+                    ic = expr.indices[i]
+                    if ic.kind == "single":
+                        starts.append(ic.value.value)
+                        limits.append(ic.value.value + 1)
+                    elif ic.kind == "slice":
+                        starts.append(ic.start.value)
+                        limits.append(ic.end.value)
+                    else:  # full
+                        starts.append(0)
+                        limits.append(base_type.dims[i])
+                else:
+                    starts.append(0)
+                    limits.append(base_type.dims[i])
+
+            strides = [1] * len(base_type.dims)
+            starts_str = ", ".join(str(s) for s in starts)
+            limits_str = ", ".join(str(s) for s in limits)
+            strides_str = ", ".join(str(s) for s in strides)
+
+            sliced = self._fresh()
+            self._emit(
+                f"{sliced} = stablehlo.slice {base_ssa} "
+                f"[{starts_str}] [{limits_str}] [{strides_str}] "
+                f": ({mlir_base}) -> {mlir_inter}"
+            )
+        else:
+            # Dynamic path: stablehlo.dynamic_slice
+            sizes_str = ", ".join(str(s) for s in slice_sizes)
+            starts_str = ", ".join(start_ssas)
+            start_types = ", ".join("tensor<i32>" for _ in start_ssas)
+
+            sliced = self._fresh()
+            self._emit(
+                f"{sliced} = stablehlo.dynamic_slice {base_ssa}, {starts_str}, "
+                f"sizes = [{sizes_str}] "
+                f": ({mlir_base}, {start_types}) -> {mlir_inter}"
+            )
+
+        # Reshape to remove squeezed dimensions
+        if squeezed_axes:
+            result = self._fresh()
+            self._emit(f"{result} = stablehlo.reshape {sliced} : ({mlir_inter}) -> {_mlir_type(result_type)}")
+            return result
+        return sliced
+
+    def _gen_index_grad(self, expr: _IndexGrad, env: dict[str, str]) -> str:
+        """Emit backward pass for indexing: zeros + dynamic_update_slice."""
+        base_type = self._type_of(expr.base_expr)
+        adj_ssa = self._gen_expr(expr.adj, env)
+        adj_type = self._type_of(expr.adj)
+
+        if not isinstance(base_type, ArrayType):
+            raise MaomiError("codegen: _IndexGrad base must be array", "<codegen>", 0, 0)
+
+        mlir_base = _mlir_type(base_type)
+
+        # Create zero tensor of base shape
+        zeros = self._fresh()
+        self._emit(f"{zeros} = stablehlo.constant dense<0.000000e+00> : {mlir_base}")
+
+        # Build start indices (same logic as forward)
+        start_ssas: list[str] = []
+        slice_sizes: list[int] = []
+        squeezed_axes: list[int] = []
+
+        for i, ic in enumerate(expr.indices):
+            dim = base_type.dims[i]
+            if ic.kind == "single":
+                idx_ssa = self._gen_expr(ic.value, env)
+                start_ssas.append(idx_ssa)
+                slice_sizes.append(1)
+                squeezed_axes.append(i)
+            elif ic.kind == "slice":
+                s = self._gen_literal(ic.start.value, ScalarType("i32"))
+                start_ssas.append(s)
+                slice_sizes.append(ic.end.value - ic.start.value)
+            elif ic.kind == "full":
+                s = self._gen_literal(0, ScalarType("i32"))
+                start_ssas.append(s)
+                slice_sizes.append(dim)
+
+        for i in range(len(expr.indices), len(base_type.dims)):
+            s = self._gen_literal(0, ScalarType("i32"))
+            start_ssas.append(s)
+            slice_sizes.append(base_type.dims[i])
+
+        # Reshape adj to re-insert squeezed dims
+        update_dims = tuple(slice_sizes)
+        update_type = ArrayType(base_type.base, update_dims)
+        mlir_update = _mlir_type(update_type)
+
+        if squeezed_axes:
+            reshaped = self._fresh()
+            self._emit(f"{reshaped} = stablehlo.reshape {adj_ssa} : ({_mlir_type(adj_type)}) -> {mlir_update}")
+            adj_ssa = reshaped
+
+        # Emit dynamic_update_slice
+        starts_str = ", ".join(start_ssas)
+        start_types = ", ".join("tensor<i32>" for _ in start_ssas)
+
+        result = self._fresh()
+        self._emit(
+            f"{result} = stablehlo.dynamic_update_slice {zeros}, {adj_ssa}, {starts_str} "
+            f": ({mlir_base}, {mlir_update}, {start_types}) -> {mlir_base}"
+        )
+        return result
 
     # -- Scan helpers --
 
@@ -953,6 +1129,15 @@ class StableHLOCodegen:
                 self._lift_expr_type(expr.condition, batch_dim)
                 self._lift_body_types(expr.then_block, batch_dim)
                 self._lift_body_types(expr.else_block, batch_dim)
+            case IndexExpr(base=base, indices=indices):
+                self._lift_expr_type(base, batch_dim)
+                for ic in indices:
+                    if ic.value is not None:
+                        self._lift_expr_type(ic.value, batch_dim)
+                    if ic.start is not None:
+                        self._lift_expr_type(ic.start, batch_dim)
+                    if ic.end is not None:
+                        self._lift_expr_type(ic.end, batch_dim)
             case _:
                 pass
 

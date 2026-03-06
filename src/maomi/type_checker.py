@@ -21,6 +21,8 @@ from .ast_nodes import (
     StructLiteral,
     FieldAccess,
     WithExpr,
+    IndexExpr,
+    IndexComponent,
     TypeAnnotation,
     Expr,
 )
@@ -267,6 +269,8 @@ class TypeChecker:
                 return self._check_field_access(expr, env)
             case WithExpr():
                 return self._check_with(expr, env)
+            case IndexExpr():
+                return self._check_index(expr, env)
             case _:
                 return None
 
@@ -490,6 +494,71 @@ class TypeChecker:
                     )
 
         return base_type
+
+    def _check_index(self, expr: IndexExpr, env: TypeEnv) -> MaomiType | None:
+        base_type = self._infer(expr.base, env)
+        if base_type is None:
+            return None
+
+        if not isinstance(base_type, ArrayType):
+            self._error(
+                f"indexing requires an array, got {base_type}",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        if len(expr.indices) > len(base_type.dims):
+            self._error(
+                f"too many indices: array has {len(base_type.dims)} dimensions but got {len(expr.indices)} indices",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        result_dims: list[int | str] = []
+        for i, ic in enumerate(expr.indices):
+            dim = base_type.dims[i]
+            if ic.kind == "single":
+                idx_type = self._infer(ic.value, env)
+                if idx_type is not None and idx_type != I32:
+                    self._error(
+                        f"index must be i32, got {idx_type}",
+                        ic.span.line_start, ic.span.col_start,
+                    )
+                # Single index removes this dimension
+            elif ic.kind == "slice":
+                start_type = self._infer(ic.start, env)
+                end_type = self._infer(ic.end, env)
+                # Slice bounds must be integer literals (static)
+                if not isinstance(ic.start, IntLiteral):
+                    self._error(
+                        "slice start must be an integer literal",
+                        ic.start.span.line_start, ic.start.span.col_start,
+                    )
+                    return None
+                if not isinstance(ic.end, IntLiteral):
+                    self._error(
+                        "slice end must be an integer literal",
+                        ic.end.span.line_start, ic.end.span.col_start,
+                    )
+                    return None
+                slice_size = ic.end.value - ic.start.value
+                if slice_size <= 0:
+                    self._error(
+                        f"slice range is empty or negative: {ic.start.value}:{ic.end.value}",
+                        ic.span.line_start, ic.span.col_start,
+                    )
+                    return None
+                result_dims.append(slice_size)
+            elif ic.kind == "full":
+                result_dims.append(dim)
+
+        # Trailing unindexed axes pass through
+        for i in range(len(expr.indices), len(base_type.dims)):
+            result_dims.append(base_type.dims[i])
+
+        if len(result_dims) == 0:
+            return ScalarType(base_type.base)
+        return ArrayType(base_type.base, tuple(result_dims))
 
     def _check_unary(self, op: str, operand: Expr, expr: Expr, env: TypeEnv) -> MaomiType | None:
         t = self._infer(operand, env)

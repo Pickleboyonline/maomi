@@ -41,7 +41,10 @@ from .ast_nodes import (
     StructLiteral,
     FieldAccess,
     WithExpr,
+    IndexExpr,
+    IndexComponent,
     _ScanGrad,
+    _IndexGrad,
     Span,
     Expr,
 )
@@ -107,6 +110,15 @@ def _collect_free_vars_inner(expr: Expr, result: set[str]):
             _collect_free_vars_inner(base, result)
             for _, ve in updates:
                 _collect_free_vars_inner(ve, result)
+        case IndexExpr(base=base, indices=indices):
+            _collect_free_vars_inner(base, result)
+            for ic in indices:
+                if ic.value is not None:
+                    _collect_free_vars_inner(ic.value, result)
+                if ic.start is not None:
+                    _collect_free_vars_inner(ic.start, result)
+                if ic.end is not None:
+                    _collect_free_vars_inner(ic.end, result)
 
 
 def transform_grad(program: Program, type_map: dict[int, MaomiType]) -> Program:
@@ -220,8 +232,20 @@ class ADTransform:
                 result = WithExpr(new_base, new_updates, expr.span)
                 self._copy_type(expr, result)
                 return result
+            case IndexExpr(base=base, indices=indices):
+                new_base = self._transform_expr(base)
+                new_indices = [self._transform_index_component(ic) for ic in indices]
+                result = IndexExpr(new_base, new_indices, expr.span)
+                self._copy_type(expr, result)
+                return result
             case _:
                 return expr
+
+    def _transform_index_component(self, ic: IndexComponent) -> IndexComponent:
+        new_value = self._transform_expr(ic.value) if ic.value is not None else None
+        new_start = self._transform_expr(ic.start) if ic.start is not None else None
+        new_end = self._transform_expr(ic.end) if ic.end is not None else None
+        return IndexComponent(ic.kind, new_value, new_start, new_end, ic.span)
 
     def _copy_type(self, old: Expr, new: Expr):
         t = self.type_map.get(id(old))
@@ -360,6 +384,18 @@ class ADTransform:
                 name = self._fresh_name("v")
                 var_map[id(expr)] = name
                 tape.append((name, expr))
+            case IndexExpr(base=base, indices=indices):
+                self._linearize(base, tape, var_map, let_env)
+                for ic in indices:
+                    if ic.value is not None:
+                        self._linearize(ic.value, tape, var_map, let_env)
+                    if ic.start is not None:
+                        self._linearize(ic.start, tape, var_map, let_env)
+                    if ic.end is not None:
+                        self._linearize(ic.end, tape, var_map, let_env)
+                name = self._fresh_name("v")
+                var_map[id(expr)] = name
+                tape.append((name, expr))
             case _:
                 raise MaomiError(
                     f"grad: unsupported expression type {type(expr).__name__} inside grad",
@@ -477,8 +513,20 @@ class ADTransform:
                 node = WithExpr(new_base, new_updates, expr.span)
                 self._copy_type(expr, node)
                 return node
+            case IndexExpr(base=base, indices=indices):
+                new_base = self._substitute(base, subst)
+                new_indices = [self._substitute_index_component(ic, subst) for ic in indices]
+                node = IndexExpr(new_base, new_indices, expr.span)
+                self._copy_type(expr, node)
+                return node
             case _:
                 return expr
+
+    def _substitute_index_component(self, ic: IndexComponent, subst: dict[str, Expr]) -> IndexComponent:
+        new_value = self._substitute(ic.value, subst) if ic.value is not None else None
+        new_start = self._substitute(ic.start, subst) if ic.start is not None else None
+        new_end = self._substitute(ic.end, subst) if ic.end is not None else None
+        return IndexComponent(ic.kind, new_value, new_start, new_end, ic.span)
 
     def _substitute_block(self, block: Block, subst: dict[str, Expr]) -> Block:
         """Substitute through a block, respecting let binding scopes."""
@@ -606,6 +654,14 @@ class ADTransform:
 
             case WithExpr():
                 pass  # WithExpr gradients are complex; skip for now
+
+            case IndexExpr(base=base, indices=indices):
+                base_name = var_map[id(base)]
+                grad_node = _IndexGrad(base, adj, indices, _DUMMY_SPAN)
+                base_type = self._type_of(base)
+                if base_type is not None:
+                    self.type_map[id(grad_node)] = base_type
+                self._accumulate(adjoints, base_name, grad_node)
 
             case _:
                 raise MaomiError(
