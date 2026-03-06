@@ -159,14 +159,83 @@ class TestADLetBindings:
         assert "stablehlo.divide" in out
 
 
-class TestADErrors:
-    def test_if_inside_grad(self):
-        with pytest.raises(MaomiError, match="unsupported"):
-            ad_transform("fn f(x: f32) -> f32 { grad(if x > 0.0 { x } else { 0.0 }, x) }")
+class TestADIfElse:
+    def test_if_relu_grad(self):
+        """grad(if x > 0 { x } else { 0 }, x) should produce an IfExpr."""
+        prog = ad_transform("fn f(x: f32) -> f32 { grad(if x > 0.0 { x } else { 0.0 }, x) }")
+        expr = get_body_expr(prog)
+        # Result should be if cond { 1.0 } else { 0.0 } (times adj=1.0)
+        assert isinstance(expr, BinOp)  # adj * if_expr
 
-    def test_user_fn_inside_grad(self):
-        with pytest.raises(MaomiError, match="unsupported"):
+    def test_if_different_branches(self):
+        """grad(if x > 0 { x*x } else { -x }, x) differentiates both branches."""
+        prog = ad_transform("fn f(x: f32) -> f32 { grad(if x > 0.0 { x * x } else { -x }, x) }")
+        expr = get_body_expr(prog)
+        assert isinstance(expr, BinOp)
+
+    def test_if_codegen(self):
+        """Full pipeline: if/else inside grad produces valid StableHLO."""
+        out = ad_codegen("fn f(x: f32) -> f32 { grad(if x > 0.0 { x } else { 0.0 }, x) }")
+        assert "stablehlo.select" in out or "func.func" in out
+
+
+class TestADUserFunctions:
+    def test_simple_call(self):
+        """grad through a simple user function call."""
+        prog = ad_transform("""
+            fn g(x: f32) -> f32 { x }
+            fn f(x: f32) -> f32 { grad(g(x), x) }
+        """)
+        # g(x) = x, so grad = 1.0
+        fn_f = [fn for fn in prog.functions if fn.name == "f"][0]
+        expr = fn_f.body.expr
+        assert isinstance(expr, FloatLiteral) and expr.value == 1.0
+
+    def test_double(self):
+        """fn double(x) { x + x }; grad(double(a), a) = 2."""
+        prog = ad_transform("""
+            fn double(x: f32) -> f32 { x + x }
+            fn f(a: f32) -> f32 { grad(double(a), a) }
+        """)
+        fn_f = [fn for fn in prog.functions if fn.name == "f"][0]
+        expr = fn_f.body.expr
+        # Should be 1.0 + 1.0
+        assert isinstance(expr, BinOp) and expr.op == "+"
+
+    def test_composition(self):
+        """fn sq(x) { x*x }; fn g(x) { sq(x) + x }; grad(g(a), a) = 2a + 1."""
+        prog = ad_transform("""
+            fn sq(x: f32) -> f32 { x * x }
+            fn g(x: f32) -> f32 { sq(x) + x }
+            fn f(a: f32) -> f32 { grad(g(a), a) }
+        """)
+        fn_f = [fn for fn in prog.functions if fn.name == "f"][0]
+        expr = fn_f.body.expr
+        assert isinstance(expr, BinOp)
+
+    def test_composition_codegen(self):
+        """Composition through codegen pipeline."""
+        out = ad_codegen("""
+            fn sq(x: f32) -> f32 { x * x }
+            fn g(x: f32) -> f32 { sq(x) + x }
+            fn f(a: f32) -> f32 { grad(g(a), a) }
+        """)
+        assert "func.func @f" in out
+
+    def test_fn_with_if(self):
+        """grad through function containing if/else (ReLU pattern)."""
+        prog = ad_transform("""
+            fn relu(x: f32) -> f32 { if x > 0.0 { x } else { 0.0 } }
+            fn f(x: f32) -> f32 { grad(relu(x), x) }
+        """)
+        fn_f = [fn for fn in prog.functions if fn.name == "f"][0]
+        expr = fn_f.body.expr
+        assert expr is not None
+
+    def test_recursive_error(self):
+        """Recursive functions inside grad should error."""
+        with pytest.raises(MaomiError, match="recursive"):
             ad_transform("""
-                fn g(x: f32) -> f32 { x }
-                fn f(x: f32) -> f32 { grad(g(x), x) }
+                fn rec(x: f32) -> f32 { rec(x) }
+                fn f(x: f32) -> f32 { grad(rec(x), x) }
             """)

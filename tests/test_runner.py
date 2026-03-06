@@ -1,4 +1,4 @@
-"""Tests for the JAX execution backend."""
+"""Tests for the IREE execution backend."""
 
 import numpy as np
 import pytest
@@ -11,40 +11,29 @@ from maomi.cli import compile_source
 from maomi.types import ScalarType, ArrayType
 from maomi.type_checker import FnSignature
 
-# Skip all JAX tests if not installed
-jax = pytest.importorskip("jax")
+# Skip all IREE tests if not installed
+pytest.importorskip("iree.compiler")
 
-from maomi.jax_runner import run_stablehlo, generate_inputs, _prepare_module
+from maomi.iree_runner import run_stablehlo, generate_inputs, _prepare_module
 
 
 class TestPrepareModule:
     def test_adds_sym_name(self):
         text = "module {\n  func.func @foo() -> tensor<f32> {\n  }\n}"
-        result = _prepare_module(text, "foo")
+        result = _prepare_module(text)
         assert "module @main {" in result
+        assert "@foo" in result  # function name preserved
 
-    def test_renames_function(self):
-        text = "module {\n  func.func @add(%a: tensor<f32>) -> tensor<f32> {\n  }\n}"
-        result = _prepare_module(text, "add")
-        assert "@main(" in result
-        assert "@add" not in result
-
-    def test_preserves_other_functions(self):
+    def test_preserves_all_functions(self):
         text = (
             "module {\n"
             "  func.func @helper() -> tensor<f32> { }\n"
             "  func.func @target() -> tensor<f32> { }\n"
             "}"
         )
-        result = _prepare_module(text, "target")
+        result = _prepare_module(text)
         assert "@helper" in result
-        assert "func.func @main()" in result
-
-    def test_main_noop(self):
-        text = "module {\n  func.func @main() -> tensor<f32> { }\n}"
-        result = _prepare_module(text, "main")
-        assert "module @main {" in result
-        assert "func.func @main()" in result
+        assert "@target" in result
 
 
 class TestGenerateInputs:
@@ -133,7 +122,7 @@ fn linear(x: f32[4, 8], w: f32[8, 3], b: f32[3]) -> f32[4, 3] {
 class TestCompileSource:
     def test_returns_mlir_and_fn_table(self):
         result = compile_source("fn f(x: f32) -> f32 { x }")
-        assert "stablehlo" not in result.mlir_text or "func.func" in result.mlir_text
+        assert "func.func" in result.mlir_text
         assert "f" in result.fn_table
         assert result.fn_table["f"].param_names == ["x"]
 
