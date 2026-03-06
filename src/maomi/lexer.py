@@ -129,6 +129,10 @@ class Lexer:
         ch = self._advance()
 
         match ch:
+            case ".":
+                self._add(TokenType.DOT, ch, line, col)
+            case '"':
+                self._read_string(line, col)
             case "(":
                 self._add(TokenType.LPAREN, ch, line, col)
             case ")":
@@ -191,3 +195,17 @@ class Lexer:
                     self._add(TokenType.GT, ch, line, col)
             case _:
                 self._error(f"unexpected character: {ch!r}")
+
+    def _read_string(self, line: int, col: int):
+        chars: list[str] = []
+        while self.pos < len(self.source):
+            ch = self.source[self.pos]
+            if ch == '"':
+                self._advance()
+                self._add(TokenType.STRING_LIT, "".join(chars), line, col)
+                return
+            if ch == "\n":
+                self._error("unterminated string literal")
+            chars.append(ch)
+            self._advance()
+        self._error("unterminated string literal")

@@ -4,6 +4,7 @@ from .tokens import Token, TokenType
 from .ast_nodes import (
     Span,
     Program,
+    ImportDecl,
     FnDef,
     Param,
     Block,
@@ -83,10 +84,53 @@ class Parser:
 
     def parse(self) -> Program:
         start = self._current()
+        imports: list[ImportDecl] = []
+        while self._check(TokenType.IMPORT) or self._check(TokenType.FROM):
+            imports.append(self._parse_import())
         functions: list[FnDef] = []
         while not self._at_end():
             functions.append(self._parse_fn_def())
-        return Program(functions, self._span_from(start))
+        return Program(imports, functions, self._span_from(start))
+
+    # -- Import declarations --
+
+    def _parse_import(self) -> ImportDecl:
+        if self._check(TokenType.FROM):
+            return self._parse_from_import()
+        return self._parse_qualified_import()
+
+    def _parse_qualified_import(self) -> ImportDecl:
+        """Parse: import math; | import "../lib/nn" as nn;"""
+        start = self._expect(TokenType.IMPORT)
+        module_path, alias = self._parse_module_ref()
+        self._expect(TokenType.SEMICOLON)
+        return ImportDecl(module_path, alias, None, self._span_from(start))
+
+    def _parse_from_import(self) -> ImportDecl:
+        """Parse: from math import { relu, linear };"""
+        start = self._expect(TokenType.FROM)
+        module_path, alias = self._parse_module_ref()
+        self._expect(TokenType.IMPORT)
+        self._expect(TokenType.LBRACE)
+        names = [self._expect(TokenType.IDENT).value]
+        while self._match(TokenType.COMMA):
+            names.append(self._expect(TokenType.IDENT).value)
+        self._expect(TokenType.RBRACE)
+        self._expect(TokenType.SEMICOLON)
+        return ImportDecl(module_path, alias, names, self._span_from(start))
+
+    def _parse_module_ref(self) -> tuple[str, str | None]:
+        """Parse module path + optional alias. Returns (path, alias)."""
+        if self._check(TokenType.STRING_LIT):
+            path = self._advance().value
+            self._expect(TokenType.AS)
+            alias = self._expect(TokenType.IDENT).value
+            return (path, alias)
+        name = self._expect(TokenType.IDENT).value
+        alias = None
+        if self._match(TokenType.AS):
+            alias = self._expect(TokenType.IDENT).value
+        return (name, alias)
 
     # -- Function definition --
 
@@ -300,6 +344,13 @@ class Parser:
 
     def _parse_call(self) -> Expr:
         expr = self._parse_primary()
+        # Handle qualified names: math.relu(...)
+        if isinstance(expr, Identifier) and self._check(TokenType.DOT):
+            self._advance()  # consume dot
+            member = self._expect(TokenType.IDENT)
+            qualified = f"{expr.name}.{member.value}"
+            span = Span(expr.span.line_start, expr.span.col_start, member.line, member.col + len(member.value))
+            expr = Identifier(qualified, span)
         while self._check(TokenType.LPAREN) and isinstance(expr, Identifier):
             self._advance()
             args: list[Expr] = []

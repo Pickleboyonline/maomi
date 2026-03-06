@@ -176,10 +176,22 @@ Expr = IntLiteral | FloatLiteral | BoolLiteral | Identifier | UnaryOp | BinOp | 
 Stmt = LetStmt | ExprStmt
 
 
+# ---------- Imports ----------
+
+
+@dataclass
+class ImportDecl:
+    module_path: str           # "math" or "../lib/nn"
+    alias: str | None          # from "as nn", None = derive from module_path
+    names: list[str] | None    # { relu, linear } or None = qualified import
+    span: Span
+
+
 # ---------- Program ----------
 
 
 @dataclass
 class Program:
+    imports: list[ImportDecl]
     functions: list[FnDef]
     span: Span

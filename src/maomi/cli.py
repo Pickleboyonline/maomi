@@ -8,6 +8,7 @@ from .parser import Parser
 from .type_checker import TypeChecker, FnSignature
 from .codegen_stablehlo import StableHLOCodegen
 from .ad import transform_grad
+from .resolver import resolve
 from .errors import MaomiError
 from .ast_nodes import Span
 from .types import MaomiType, ArrayType
@@ -20,9 +21,10 @@ class CompileResult:
 
 
 def compile_source(source: str, filename: str = "<stdin>") -> CompileResult:
-    """Full compilation pipeline: lex -> parse -> typecheck -> AD -> codegen."""
+    """Full compilation pipeline: lex -> parse -> resolve imports -> typecheck -> AD -> codegen."""
     tokens = Lexer(source, filename=filename).tokenize()
     program = Parser(tokens, filename=filename).parse()
+    program = resolve(program, filename)
     checker = TypeChecker(filename=filename)
     errors = checker.check(program)
     if errors:
@@ -79,6 +81,10 @@ def _compile(path: str, emit: str):
 
         # Parse
         program = Parser(tokens, filename=path).parse()
+
+        # Resolve imports
+        program = resolve(program, path)
+
         if emit == "ast":
             print(json.dumps(asdict(program), indent=2, default=_json_default))
             return

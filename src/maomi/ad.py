@@ -102,7 +102,7 @@ def transform_grad(program: Program, type_map: dict[int, MaomiType]) -> Program:
     fn_defs = {fn.name: fn for fn in program.functions}
     transformer = ADTransform(type_map, fn_defs)
     new_fns = [transformer.transform_fn(fn) for fn in program.functions]
-    return Program(new_fns, program.span)
+    return Program(program.imports, new_fns, program.span)
 
 
 class ADTransform:
