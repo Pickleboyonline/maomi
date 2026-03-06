@@ -191,3 +191,22 @@ class TestFullProgram:
             TokenType.IDENT,       # w
             TokenType.RBRACE,
         ]
+
+
+class TestStructTokens:
+    def test_dot_token(self):
+        assert lex("a.b") == [
+            (TokenType.IDENT, "a"),
+            (TokenType.DOT, "."),
+            (TokenType.IDENT, "b"),
+        ]
+
+    def test_struct_keyword(self):
+        assert lex("struct") == [(TokenType.STRUCT, "struct")]
+
+    def test_with_keyword(self):
+        assert lex("with") == [(TokenType.WITH, "with")]
+
+    def test_dot_not_in_float(self):
+        """3.14 should lex as a single FLOAT_LIT, not INT DOT INT."""
+        assert lex("3.14") == [(TokenType.FLOAT_LIT, "3.14")]

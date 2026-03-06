@@ -39,14 +39,18 @@ fn cumsum(xs: f32[10], init: f32) -> f32[10] {
 | Construct | What it does |
 |---|---|
 | `fn f(x: f32[B, 128]) -> f32` | Function with shape-typed params |
+| `struct S { x: f32, y: i32 }` | Named struct definition |
+| `S { x: 1.0, y: 2 }` | Struct construction |
+| `s.x` | Field access (nestable: `s.inner.x`) |
+| `s with { x = 1.0 }` | Functional update (nestable: `s with { inner.x = 1.0 }`) |
 | `let x = expr;` | Immutable binding |
 | `if c { a } else { b }` | Conditional expression (returns a value) |
 | `map x in xs { ... }` | Elementwise transform (compiles to vectorized op) |
 | `scan (acc, x) in (init, xs) { ... }` | Sequential fold with carried state |
-| `grad(expr, var)` | Reverse-mode automatic differentiation |
+| `grad(expr, var)` | Reverse-mode AD (supports struct-shaped gradients) |
 | `callback(args...);` | Host callback (no-op in codegen, ignored by `grad`) |
 
-**Types:** `f32` `f64` `i32` `i64` `bool` — arrays as `f32[B, 128]` with symbolic or concrete dims.
+**Types:** `f32` `f64` `i32` `i64` `bool` — arrays as `f32[B, 128]` with symbolic or concrete dims. Named structs for grouping data.
 
 **Builtins:** `mean` `sum` `exp` `log` `tanh` `sqrt` `abs` `callback` — elementwise builtins lift to arrays automatically.
 
@@ -84,9 +88,9 @@ uv run maomi run examples/grad.mao --fn grad_loss
 
 ## Status
 
-**v0.3** — 140+ tests across lexer, parser, type checker, codegen, and AD. Full pipeline from source to StableHLO.
+**v0.4** — 185+ tests across lexer, parser, type checker, codegen, and AD. Full pipeline from source to StableHLO.
 
-**Works:** shape-typed arrays, `scan`/`map`/`grad`, StableHLO codegen, IREE execution for concrete-dimension programs.
+**Works:** shape-typed arrays, named structs (nested, with functional updates), `scan`/`map`/`grad`, struct-shaped gradients, StableHLO codegen, IREE execution for concrete-dimension programs.
 
 **Limitations:**
 - Codegen requires concrete dimensions (symbolic dims type-check but don't compile)

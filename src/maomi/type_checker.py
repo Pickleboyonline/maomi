@@ -18,10 +18,13 @@ from .ast_nodes import (
     ScanExpr,
     MapExpr,
     GradExpr,
+    StructLiteral,
+    FieldAccess,
+    WithExpr,
     TypeAnnotation,
     Expr,
 )
-from .types import MaomiType, ScalarType, ArrayType, F32, F64, I32, I64, BOOL
+from .types import MaomiType, ScalarType, ArrayType, StructType, F32, F64, I32, I64, BOOL
 from .errors import MaomiTypeError
 
 
@@ -101,10 +104,15 @@ class TypeChecker:
     def __init__(self, filename: str = "<stdin>"):
         self.filename = filename
         self.fn_table: dict[str, FnSignature] = dict(BUILTINS)
+        self.struct_defs: dict[str, StructType] = {}
         self.errors: list[MaomiTypeError] = []
         self.type_map: dict[int, MaomiType] = {}  # id(expr) -> inferred type
 
     def check(self, program: Program) -> list[MaomiTypeError]:
+        # Pass 0: register all struct definitions
+        for sd in program.struct_defs:
+            self._register_struct(sd)
+
         # Pass 1: register all function signatures
         for fn in program.functions:
             sig = self._resolve_signature(fn)
@@ -116,6 +124,20 @@ class TypeChecker:
             self._check_fn(fn)
 
         return self.errors
+
+    def _register_struct(self, sd):
+        fields: list[tuple[str, MaomiType]] = []
+        for field_name, field_ta in sd.fields:
+            t = self._resolve_type_annotation(field_ta)
+            if t is None:
+                self._error(
+                    f"struct '{sd.name}': unknown type for field '{field_name}'",
+                    field_ta.span.line_start,
+                    field_ta.span.col_start,
+                )
+                return
+            fields.append((field_name, t))
+        self.struct_defs[sd.name] = StructType(sd.name, tuple(fields))
 
     def _error(self, msg: str, line: int, col: int):
         self.errors.append(MaomiTypeError(msg, self.filename, line, col))
@@ -136,11 +158,23 @@ class TypeChecker:
             return None
         return FnSignature(param_names, param_types, ret)
 
+    _BASE_TYPES = {"f32", "f64", "i32", "i64", "bool"}
+
     def _resolve_type_annotation(self, ta: TypeAnnotation) -> MaomiType | None:
-        if ta.dims is None:
-            return ScalarType(ta.base)
-        dims = tuple(d.value for d in ta.dims)
-        return ArrayType(ta.base, dims)
+        if ta.base in self._BASE_TYPES:
+            if ta.dims is None:
+                return ScalarType(ta.base)
+            dims = tuple(d.value for d in ta.dims)
+            return ArrayType(ta.base, dims)
+        # Struct type
+        if ta.base in self.struct_defs:
+            return self.struct_defs[ta.base]
+        self._error(
+            f"unknown type: '{ta.base}'",
+            ta.span.line_start,
+            ta.span.col_start,
+        )
+        return None
 
     # -- Function body checking --
 
@@ -227,6 +261,12 @@ class TypeChecker:
                 return self._check_map(expr, env)
             case GradExpr():
                 return self._check_grad(expr, env)
+            case StructLiteral():
+                return self._check_struct_literal(expr, env)
+            case FieldAccess():
+                return self._check_field_access(expr, env)
+            case WithExpr():
+                return self._check_with(expr, env)
             case _:
                 return None
 
@@ -358,6 +398,98 @@ class TypeChecker:
             return None
 
         return wrt_type
+
+    def _check_struct_literal(self, expr: StructLiteral, env: TypeEnv) -> MaomiType | None:
+        stype = self.struct_defs.get(expr.name)
+        if stype is None:
+            self._error(f"unknown struct: '{expr.name}'", expr.span.line_start, expr.span.col_start)
+            return None
+
+        if len(expr.fields) != len(stype.fields):
+            self._error(
+                f"struct '{expr.name}' has {len(stype.fields)} fields, got {len(expr.fields)}",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        for (given_name, given_expr), (expected_name, expected_type) in zip(expr.fields, stype.fields):
+            if given_name != expected_name:
+                self._error(
+                    f"struct '{expr.name}': expected field '{expected_name}', got '{given_name}'",
+                    given_expr.span.line_start, given_expr.span.col_start,
+                )
+                return None
+            given_type = self._infer(given_expr, env)
+            if given_type is not None and not self._types_compatible(given_type, expected_type):
+                self._error(
+                    f"struct '{expr.name}' field '{given_name}': expected {expected_type}, got {given_type}",
+                    given_expr.span.line_start, given_expr.span.col_start,
+                )
+
+        return stype
+
+    def _check_field_access(self, expr: FieldAccess, env: TypeEnv) -> MaomiType | None:
+        obj_type = self._infer(expr.object, env)
+        if obj_type is None:
+            return None
+        if not isinstance(obj_type, StructType):
+            self._error(
+                f"field access on non-struct type: {obj_type}",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+        for field_name, field_type in obj_type.fields:
+            if field_name == expr.field:
+                return field_type
+        self._error(
+            f"struct '{obj_type.name}' has no field '{expr.field}'",
+            expr.span.line_start, expr.span.col_start,
+        )
+        return None
+
+    def _check_with(self, expr: WithExpr, env: TypeEnv) -> MaomiType | None:
+        base_type = self._infer(expr.base, env)
+        if base_type is None:
+            return None
+        if not isinstance(base_type, StructType):
+            self._error(
+                f"'with' requires a struct, got {base_type}",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        for path, value_expr in expr.updates:
+            # Walk the path to find the target field type
+            current_type = base_type
+            for i, field_name in enumerate(path):
+                if not isinstance(current_type, StructType):
+                    self._error(
+                        f"'with' path '{'.'.join(path[:i+1])}': '{path[i-1]}' is not a struct",
+                        value_expr.span.line_start, value_expr.span.col_start,
+                    )
+                    break
+                found = False
+                for fn, ft in current_type.fields:
+                    if fn == field_name:
+                        current_type = ft
+                        found = True
+                        break
+                if not found:
+                    self._error(
+                        f"struct '{current_type.name}' has no field '{field_name}'",
+                        value_expr.span.line_start, value_expr.span.col_start,
+                    )
+                    break
+            else:
+                # Path resolved — check value type
+                value_type = self._infer(value_expr, env)
+                if value_type is not None and not self._types_compatible(value_type, current_type):
+                    self._error(
+                        f"'with' field '{'.'.join(path)}': expected {current_type}, got {value_type}",
+                        value_expr.span.line_start, value_expr.span.col_start,
+                    )
+
+        return base_type
 
     def _check_unary(self, op: str, operand: Expr, expr: Expr, env: TypeEnv) -> MaomiType | None:
         t = self._infer(operand, env)
@@ -665,6 +797,8 @@ class TypeChecker:
             if a.base != b.base or len(a.dims) != len(b.dims):
                 return False
             return all(self._dims_match(d1, d2) for d1, d2 in zip(a.dims, b.dims))
+        if isinstance(a, StructType) and isinstance(b, StructType):
+            return a.name == b.name
         return False
 
     def _dims_match(self, a: int | str, b: int | str) -> bool:

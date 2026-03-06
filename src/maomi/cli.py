@@ -91,6 +91,12 @@ def _compile(path: str, emit: str):
                 print(f"{err}", file=sys.stderr)
             sys.exit(1)
         if emit == "types":
+            if program.struct_defs:
+                print(f"{len(program.struct_defs)} struct(s):")
+                for sd in program.struct_defs:
+                    stype = checker.struct_defs.get(sd.name)
+                    if stype:
+                        print(f"  {stype}")
             print(f"Type check passed: {len(program.functions)} function(s)")
             for fn in program.functions:
                 sig = checker.fn_table.get(fn.name)

@@ -16,10 +16,13 @@ from .ast_nodes import (
     CallExpr,
     ScanExpr,
     MapExpr,
+    StructLiteral,
+    FieldAccess,
+    WithExpr,
     _ScanGrad,
     Expr,
 )
-from .types import MaomiType, ScalarType, ArrayType
+from .types import MaomiType, ScalarType, ArrayType, StructType
 from .errors import MaomiError
 
 
@@ -63,6 +66,9 @@ def _mlir_type(t: MaomiType) -> str:
                 )
         shape = "x".join(str(d) for d in t.dims)
         return f"tensor<{shape}x{_MLIR_ETYPE[t.base]}>"
+    if isinstance(t, StructType):
+        field_types = ", ".join(_mlir_type(ft) for _, ft in t.fields)
+        return f"tuple<{field_types}>"
     raise MaomiError("codegen: unknown type", "<codegen>", 0, 0)
 
 
@@ -135,6 +141,19 @@ class StableHLOCodegen:
         return self._resolve_annotation_type(p.type_annotation)
 
     def _resolve_annotation_type(self, ta) -> MaomiType:
+        if ta.base in ("f32", "f64", "i32", "i64", "bool"):
+            if ta.dims is None:
+                return ScalarType(ta.base)
+            dims = tuple(d.value for d in ta.dims)
+            return ArrayType(ta.base, dims)
+        # Struct type — look up from program's struct_defs via type_map or build from AST
+        for sd in self.program.struct_defs:
+            if sd.name == ta.base:
+                field_types = []
+                for field_name, field_ta in sd.fields:
+                    field_types.append((field_name, self._resolve_annotation_type(field_ta)))
+                return StructType(sd.name, tuple(field_types))
+        # Fallback: treat as scalar (will likely error later)
         if ta.dims is None:
             return ScalarType(ta.base)
         dims = tuple(d.value for d in ta.dims)
@@ -184,6 +203,12 @@ class StableHLOCodegen:
                 return self._gen_scan(expr, env)
             case MapExpr():
                 return self._gen_map(expr, env)
+            case StructLiteral():
+                return self._gen_struct_literal(expr, env)
+            case FieldAccess():
+                return self._gen_field_access(expr, env)
+            case WithExpr():
+                return self._gen_with(expr, env)
             case _ScanGrad():
                 return self._gen_scan_grad(expr, env)
             case _:
@@ -444,6 +469,83 @@ class StableHLOCodegen:
             f"{var} = stablehlo.transpose {arg}, dims = [1, 0] "
             f": ({_mlir_type(arg_type)}) -> {_mlir_type(result_type)}"
         )
+        return var
+
+    # -- Struct codegen --
+
+    def _gen_struct_literal(self, expr: StructLiteral, env: dict[str, str]) -> str:
+        result_type = self._type_of(expr)
+        field_vals = [self._gen_expr(fv, env) for _, fv in expr.fields]
+        var = self._fresh()
+        vals_str = ", ".join(field_vals)
+        self._emit(f"{var} = stablehlo.tuple {vals_str} : {_mlir_type(result_type)}")
+        return var
+
+    def _gen_field_access(self, expr: FieldAccess, env: dict[str, str]) -> str:
+        obj = self._gen_expr(expr.object, env)
+        obj_type = self._type_of(expr.object)
+        result_type = self._type_of(expr)
+        if not isinstance(obj_type, StructType):
+            raise MaomiError("codegen: field access on non-struct", "<codegen>", 0, 0)
+        field_idx = next(i for i, (fn, _) in enumerate(obj_type.fields) if fn == expr.field)
+        var = self._fresh()
+        self._emit(
+            f"{var} = stablehlo.get_tuple_element {obj}[{field_idx}] "
+            f": ({_mlir_type(obj_type)}) -> {_mlir_type(result_type)}"
+        )
+        return var
+
+    def _gen_with(self, expr: WithExpr, env: dict[str, str]) -> str:
+        base = self._gen_expr(expr.base, env)
+        base_type = self._type_of(expr.base)
+        if not isinstance(base_type, StructType):
+            raise MaomiError("codegen: 'with' on non-struct", "<codegen>", 0, 0)
+        return self._gen_with_struct(base, base_type, expr.updates, env)
+
+    def _gen_with_struct(self, base_ssa: str, stype: StructType,
+                          updates: list[tuple[list[str], 'Expr']],
+                          env: dict[str, str]) -> str:
+        """Reconstruct a struct tuple with some fields updated."""
+        # Group updates by top-level field
+        top_updates: dict[str, list[tuple[list[str], 'Expr']]] = {}
+        for path, value_expr in updates:
+            top = path[0]
+            rest = path[1:]
+            if top not in top_updates:
+                top_updates[top] = []
+            top_updates[top].append((rest, value_expr))
+
+        # Build field values for the new tuple
+        field_vals = []
+        for i, (field_name, field_type) in enumerate(stype.fields):
+            if field_name in top_updates:
+                field_updates = top_updates[field_name]
+                if any(len(rest) == 0 for rest, _ in field_updates):
+                    # Direct replacement: path is just [field_name]
+                    _, value_expr = next((rest, ve) for rest, ve in field_updates if len(rest) == 0)
+                    field_vals.append(self._gen_expr(value_expr, env))
+                else:
+                    # Nested update: extract current field, recurse
+                    if not isinstance(field_type, StructType):
+                        raise MaomiError(f"codegen: nested 'with' on non-struct field '{field_name}'", "<codegen>", 0, 0)
+                    extracted = self._fresh()
+                    self._emit(
+                        f"{extracted} = stablehlo.get_tuple_element {base_ssa}[{i}] "
+                        f": ({_mlir_type(stype)}) -> {_mlir_type(field_type)}"
+                    )
+                    field_vals.append(self._gen_with_struct(extracted, field_type, field_updates, env))
+            else:
+                # Unchanged field: extract from base
+                extracted = self._fresh()
+                self._emit(
+                    f"{extracted} = stablehlo.get_tuple_element {base_ssa}[{i}] "
+                    f": ({_mlir_type(stype)}) -> {_mlir_type(field_type)}"
+                )
+                field_vals.append(extracted)
+
+        var = self._fresh()
+        vals_str = ", ".join(field_vals)
+        self._emit(f"{var} = stablehlo.tuple {vals_str} : {_mlir_type(stype)}")
         return var
 
     # -- Scan helpers --

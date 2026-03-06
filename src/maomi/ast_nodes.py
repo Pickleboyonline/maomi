@@ -22,8 +22,18 @@ class Dim:
 
 @dataclass
 class TypeAnnotation:
-    base: str  # "f32", "f64", "i32", "i64", "bool"
-    dims: list[Dim] | None  # None = scalar
+    base: str  # "f32", "f64", "i32", "i64", "bool", or struct name
+    dims: list[Dim] | None  # None = scalar (or struct)
+    span: Span
+
+
+# ---------- Struct ----------
+
+
+@dataclass
+class StructDef:
+    name: str
+    fields: list[tuple[str, TypeAnnotation]]
     span: Span
 
 
@@ -157,6 +167,27 @@ class GradExpr:
 
 
 @dataclass
+class StructLiteral:
+    name: str
+    fields: list[tuple[str, Expr]]
+    span: Span
+
+
+@dataclass
+class FieldAccess:
+    object: Expr
+    field: str
+    span: Span
+
+
+@dataclass
+class WithExpr:
+    base: Expr
+    updates: list[tuple[list[str], Expr]]  # [(path, value)] — path like ["pcn", "w"]
+    span: Span
+
+
+@dataclass
 class _ScanGrad:
     """Internal: backward pass of scan. Created by AD, compiled by codegen."""
     d_body_d_carry: Expr
@@ -172,7 +203,7 @@ class _ScanGrad:
 
 
 # Union types for convenience
-Expr = IntLiteral | FloatLiteral | BoolLiteral | Identifier | UnaryOp | BinOp | IfExpr | CallExpr | ScanExpr | MapExpr | GradExpr | _ScanGrad
+Expr = IntLiteral | FloatLiteral | BoolLiteral | Identifier | UnaryOp | BinOp | IfExpr | CallExpr | ScanExpr | MapExpr | GradExpr | StructLiteral | FieldAccess | WithExpr | _ScanGrad
 Stmt = LetStmt | ExprStmt
 
 
@@ -181,5 +212,6 @@ Stmt = LetStmt | ExprStmt
 
 @dataclass
 class Program:
+    struct_defs: list[StructDef]
     functions: list[FnDef]
     span: Span

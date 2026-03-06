@@ -21,6 +21,8 @@ class TokenType(StrEnum):
     MAP = auto()
     GRAD = auto()
     IN = auto()
+    STRUCT = auto()
+    WITH = auto()
 
     # Type keywords
     F32 = auto()
@@ -39,6 +41,7 @@ class TokenType(StrEnum):
     COMMA = auto()
     COLON = auto()
     SEMICOLON = auto()
+    DOT = auto()
 
     # Operators
     PLUS = auto()
@@ -84,4 +87,6 @@ KEYWORDS: dict[str, TokenType] = {
     "map": TokenType.MAP,
     "grad": TokenType.GRAD,
     "in": TokenType.IN,
+    "struct": TokenType.STRUCT,
+    "with": TokenType.WITH,
 }

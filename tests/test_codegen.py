@@ -192,3 +192,36 @@ class TestCallbackCodegen:
             }
         """)
         assert "func.func @f" in out
+
+
+class TestStructCodegen:
+    def test_struct_literal(self):
+        out = codegen("""
+            struct Point { x: f32, y: f32 }
+            fn f() -> Point { Point { x: 1.0, y: 2.0 } }
+        """)
+        assert "stablehlo.tuple" in out
+
+    def test_field_access(self):
+        out = codegen("""
+            struct Point { x: f32, y: f32 }
+            fn f(p: Point) -> f32 { p.x }
+        """)
+        assert "stablehlo.get_tuple_element" in out
+
+    def test_with_update(self):
+        out = codegen("""
+            struct Point { x: f32, y: f32 }
+            fn f(p: Point) -> Point { p with { x = 1.0 } }
+        """)
+        assert "get_tuple_element" in out
+        assert "stablehlo.tuple" in out
+
+    def test_nested_field_access(self):
+        out = codegen("""
+            struct Inner { x: f32 }
+            struct Outer { inner: Inner, y: f32 }
+            fn f(b: Outer) -> f32 { b.inner.x }
+        """)
+        # Should have multiple get_tuple_element: one to extract inner, one to extract x
+        assert out.count("get_tuple_element") >= 2

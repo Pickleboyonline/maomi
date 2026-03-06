@@ -147,6 +147,8 @@ class Lexer:
                 self._add(TokenType.COLON, ch, line, col)
             case ";":
                 self._add(TokenType.SEMICOLON, ch, line, col)
+            case ".":
+                self._add(TokenType.DOT, ch, line, col)
             case "@":
                 self._add(TokenType.AT, ch, line, col)
             case "+":
