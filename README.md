@@ -32,6 +32,14 @@ fn cumsum(xs: f32[10], init: f32) -> f32[10] {
         acc + x
     }
 }
+
+fn get_row(matrix: f32[4, 8], i: i32) -> f32[8] {
+    matrix[i]
+}
+
+fn slice_window(x: f32[10]) -> f32[3] {
+    x[2:5]
+}
 ```
 
 ## Language
@@ -47,7 +55,11 @@ fn cumsum(xs: f32[10], init: f32) -> f32[10] {
 | `if c { a } else { b }` | Conditional expression (returns a value) |
 | `map x in xs { ... }` | Elementwise transform (compiles to vectorized op) |
 | `scan (acc, x) in (init, xs) { ... }` | Sequential fold with carried state |
-| `grad(expr, var)` | Reverse-mode AD (supports struct-shaped gradients) |
+| `grad(expr, var)` | Reverse-mode AD (supports structs, scan, indexing) |
+| `x[i]` `x[1:3]` `x[:, 0]` | Array indexing and slicing |
+| `import math;` | Qualified module import (`math.relu(x)`) |
+| `from math import { relu };` | Selective import (`relu(x)`) |
+| `import "../lib/nn" as nn;` | Path-based import with alias |
 | `callback(args...);` | Host callback (no-op in codegen, ignored by `grad`) |
 
 **Types:** `f32` `f64` `i32` `i64` `bool` — arrays as `f32[B, 128]` with symbolic or concrete dims. Named structs for grouping data.
@@ -56,13 +68,15 @@ fn cumsum(xs: f32[10], init: f32) -> f32[10] {
 
 **Operators:** `+` `-` `*` `/` `@` (matmul) `**` (power) `==` `!=` `<` `>` `<=` `>=`
 
+**Indexing:** `x[0]` (single), `x[i]` (dynamic), `x[1:3]` (slice, static bounds), `x[:, 0]` (multi-axis), `x[0][1]` (chaining). Fully differentiable — `grad` propagates through indexing via `dynamic_update_slice`.
+
 ## How It Works
 
 ```
-.mao → lexer → parser → type checker → AD transform → StableHLO → IREE
+.mao → lexer → parser → resolver → type checker → AD transform → StableHLO → IREE
 ```
 
-The compiler is written in Python. It emits StableHLO (an MLIR dialect), which can be lowered via IREE for execution on CPU/GPU/TPU.
+The compiler is written in Python. It emits StableHLO (an MLIR dialect), which can be lowered via IREE for execution on CPU/GPU/TPU. The resolver handles module imports — loading, prefixing, and merging functions from other `.mao` files.
 
 ## Install
 
@@ -88,13 +102,15 @@ uv run maomi run examples/grad.mao --fn grad_loss
 
 ## Status
 
-**v0.4** — 185+ tests across lexer, parser, type checker, codegen, and AD. Full pipeline from source to StableHLO.
+**v0.5** — 242 tests across lexer, parser, type checker, codegen, AD, modules, and indexing. Full pipeline from source to StableHLO.
 
-**Works:** shape-typed arrays, named structs (nested, with functional updates), `scan`/`map`/`grad`, struct-shaped gradients, StableHLO codegen, IREE execution for concrete-dimension programs.
+**Works:** shape-typed arrays, array indexing/slicing, named structs (nested, with functional updates), `scan`/`map`/`grad`, scan gradients, struct-shaped gradients, import/module system, StableHLO codegen, IREE execution for concrete-dimension programs.
 
 **Limitations:**
 - Codegen requires concrete dimensions (symbolic dims type-check but don't compile)
-- `grad`: no scan, no grad-of-grad
+- `grad`: no grad-of-grad
 - `map`: elementwise bodies only
+- Slice bounds must be integer literals (no dynamic ranges)
+- No negative indices or open-ended ranges (`x[1:]`, `x[-1]`)
 - `callback`: compiles but doesn't execute host callbacks yet (IREE outfeed integration pending)
 - No rank polymorphism
