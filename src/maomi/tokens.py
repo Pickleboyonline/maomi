@@ -48,7 +48,6 @@ class TokenType(StrEnum):
     AT = auto()
     STARSTAR = auto()
     ARROW = auto()
-    BANG = auto()
     ASSIGN = auto()
     EQ = auto()
     NEQ = auto()

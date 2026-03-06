@@ -176,7 +176,7 @@ class Lexer:
                     self._advance()
                     self._add(TokenType.NEQ, "!=", line, col)
                 else:
-                    self._add(TokenType.BANG, ch, line, col)
+                    self._error(f"unexpected character '!'")
             case "<":
                 if self.pos < len(self.source) and self.source[self.pos] == "=":
                     self._advance()

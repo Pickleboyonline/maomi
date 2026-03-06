@@ -222,6 +222,24 @@ class TestScan:
             }
         """, "scan body returns")
 
+    def test_multi_sequence_scan(self):
+        check_ok("""
+            fn f(xs: f32[5], ys: f32[5]) -> f32[5] {
+                scan (acc, (x, y)) in (0.0, (xs, ys)) {
+                    acc + x * y
+                }
+            }
+        """)
+
+    def test_multi_sequence_dim_mismatch(self):
+        check_err("""
+            fn f(xs: f32[5], ys: f32[3]) -> f32[5] {
+                scan (acc, (x, y)) in (0.0, (xs, ys)) {
+                    acc + x * y
+                }
+            }
+        """, "same first dimension")
+
 
 class TestMap:
     def test_basic_map(self):
@@ -276,6 +294,23 @@ class TestGrad:
             "undefined variable",
         )
 
+
+class TestCallback:
+    def test_callback_any_args(self):
+        check_ok("""
+            fn f(x: f32, y: f32[4]) -> f32 {
+                callback(x, y);
+                x
+            }
+        """)
+
+    def test_callback_no_args(self):
+        check_ok("""
+            fn f(x: f32) -> f32 {
+                callback();
+                x
+            }
+        """)
 
 class TestFixtures:
     fixtures_dir = Path(__file__).parent / "fixtures"

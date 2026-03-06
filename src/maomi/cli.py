@@ -98,8 +98,7 @@ def _compile(path: str, emit: str):
                     params_str = ", ".join(
                         f"{n}: {t}" for n, t in zip(sig.param_names, sig.param_types)
                     )
-                    eff = f" ! {fn.effect}" if fn.effect else ""
-                    print(f"  fn {fn.name}({params_str}) -> {sig.return_type}{eff}")
+                    print(f"  fn {fn.name}({params_str}) -> {sig.return_type}")
             return
 
         # AD transform (rewrite grad expressions before codegen)

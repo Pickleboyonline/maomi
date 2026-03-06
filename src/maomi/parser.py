@@ -98,9 +98,8 @@ class Parser:
         self._expect(TokenType.RPAREN)
         self._expect(TokenType.ARROW)
         return_type = self._parse_type()
-        effect = self._parse_effect()
         body = self._parse_block()
-        return FnDef(name, params, return_type, effect, body, self._span_from(start))
+        return FnDef(name, params, return_type, body, self._span_from(start))
 
     def _parse_param_list(self) -> list[Param]:
         params: list[Param] = []
@@ -142,13 +141,6 @@ class Parser:
             self._advance()
             return Dim(tok.value, Span(tok.line, tok.col, tok.line, tok.col + len(tok.value)))
         raise self._error(f"expected dimension (integer or name), got {tok.type.value}")
-
-    # -- Effects --
-
-    def _parse_effect(self) -> str | None:
-        if self._match(TokenType.BANG):
-            return self._expect(TokenType.IDENT).value
-        return None
 
     # -- Blocks --
 
@@ -203,16 +195,36 @@ class Parser:
         self._expect(TokenType.LPAREN)
         carry_var = self._expect(TokenType.IDENT).value
         self._expect(TokenType.COMMA)
-        elem_var = self._expect(TokenType.IDENT).value
+
+        # Multi-sequence: (acc, (x, y)) or single: (acc, x)
+        if self._check(TokenType.LPAREN):
+            self._advance()
+            elem_vars = [self._expect(TokenType.IDENT).value]
+            while self._match(TokenType.COMMA):
+                elem_vars.append(self._expect(TokenType.IDENT).value)
+            self._expect(TokenType.RPAREN)
+        else:
+            elem_vars = [self._expect(TokenType.IDENT).value]
+
         self._expect(TokenType.RPAREN)
         self._expect(TokenType.IN)
         self._expect(TokenType.LPAREN)
         init = self._parse_expr()
         self._expect(TokenType.COMMA)
-        sequence = self._parse_expr()
+
+        # Multi-sequence: (init, (xs, ys)) or single: (init, xs)
+        if len(elem_vars) > 1:
+            self._expect(TokenType.LPAREN)
+            sequences = [self._parse_expr()]
+            while self._match(TokenType.COMMA):
+                sequences.append(self._parse_expr())
+            self._expect(TokenType.RPAREN)
+        else:
+            sequences = [self._parse_expr()]
+
         self._expect(TokenType.RPAREN)
         body = self._parse_block()
-        return ScanExpr(carry_var, elem_var, init, sequence, body, self._span_from(start))
+        return ScanExpr(carry_var, elem_vars, init, sequences, body, self._span_from(start))
 
     def _parse_map(self) -> MapExpr:
         start = self._expect(TokenType.MAP)

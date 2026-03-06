@@ -47,7 +47,8 @@ class TestSingleTokens:
         assert lex("* *") == [(TokenType.STAR, "*"), (TokenType.STAR, "*")]
         assert lex("- >") == [(TokenType.MINUS, "-"), (TokenType.GT, ">")]
         assert lex("= =") == [(TokenType.ASSIGN, "="), (TokenType.ASSIGN, "=")]
-        assert lex("! =") == [(TokenType.BANG, "!"), (TokenType.ASSIGN, "=")]
+        with pytest.raises(Exception):
+            lex("! =")  # bare '!' is no longer valid
         assert lex("< =") == [(TokenType.LT, "<"), (TokenType.ASSIGN, "=")]
 
 

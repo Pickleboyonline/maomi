@@ -153,8 +153,42 @@ class TestScan:
         assert "stablehlo.while" in out
         assert "stablehlo.add" in out
 
+    def test_multi_sequence_scan(self):
+        out = codegen("""
+            fn f(xs: f32[5], ys: f32[5]) -> f32[5] {
+                scan (acc, (x, y)) in (0.0, (xs, ys)) {
+                    acc + x * y
+                }
+            }
+        """)
+        assert "stablehlo.while" in out
+        assert "stablehlo.multiply" in out
+        assert "stablehlo.add" in out
+
 
 class TestSymbolicDimError:
     def test_symbolic_dim_rejected(self):
         with pytest.raises(MaomiError, match="unresolved symbolic dimension"):
             codegen("fn f(x: f32[N]) -> f32 { mean(x) }")
+
+
+class TestCallbackCodegen:
+    def test_callback_compiles(self):
+        """callback should compile as a no-op."""
+        out = codegen("""
+            fn f(x: f32, y: f32) -> f32 {
+                callback(x, y);
+                x + y
+            }
+        """)
+        assert "callback" in out  # comment
+        assert "func.func @f" in out
+
+    def test_callback_no_args_compiles(self):
+        out = codegen("""
+            fn f(x: f32) -> f32 {
+                callback();
+                x
+            }
+        """)
+        assert "func.func @f" in out

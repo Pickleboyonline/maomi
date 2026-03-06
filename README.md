@@ -44,10 +44,11 @@ fn cumsum(xs: f32[10], init: f32) -> f32[10] {
 | `map x in xs { ... }` | Elementwise transform (compiles to vectorized op) |
 | `scan (acc, x) in (init, xs) { ... }` | Sequential fold with carried state |
 | `grad(expr, var)` | Reverse-mode automatic differentiation |
+| `callback(args...);` | Host callback (no-op in codegen, ignored by `grad`) |
 
 **Types:** `f32` `f64` `i32` `i64` `bool` — arrays as `f32[B, 128]` with symbolic or concrete dims.
 
-**Builtins:** `mean` `sum` `exp` `log` `tanh` `sqrt` `abs` — elementwise builtins lift to arrays automatically.
+**Builtins:** `mean` `sum` `exp` `log` `tanh` `sqrt` `abs` `callback` — elementwise builtins lift to arrays automatically.
 
 **Operators:** `+` `-` `*` `/` `@` (matmul) `**` (power) `==` `!=` `<` `>` `<=` `>=`
 
@@ -89,7 +90,7 @@ uv run maomi run examples/grad.mao --fn grad_loss
 
 **Limitations:**
 - Codegen requires concrete dimensions (symbolic dims type-check but don't compile)
-- `grad`: no if/else, no non-builtin calls, no grad-of-grad
+- `grad`: no scan, no grad-of-grad
 - `map`: elementwise bodies only
-- Effect system parsed but not enforced
+- `callback`: compiles but doesn't execute host callbacks yet (IREE outfeed integration pending)
 - No rank polymorphism

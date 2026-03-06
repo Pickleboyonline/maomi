@@ -119,6 +119,48 @@ fn linear(x: f32[4, 8], w: f32[8, 3], b: f32[3]) -> f32[4, 3] {
         assert np.isclose(output, -inputs[0])
 
 
+    def test_relu_gradient(self):
+        """End-to-end: ReLU gradient through function call + if/else AD."""
+        source = """
+fn relu(x: f32) -> f32 { if x > 0.0 { x } else { 0.0 } }
+fn grad_relu(x: f32) -> f32 { grad(relu(x), x) }
+"""
+        result = compile_source(source)
+        sig = result.fn_table["grad_relu"]
+
+        # Positive input → gradient 1.0
+        from maomi.iree_runner import run_stablehlo as run_fn
+        from iree.compiler import compile_str
+        from iree import runtime as ireert
+
+        mlir_text = result.mlir_text.replace("module {", "module @main {", 1)
+        compiled = compile_str(mlir_text, target_backends=["llvm-cpu"], input_type="stablehlo")
+        config = ireert.Config("local-task")
+        ctx = ireert.SystemContext(config=config)
+        vm_module = ireert.VmModule.copy_buffer(ctx.instance, compiled)
+        ctx.add_vm_module(vm_module)
+
+        f = ctx.modules.main["grad_relu"]
+        assert f(np.float32(5.0)).to_host() == 1.0
+        assert f(np.float32(-3.0)).to_host() == 0.0
+
+
+class TestScanGrad:
+    def test_cumulative_sum_gradient(self):
+        """grad(sum(scan(acc+x)), xs) should be [5, 4, 3, 2, 1] for xs: f32[5]."""
+        source = """
+fn f(xs: f32[5]) -> f32[5] {
+    let s = scan (acc, x) in (0.0, xs) { acc + x };
+    grad(sum(s), xs)
+}
+"""
+        result = compile_source(source)
+        sig = result.fn_table["f"]
+        inputs, output = run_stablehlo(result.mlir_text, "f", sig, seed=42)
+        expected = np.array([5.0, 4.0, 3.0, 2.0, 1.0], dtype=np.float32)
+        assert np.allclose(output, expected, atol=1e-5)
+
+
 class TestCompileSource:
     def test_returns_mlir_and_fn_table(self):
         result = compile_source("fn f(x: f32) -> f32 { x }")

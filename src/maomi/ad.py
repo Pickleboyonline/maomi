@@ -16,7 +16,7 @@ Supported operations inside grad:
   identifiers, float/int literals
 
 Not supported (emits compile error):
-  scan, grad-of-grad
+  grad-of-grad
 """
 from __future__ import annotations
 
@@ -38,6 +38,7 @@ from .ast_nodes import (
     ScanExpr,
     MapExpr,
     GradExpr,
+    _ScanGrad,
     Span,
     Expr,
 )
@@ -48,6 +49,7 @@ _DUMMY_SPAN = Span(0, 0, 0, 0)
 
 _ELEMENTWISE_BUILTINS = {"exp", "log", "tanh", "sqrt", "abs"}
 _REDUCTION_BUILTINS = {"mean", "sum"}
+_CALLBACK_BUILTINS = {"callback"}
 
 
 def _collect_free_vars(expr: Expr) -> set[str]:
@@ -82,6 +84,17 @@ def _collect_free_vars_inner(expr: Expr, result: set[str]):
                 _collect_free_vars_inner(body.expr, inner)
                 inner.discard(ev)  # elem_var is bound, not free
                 result.update(inner)
+        case ScanExpr(carry_var=cv, elem_vars=evs, init=init, sequences=seqs, body=body):
+            _collect_free_vars_inner(init, result)
+            for s in seqs:
+                _collect_free_vars_inner(s, result)
+            if body.expr:
+                inner = set[str]()
+                _collect_free_vars_inner(body.expr, inner)
+                inner.discard(cv)
+                for ev in evs:
+                    inner.discard(ev)
+                result.update(inner)
 
 
 def transform_grad(program: Program, type_map: dict[int, MaomiType]) -> Program:
@@ -108,7 +121,7 @@ class ADTransform:
 
     def transform_fn(self, fn: FnDef) -> FnDef:
         new_body = self._transform_block(fn.body)
-        return FnDef(fn.name, fn.params, fn.return_type, fn.effect, new_body, fn.span)
+        return FnDef(fn.name, fn.params, fn.return_type, new_body, fn.span)
 
     def _transform_block(self, block: Block) -> Block:
         # Collect let bindings so grad can see through them
@@ -163,6 +176,18 @@ class ADTransform:
                     self._transform_block(expr.then_block),
                     self._transform_block(expr.else_block),
                     expr.span,
+                )
+                self._copy_type(expr, result)
+                return result
+            case ScanExpr():
+                result = ScanExpr(
+                    expr.carry_var,
+                    expr.elem_vars,
+                    self._transform_expr(expr.init),
+                    [self._transform_expr(s) for s in expr.sequences],
+                    self._transform_block(expr.body),
+                    expr.span,
+                    expr.reverse,
                 )
                 self._copy_type(expr, result)
                 return result
@@ -248,7 +273,10 @@ class ADTransform:
                 var_map[id(expr)] = name
                 tape.append((name, expr))
             case CallExpr(callee=callee, args=args):
-                if callee in _ELEMENTWISE_BUILTINS | _REDUCTION_BUILTINS:
+                if callee in _CALLBACK_BUILTINS:
+                    # Callback: no value, no gradient. Skip entirely.
+                    return
+                elif callee in _ELEMENTWISE_BUILTINS | _REDUCTION_BUILTINS:
                     # Built-in: put on tape as-is
                     for a in args:
                         self._linearize(a, tape, var_map, let_env)
@@ -270,6 +298,13 @@ class ADTransform:
                 tape.append((name, expr))
             case MapExpr(sequence=seq):
                 self._linearize(seq, tape, var_map, let_env)
+                name = self._fresh_name("v")
+                var_map[id(expr)] = name
+                tape.append((name, expr))
+            case ScanExpr(init=init, sequences=seqs):
+                self._linearize(init, tape, var_map, let_env)
+                for s in seqs:
+                    self._linearize(s, tape, var_map, let_env)
                 name = self._fresh_name("v")
                 var_map[id(expr)] = name
                 tape.append((name, expr))
@@ -363,6 +398,15 @@ class ADTransform:
                 inner_subst = {k: v for k, v in subst.items() if k != ev}
                 new_body = self._substitute_block(body, inner_subst)
                 node = MapExpr(ev, new_seq, new_body, expr.span)
+                self._copy_type(expr, node)
+                return node
+            case ScanExpr(carry_var=cv, elem_vars=evs, init=init, sequences=seqs, body=body):
+                new_init = self._substitute(init, subst)
+                new_seqs = [self._substitute(s, subst) for s in seqs]
+                # carry_var and elem_vars are fresh bindings
+                inner_subst = {k: v for k, v in subst.items() if k != cv and k not in evs}
+                new_body = self._substitute_block(body, inner_subst)
+                node = ScanExpr(cv, evs, new_init, new_seqs, new_body, expr.span, expr.reverse)
                 self._copy_type(expr, node)
                 return node
             case _:
@@ -468,6 +512,9 @@ class ADTransform:
 
             case MapExpr(elem_var=elem_var, sequence=seq, body=body):
                 self._backprop_map(elem_var, seq, body, adj, adjoints, var_map, node)
+
+            case ScanExpr(carry_var=cv, elem_vars=evs, init=init, sequences=seqs, body=body):
+                self._backprop_scan(cv, evs, init, seqs, body, adj, adjoints, var_map, node)
 
             case _:
                 raise MaomiError(
@@ -633,6 +680,66 @@ class ADTransform:
             # This requires a reduction, which is complex. For now, skip —
             # free variables in map bodies are treated as constants.
             pass
+
+    def _backprop_scan(self, carry_var: str, elem_vars: list[str],
+                        init: Expr, sequences: list[Expr], body: Block,
+                        adj: Expr, adjoints: dict[str, Expr],
+                        var_map: dict[int, str], node: Expr):
+        """Backprop through scan: emit _ScanGrad nodes for init and each sequence."""
+        body_expr = body.expr
+        if body_expr is None:
+            return
+
+        # Compute symbolic derivatives of body w.r.t. carry and each elem
+        d_body_d_carry = self._differentiate_branch(body_expr, carry_var)
+        d_body_d_elems = [self._differentiate_branch(body_expr, ev) for ev in elem_vars]
+
+        # The forward result is the scan node itself — codegen will generate it
+        fwd_ref = node
+
+        # Propagate to init
+        if id(init) in var_map:
+            init_name = var_map[id(init)]
+            grad_init = _ScanGrad(
+                d_body_d_carry=d_body_d_carry,
+                d_body_d_elems=d_body_d_elems,
+                carry_var=carry_var,
+                elem_vars=elem_vars,
+                init=init,
+                sequences=sequences,
+                forward_result=fwd_ref,
+                adj=adj,
+                wrt="__init__",
+                span=_DUMMY_SPAN,
+            )
+            init_type = self._type_of(init)
+            if init_type is not None:
+                self.type_map[id(grad_init)] = init_type
+            self._accumulate(adjoints, init_name, grad_init)
+
+        # Propagate to each sequence
+        for i, seq in enumerate(sequences):
+            if id(seq) not in var_map:
+                continue
+            seq_name = var_map[id(seq)]
+            # wrt is the sequence variable name (the Identifier name)
+            wrt_name = seq.name if isinstance(seq, Identifier) else f"__seq_{i}__"
+            grad_seq = _ScanGrad(
+                d_body_d_carry=d_body_d_carry,
+                d_body_d_elems=d_body_d_elems,
+                carry_var=carry_var,
+                elem_vars=elem_vars,
+                init=init,
+                sequences=sequences,
+                forward_result=fwd_ref,
+                adj=adj,
+                wrt=wrt_name,
+                span=_DUMMY_SPAN,
+            )
+            seq_type = self._type_of(seq)
+            if seq_type is not None:
+                self.type_map[id(grad_seq)] = seq_type
+            self._accumulate(adjoints, seq_name, grad_seq)
 
     # -- AST construction helpers --
 

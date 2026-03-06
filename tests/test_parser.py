@@ -30,7 +30,6 @@ class TestFnDef:
         assert fn.params[0].type_annotation.base == "f32"
         assert fn.params[0].type_annotation.dims is None
         assert fn.return_type.base == "f32"
-        assert fn.effect is None
 
     def test_no_params(self):
         prog = parse("fn zero() -> f32 { 0.0 }")
@@ -46,9 +45,9 @@ class TestFnDef:
         assert fn.return_type.dims[0].value == "B"
         assert fn.return_type.dims[1].value == 64
 
-    def test_effect_annotation(self):
-        prog = parse("fn f() -> f32 ! State { 0.0 }")
-        assert prog.functions[0].effect == "State"
+    def test_effect_annotation_rejected(self):
+        with pytest.raises(Exception):
+            parse("fn f() -> f32 ! State { 0.0 }")
 
     def test_multiple_functions(self):
         prog = parse("fn a() -> f32 { 1.0 }\nfn b() -> f32 { 2.0 }")
@@ -277,7 +276,7 @@ class TestScan:
         assert isinstance(fn.body.expr, ScanExpr)
         scan = fn.body.expr
         assert scan.carry_var == "h"
-        assert scan.elem_var == "x"
+        assert scan.elem_vars == ["x"]
 
     def test_scan_with_let(self):
         prog = parse("""
@@ -290,6 +289,21 @@ class TestScan:
         """)
         fn = prog.functions[0]
         assert isinstance(fn.body.expr, ScanExpr)
+
+    def test_multi_sequence_scan(self):
+        prog = parse("""
+            fn f(xs: f32[5], ys: f32[5]) -> f32[5] {
+                scan (acc, (x, y)) in (0.0, (xs, ys)) {
+                    acc + x * y
+                }
+            }
+        """)
+        fn = prog.functions[0]
+        scan = fn.body.expr
+        assert isinstance(scan, ScanExpr)
+        assert scan.carry_var == "acc"
+        assert scan.elem_vars == ["x", "y"]
+        assert len(scan.sequences) == 2
 
 
 class TestMap:

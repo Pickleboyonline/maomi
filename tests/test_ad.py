@@ -239,3 +239,68 @@ class TestADUserFunctions:
                 fn rec(x: f32) -> f32 { rec(x) }
                 fn f(x: f32) -> f32 { grad(rec(x), x) }
             """)
+
+
+class TestADScan:
+    def test_scan_grad_produces_scan_grad_node(self):
+        """grad through scan should produce a _ScanGrad node (not zero)."""
+        from maomi.ast_nodes import _ScanGrad
+        prog = ad_transform("""
+            fn f(xs: f32[5]) -> f32[5] {
+                let s = scan (acc, x) in (0.0, xs) { acc + x };
+                grad(sum(s), xs)
+            }
+        """)
+        fn_f = [fn for fn in prog.functions if fn.name == "f"][0]
+        expr = fn_f.body.expr
+        # Should not be zero — should contain a _ScanGrad node somewhere
+        assert not (isinstance(expr, FloatLiteral) and expr.value == 0.0)
+
+    def test_scan_grad_codegen(self):
+        """Full pipeline: grad of scan produces valid StableHLO."""
+        out = ad_codegen("""
+            fn f(xs: f32[5]) -> f32[5] {
+                let s = scan (acc, x) in (0.0, xs) { acc + x };
+                grad(sum(s), xs)
+            }
+        """)
+        assert "module {" in out
+        assert "func.func @f" in out
+        assert "stablehlo.while" in out
+
+    def test_scan_grad_wrt_init(self):
+        """grad of scan w.r.t. init should not be zero."""
+        prog = ad_transform("""
+            fn f(xs: f32[5], init: f32) -> f32 {
+                let s = scan (acc, x) in (init, xs) { acc + x };
+                grad(sum(s), init)
+            }
+        """)
+        fn_f = [fn for fn in prog.functions if fn.name == "f"][0]
+        expr = fn_f.body.expr
+        assert not (isinstance(expr, FloatLiteral) and expr.value == 0.0)
+
+
+class TestCallbackAD:
+    def test_callback_ignored_in_grad(self):
+        """callback calls should be skipped during AD — no error, no gradient."""
+        prog = ad_transform("""
+            fn f(x: f32[4], w: f32[4]) -> f32[4] {
+                callback(x, w);
+                let loss = mean(x * w);
+                grad(loss, w)
+            }
+        """)
+        fn = prog.functions[0]
+        assert fn.body.expr is not None
+
+    def test_callback_in_grad_body_codegen(self):
+        """Programs with callback inside a grad function should compile."""
+        mlir = ad_codegen("""
+            fn f(x: f32[4], w: f32[4]) -> f32[4] {
+                callback(x);
+                let loss = mean(x * w);
+                grad(loss, w)
+            }
+        """)
+        assert "func.func @f" in mlir

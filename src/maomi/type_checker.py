@@ -69,6 +69,7 @@ def _make_builtins() -> dict[str, FnSignature]:
 
 BUILTINS = _make_builtins()
 _ELEMENTWISE_BUILTINS = {"exp", "log", "tanh", "sqrt", "abs"}
+_CALLBACK_BUILTINS = {"callback"}
 
 
 # -- Scoped environment --
@@ -231,29 +232,55 @@ class TypeChecker:
 
     def _check_scan(self, expr: ScanExpr, env: TypeEnv) -> MaomiType | None:
         carry_type = self._infer(expr.init, env)
-        seq_type = self._infer(expr.sequence, env)
 
-        if carry_type is None or seq_type is None:
+        # Infer and validate all sequences
+        seq_types = []
+        for seq in expr.sequences:
+            st = self._infer(seq, env)
+            if st is None:
+                return None
+            if not isinstance(st, ArrayType):
+                self._error(
+                    f"scan sequence must be an array, got {st}",
+                    seq.span.line_start,
+                    seq.span.col_start,
+                )
+                return None
+            seq_types.append(st)
+
+        if carry_type is None:
             return None
 
-        if not isinstance(seq_type, ArrayType):
+        # All sequences must have the same first dimension
+        first_dims = [st.dims[0] for st in seq_types]
+        for i, fd in enumerate(first_dims[1:], 1):
+            if not self._dims_match(fd, first_dims[0]):
+                self._error(
+                    f"scan sequences must have the same first dimension, got {first_dims[0]} and {fd}",
+                    expr.sequences[i].span.line_start,
+                    expr.sequences[i].span.col_start,
+                )
+                return None
+
+        # Check that elem_vars count matches sequences count
+        if len(expr.elem_vars) != len(expr.sequences):
             self._error(
-                f"scan sequence must be an array, got {seq_type}",
-                expr.sequence.span.line_start,
-                expr.sequence.span.col_start,
+                f"scan has {len(expr.elem_vars)} element variables but {len(expr.sequences)} sequences",
+                expr.span.line_start,
+                expr.span.col_start,
             )
             return None
 
-        # Element type = sequence with first dim removed
-        if len(seq_type.dims) == 1:
-            elem_type: MaomiType = ScalarType(seq_type.base)
-        else:
-            elem_type = ArrayType(seq_type.base, seq_type.dims[1:])
-
-        # Check body in scope with carry and elem bound
+        # Bind carry and element variables in body scope
         body_env = env.child()
         body_env.define(expr.carry_var, carry_type)
-        body_env.define(expr.elem_var, elem_type)
+        for ev, st in zip(expr.elem_vars, seq_types):
+            if len(st.dims) == 1:
+                elem_type: MaomiType = ScalarType(st.base)
+            else:
+                elem_type = ArrayType(st.base, st.dims[1:])
+            body_env.define(ev, elem_type)
+
         body_type = self._check_block(expr.body, body_env)
 
         if body_type is None:
@@ -268,7 +295,7 @@ class TypeChecker:
             return None
 
         # Result: stacked carries — [seq_first_dim, ...carry_dims]
-        seq_first = seq_type.dims[0]
+        seq_first = first_dims[0]
         if isinstance(carry_type, ScalarType):
             return ArrayType(carry_type.base, (seq_first,))
         else:
@@ -457,6 +484,12 @@ class TypeChecker:
         return result
 
     def _check_call(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
+        # callback is a special builtin: any args, no return value
+        if expr.callee in _CALLBACK_BUILTINS:
+            for arg in expr.args:
+                self._infer(arg, env)
+            return None
+
         sig = self.fn_table.get(expr.callee)
         if sig is None:
             self._error(

@@ -16,6 +16,7 @@ from .ast_nodes import (
     CallExpr,
     ScanExpr,
     MapExpr,
+    _ScanGrad,
     Expr,
 )
 from .types import MaomiType, ScalarType, ArrayType
@@ -183,6 +184,8 @@ class StableHLOCodegen:
                 return self._gen_scan(expr, env)
             case MapExpr():
                 return self._gen_map(expr, env)
+            case _ScanGrad():
+                return self._gen_scan_grad(expr, env)
             case _:
                 raise MaomiError(
                     f"codegen: unsupported expression type {type(expr).__name__}",
@@ -321,7 +324,14 @@ class StableHLOCodegen:
         )
         return var
 
+    _CALLBACK_BUILTINS = {"callback"}
+
     def _gen_call(self, expr: CallExpr, env: dict[str, str]) -> str:
+        # Callback: no-op in codegen (host callbacks are future work)
+        if expr.callee in self._CALLBACK_BUILTINS:
+            self._emit(f"// callback (no-op)")
+            return ""
+
         # Handle builtins
         if expr.callee in _BUILTIN_OPS:
             return self._gen_elementwise_builtin(expr, env)
@@ -436,148 +446,389 @@ class StableHLOCodegen:
         )
         return var
 
+    # -- Scan helpers --
+
+    def _slice_element(self, seq_ssa: str, idx_ssa: str, seq_type: ArrayType, elem_type: MaomiType) -> str:
+        """Slice a single element from a 1D+ array at a dynamic index, returning scalar or lower-rank."""
+        mlir_seq = _mlir_type(seq_type)
+        mlir_i32 = "tensor<i32>"
+        # Slice with size 1 along first dim, full size on remaining dims
+        slice_sizes = [1] + [d for d in seq_type.dims[1:]]
+        sizes_str = ", ".join(str(s) for s in slice_sizes)
+        sliced_dims = tuple(slice_sizes)
+        sliced_type = ArrayType(seq_type.base, sliced_dims)
+        mlir_sliced = _mlir_type(sliced_type)
+
+        sliced = self._fresh()
+        self._emit(
+            f'{sliced} = "stablehlo.dynamic_slice"({seq_ssa}, {idx_ssa}) '
+            f"{{slice_sizes = array<i64: {sizes_str}>}} "
+            f": ({mlir_seq}, {mlir_i32}) -> {mlir_sliced}"
+        )
+        # Reshape to remove the leading 1 dim
+        result = self._fresh()
+        mlir_elem = _mlir_type(elem_type)
+        self._emit(f"{result} = stablehlo.reshape {sliced} : ({mlir_sliced}) -> {mlir_elem}")
+        return result
+
+    def _update_element(self, arr_ssa: str, elem_ssa: str, idx_ssa: str,
+                         arr_type: ArrayType, elem_type: MaomiType) -> str:
+        """Update a single element in an array at a dynamic index."""
+        mlir_arr = _mlir_type(arr_type)
+        mlir_i32 = "tensor<i32>"
+        # Reshape elem to have leading dim 1
+        if isinstance(elem_type, ScalarType):
+            update_dims = (1,)
+        else:
+            update_dims = (1,) + elem_type.dims
+        update_type = ArrayType(arr_type.base, update_dims)
+        mlir_update = _mlir_type(update_type)
+
+        reshaped = self._fresh()
+        self._emit(f"{reshaped} = stablehlo.reshape {elem_ssa} : ({_mlir_type(elem_type)}) -> {mlir_update}")
+
+        result = self._fresh()
+        self._emit(
+            f"{result} = stablehlo.dynamic_update_slice {arr_ssa}, {reshaped}, {idx_ssa} "
+            f": ({mlir_arr}, {mlir_update}, {mlir_i32}) -> {mlir_arr}"
+        )
+        return result
+
     # -- Scan codegen --
 
     def _gen_scan(self, expr: ScanExpr, env: dict[str, str]) -> str:
         init_val = self._gen_expr(expr.init, env)
-        seq_val = self._gen_expr(expr.sequence, env)
+        seq_vals = [self._gen_expr(s, env) for s in expr.sequences]
 
         init_type = self._type_of(expr.init)
-        seq_type = self._type_of(expr.sequence)
+        seq_types = [self._type_of(s) for s in expr.sequences]
         result_type = self._type_of(expr)
 
-        if not isinstance(seq_type, ArrayType):
-            raise MaomiError("codegen: scan sequence must be array", "<codegen>", 0, 0)
+        for st in seq_types:
+            if not isinstance(st, ArrayType):
+                raise MaomiError("codegen: scan sequence must be array", "<codegen>", 0, 0)
 
-        seq_len = seq_type.dims[0]
+        seq_len = seq_types[0].dims[0]
         if isinstance(seq_len, str):
             raise MaomiError(f"codegen: scan requires concrete sequence length, got '{seq_len}'", "<codegen>", 0, 0)
 
-        # Element type
-        if len(seq_type.dims) == 1:
-            elem_type: MaomiType = ScalarType(seq_type.base)
-        else:
-            elem_type = ArrayType(seq_type.base, seq_type.dims[1:])
+        # Element types (first dim stripped)
+        elem_types: list[MaomiType] = []
+        for st in seq_types:
+            if len(st.dims) == 1:
+                elem_types.append(ScalarType(st.base))
+            else:
+                elem_types.append(ArrayType(st.base, st.dims[1:]))
 
         mlir_init = _mlir_type(init_type)
         mlir_result = _mlir_type(result_type)
-        mlir_seq = _mlir_type(seq_type)
+        mlir_seqs = [_mlir_type(st) for st in seq_types]
         mlir_i32 = "tensor<i32>"
 
-        # Create counter = 0
+        # Create initial values
         counter_var = self._fresh()
-        self._emit(f"{counter_var} = stablehlo.constant dense<0> : {mlir_i32}")
+        if expr.reverse:
+            self._emit(f"{counter_var} = stablehlo.constant dense<{seq_len - 1}> : {mlir_i32}")
+        else:
+            self._emit(f"{counter_var} = stablehlo.constant dense<0> : {mlir_i32}")
 
-        # Create output buffer = zeros
         output_var = self._fresh()
         self._emit(f"{output_var} = stablehlo.constant dense<0.000000e+00> : {mlir_result}")
 
-        # While loop: state = (counter, carry, output)
-        # We emit this as a sequence of ops that represents the unrolled loop
-        # For v0.2, we use stablehlo.while
-        state_types = f"{mlir_i32}, {mlir_init}, {mlir_result}, {mlir_seq}"
-
-        # Emit the while op
+        # Limit/zero for condition (defined outside while so it's accessible inside)
         limit_var = self._fresh()
-        self._emit(f"{limit_var} = stablehlo.constant dense<{seq_len}> : {mlir_i32}")
+        if expr.reverse:
+            self._emit(f"{limit_var} = stablehlo.constant dense<0> : {mlir_i32}")
+        else:
+            self._emit(f"{limit_var} = stablehlo.constant dense<{seq_len}> : {mlir_i32}")
 
-        result_var = self._fresh()
         one_var = self._fresh()
         self._emit(f"{one_var} = stablehlo.constant dense<1> : {mlir_i32}")
 
-        self._emit(f"// scan loop over {seq_len} steps")
-        # For simplicity in v0.2, we'll unroll short sequences or emit a while structure
-        # Emit stablehlo.while with tuple state
+        # Build while arg names and types (unique per while loop)
+        n_seqs = len(seq_vals)
+        uid = self._counter  # unique prefix to avoid name collisions
+        ctr_name = f"_c{uid}"
+        carry_name = f"_k{uid}"
+        out_name = f"_o{uid}"
+        seq_names = [f"_s{uid}_{i}" for i in range(n_seqs)]
+        arg_names = [ctr_name, carry_name, out_name] + seq_names
+        init_vals = [counter_var, init_val, output_var] + seq_vals
+        arg_types = [mlir_i32, mlir_init, mlir_result] + mlir_seqs
+        n_args = len(arg_names)
 
-        tuple_type = f"tuple<{state_types}>"
-
-        # Create initial tuple
-        init_tuple = self._fresh()
-        self._emit(
-            f"{init_tuple} = stablehlo.tuple {counter_var}, {init_val}, {output_var}, {seq_val} "
-            f": {tuple_type}"
-        )
-
-        # While op
+        # While header: %result:N = stablehlo.while(%a = %v, ...) : types
         while_result = self._fresh()
-        self._emit(f"{while_result} = stablehlo.while({init_tuple}) : {tuple_type}")
+        while_args = ", ".join(f"%{arg_names[i]} = {init_vals[i]}" for i in range(n_args))
+        types_str = ", ".join(arg_types)
+        self._emit(f"{while_result}:{n_args} = stablehlo.while({while_args}) : {types_str}")
 
         # Condition region
         self._indent += 1
-        self._emit(f"cond {{")
+        self._emit("cond {")
         self._indent += 1
-        cond_arg = self._fresh()
-        self._emit(f"^bb0({cond_arg}: {tuple_type}):")
-
-        c_counter = self._fresh()
-        self._emit(f"{c_counter} = stablehlo.get_tuple_element {cond_arg}[0] : ({tuple_type}) -> {mlir_i32}")
-        c_limit = self._fresh()
-        self._emit(f"{c_limit} = stablehlo.constant dense<{seq_len}> : {mlir_i32}")
-        c_cmp = self._fresh()
-        self._emit(f"{c_cmp} = stablehlo.compare LT, {c_counter}, {c_limit}, compare_type = SIGNED : {mlir_i32}")
+        if expr.reverse:
+            c_cmp = self._fresh()
+            self._emit(f"{c_cmp} = stablehlo.compare GE, %{ctr_name}, {limit_var} : ({mlir_i32}, {mlir_i32}) -> tensor<i1>")
+        else:
+            c_cmp = self._fresh()
+            self._emit(f"{c_cmp} = stablehlo.compare LT, %{ctr_name}, {limit_var} : ({mlir_i32}, {mlir_i32}) -> tensor<i1>")
         self._emit(f"stablehlo.return {c_cmp} : tensor<i1>")
         self._indent -= 1
         self._emit("}")
 
         # Body region
-        self._emit(f"body {{")
+        self._emit("do {")
         self._indent += 1
-        body_arg = self._fresh()
-        self._emit(f"^bb0({body_arg}: {tuple_type}):")
 
-        # Extract state
-        b_counter = self._fresh()
-        self._emit(f"{b_counter} = stablehlo.get_tuple_element {body_arg}[0] : ({tuple_type}) -> {mlir_i32}")
-        b_carry = self._fresh()
-        self._emit(f"{b_carry} = stablehlo.get_tuple_element {body_arg}[1] : ({tuple_type}) -> {mlir_init}")
-        b_output = self._fresh()
-        self._emit(f"{b_output} = stablehlo.get_tuple_element {body_arg}[2] : ({tuple_type}) -> {mlir_result}")
-        b_seq = self._fresh()
-        self._emit(f"{b_seq} = stablehlo.get_tuple_element {body_arg}[3] : ({tuple_type}) -> {mlir_seq}")
-
-        # Slice element from sequence
-        b_elem = self._fresh()
-        mlir_elem = _mlir_type(elem_type)
-        self._emit(
-            f"{b_elem} = stablehlo.dynamic_slice {b_seq}, {b_counter} "
-            f": ({mlir_seq}, {mlir_i32}) -> {mlir_elem}"
-        )
-
-        # Generate body expression
+        # Slice elements from each sequence
         body_env = dict(env)
-        body_env[expr.carry_var] = b_carry
-        body_env[expr.elem_var] = b_elem
+        body_env[expr.carry_var] = f"%{carry_name}"
+        for i, (ev, st, et) in enumerate(zip(expr.elem_vars, seq_types, elem_types)):
+            b_elem = self._slice_element(f"%{seq_names[i]}", f"%{ctr_name}", st, et)
+            body_env[ev] = b_elem
+
         new_carry = self._gen_block(expr.body, body_env)
 
-        # Update output: dynamic_update_slice
-        new_output = self._fresh()
-        self._emit(
-            f"{new_output} = stablehlo.dynamic_update_slice {b_output}, {new_carry}, {b_counter} "
-            f": ({mlir_result}, {mlir_init}, {mlir_i32}) -> {mlir_result}"
-        )
+        # Update output
+        new_output = self._update_element(f"%{out_name}", new_carry, f"%{ctr_name}", result_type, init_type)
 
-        # Increment counter
-        b_one = self._fresh()
-        self._emit(f"{b_one} = stablehlo.constant dense<1> : {mlir_i32}")
+        # Update counter
         new_counter = self._fresh()
-        self._emit(f"{new_counter} = stablehlo.add {b_counter}, {b_one} : {mlir_i32}")
+        if expr.reverse:
+            self._emit(f"{new_counter} = stablehlo.subtract %{ctr_name}, {one_var} : {mlir_i32}")
+        else:
+            self._emit(f"{new_counter} = stablehlo.add %{ctr_name}, {one_var} : {mlir_i32}")
 
-        # Return new tuple
-        new_tuple = self._fresh()
-        self._emit(
-            f"{new_tuple} = stablehlo.tuple {new_counter}, {new_carry}, {new_output}, {b_seq} "
-            f": {tuple_type}"
-        )
-        self._emit(f"stablehlo.return {new_tuple} : {tuple_type}")
+        # Return new values
+        new_vals = [new_counter, new_carry, new_output] + [f"%{sn}" for sn in seq_names]
+        vals_str = ", ".join(new_vals)
+        self._emit(f"stablehlo.return {vals_str} : {types_str}")
 
         self._indent -= 1
         self._emit("}")
         self._indent -= 1
 
-        # Extract result (output buffer) from while result
-        final_output = self._fresh()
-        self._emit(f"{final_output} = stablehlo.get_tuple_element {while_result}[2] : ({tuple_type}) -> {mlir_result}")
-        return final_output
+        # Result is the output buffer (index 2 in while results)
+        return f"{while_result}#2"
+
+    # -- Scan gradient codegen --
+
+    def _gen_scan_grad(self, expr: _ScanGrad, env: dict[str, str]) -> str:
+        """Emit a reverse while loop for the backward pass of scan."""
+        fwd_result = self._gen_expr(expr.forward_result, env)
+        init_val = self._gen_expr(expr.init, env)
+        seq_vals = [self._gen_expr(s, env) for s in expr.sequences]
+        adj_val = self._gen_expr(expr.adj, env)
+
+        init_type = self._type_of(expr.init)
+        fwd_type = self._type_of(expr.forward_result)
+        adj_type = self._type_of(expr.adj)
+        seq_types = [self._type_of(s) for s in expr.sequences]
+
+        if not isinstance(fwd_type, ArrayType):
+            raise MaomiError("codegen: _ScanGrad forward_result must be array", "<codegen>", 0, 0)
+
+        # Broadcast scalar adj to array if needed
+        if isinstance(adj_type, ScalarType) and isinstance(fwd_type, ArrayType):
+            adj_val = self._maybe_broadcast(adj_val, adj_type, fwd_type)
+            adj_type = fwd_type
+
+        seq_len = fwd_type.dims[0]
+        if isinstance(seq_len, str):
+            raise MaomiError(f"codegen: _ScanGrad requires concrete length, got '{seq_len}'", "<codegen>", 0, 0)
+
+        elem_types: list[MaomiType] = []
+        for st in seq_types:
+            if not isinstance(st, ArrayType):
+                raise MaomiError("codegen: _ScanGrad sequence must be array", "<codegen>", 0, 0)
+            if len(st.dims) == 1:
+                elem_types.append(ScalarType(st.base))
+            else:
+                elem_types.append(ArrayType(st.base, st.dims[1:]))
+
+        n_seqs = len(expr.sequences)
+        mlir_i32 = "tensor<i32>"
+        mlir_init = _mlir_type(init_type)
+        mlir_fwd = _mlir_type(fwd_type)
+        mlir_adj = _mlir_type(adj_type)
+        mlir_seqs = [_mlir_type(st) for st in seq_types]
+
+        # Initialize outside the while (so accessible inside regions)
+        counter_var = self._fresh()
+        self._emit(f"{counter_var} = stablehlo.constant dense<{seq_len - 1}> : {mlir_i32}")
+
+        adj_carry_init = self._fresh()
+        self._emit(f"{adj_carry_init} = stablehlo.constant dense<0.000000e+00> : {mlir_init}")
+
+        adj_seq_inits = []
+        for ms in mlir_seqs:
+            v = self._fresh()
+            self._emit(f"{v} = stablehlo.constant dense<0.000000e+00> : {ms}")
+            adj_seq_inits.append(v)
+
+        zero_var = self._fresh()
+        self._emit(f"{zero_var} = stablehlo.constant dense<0> : {mlir_i32}")
+        one_var = self._fresh()
+        self._emit(f"{one_var} = stablehlo.constant dense<1> : {mlir_i32}")
+
+        # Build while arg names and types (unique per while loop)
+        # State: counter, adj_carry, adj_seq_0..N-1, fwd_carries, seq_0..N-1, adj_array, init_val, zero, one
+        uid = self._counter
+        gc_name = f"_gc{uid}"
+        gac_name = f"_gac{uid}"
+        gas_names = [f"_gas{uid}_{i}" for i in range(n_seqs)]
+        gfwd_name = f"_gfwd{uid}"
+        gos_names = [f"_gos{uid}_{i}" for i in range(n_seqs)]
+        gadj_name = f"_gadj{uid}"
+        ginit_name = f"_ginit{uid}"
+        gzero_name = f"_gz{uid}"
+        gone_name = f"_go{uid}"
+
+        arg_names = [gc_name, gac_name]
+        init_vals = [counter_var, adj_carry_init]
+        arg_types_list = [mlir_i32, mlir_init]
+
+        for i in range(n_seqs):
+            arg_names.append(gas_names[i])
+            init_vals.append(adj_seq_inits[i])
+            arg_types_list.append(mlir_seqs[i])
+
+        arg_names.append(gfwd_name)
+        init_vals.append(fwd_result)
+        arg_types_list.append(mlir_fwd)
+
+        for i in range(n_seqs):
+            arg_names.append(gos_names[i])
+            init_vals.append(seq_vals[i])
+            arg_types_list.append(mlir_seqs[i])
+
+        arg_names.append(gadj_name)
+        init_vals.append(adj_val)
+        arg_types_list.append(mlir_adj)
+
+        arg_names.append(ginit_name)
+        init_vals.append(init_val)
+        arg_types_list.append(mlir_init)
+
+        # Thread zero/one constants as while args to avoid capture issues
+        arg_names.append(gzero_name)
+        init_vals.append(zero_var)
+        arg_types_list.append(mlir_i32)
+
+        arg_names.append(gone_name)
+        init_vals.append(one_var)
+        arg_types_list.append(mlir_i32)
+
+        n_args = len(arg_names)
+        types_str = ", ".join(arg_types_list)
+
+        # Use generic format for while to avoid parser issues with named args
+        while_result = self._fresh()
+        init_operands = ", ".join(init_vals)
+        in_types = ", ".join(arg_types_list)
+        out_types = ", ".join(arg_types_list)
+
+        # Cond region needs DIFFERENT names from body region (MLIR requires unique SSA names)
+        cond_names = [f"{n}c" for n in arg_names]
+        gc_cond = cond_names[0]  # counter in cond
+        gz_cond = cond_names[-2]  # zero in cond
+
+        bb_cond = ", ".join(f"%{cond_names[i]}: {arg_types_list[i]}" for i in range(n_args))
+        bb_body = ", ".join(f"%{arg_names[i]}: {arg_types_list[i]}" for i in range(n_args))
+
+        z = f"%{gzero_name}"
+        o = f"%{gone_name}"
+
+        self._emit(f"{while_result}:{n_args} = \"stablehlo.while\"({init_operands}) ({{")
+        self._indent += 1
+        self._emit(f"^bb0({bb_cond}):")
+        self._indent += 1
+
+        # Condition: counter >= 0
+        c_cmp = self._fresh()
+        self._emit(f"{c_cmp} = stablehlo.compare GE, %{gc_cond}, %{gz_cond} : ({mlir_i32}, {mlir_i32}) -> tensor<i1>")
+        self._emit(f"stablehlo.return {c_cmp} : tensor<i1>")
+        self._indent -= 1
+        self._indent -= 1
+        self._emit("}, {")
+        self._indent += 1
+        self._emit(f"^bb0({bb_body}):")
+        self._indent += 1
+
+        # Body
+        # Slice adj_t from adj_array
+        adj_t = self._slice_element(f"%{gadj_name}", f"%{gc_name}", adj_type, init_type)
+
+        # adj_total = adj_carry + adj_t
+        adj_total = self._fresh()
+        self._emit(f"{adj_total} = stablehlo.add %{gac_name}, {adj_t} : {mlir_init}")
+
+        # Compute prev_carry = select(counter > 0, fwd_carries[counter-1], init)
+        prev_idx = self._fresh()
+        self._emit(f"{prev_idx} = stablehlo.subtract %{gc_name}, {o} : {mlir_i32}")
+        clamped_idx = self._fresh()
+        self._emit(f"{clamped_idx} = stablehlo.clamp {z}, {prev_idx}, %{gc_name} : ({mlir_i32}, {mlir_i32}, {mlir_i32}) -> {mlir_i32}")
+
+        fwd_prev = self._slice_element(f"%{gfwd_name}", clamped_idx, fwd_type, init_type)
+
+        gt_zero = self._fresh()
+        self._emit(f"{gt_zero} = stablehlo.compare GT, %{gc_name}, {z} : ({mlir_i32}, {mlir_i32}) -> tensor<i1>")
+
+        prev_carry = self._fresh()
+        self._emit(f"{prev_carry} = stablehlo.select {gt_zero}, {fwd_prev}, %{ginit_name} : (tensor<i1>, {mlir_init}, {mlir_init}) -> {mlir_init}")
+
+        # Slice elements from original sequences
+        b_elems = []
+        for i in range(n_seqs):
+            elem = self._slice_element(f"%{gos_names[i]}", f"%{gc_name}", seq_types[i], elem_types[i])
+            b_elems.append(elem)
+
+        # Evaluate derivative expressions with substituted values
+        deriv_env = dict(env)
+        deriv_env[expr.carry_var] = prev_carry
+        for ev, elem_ssa in zip(expr.elem_vars, b_elems):
+            deriv_env[ev] = elem_ssa
+
+        d_carry_val = self._gen_expr(expr.d_body_d_carry, deriv_env)
+
+        # new_adj_carry = adj_total * d_carry_val
+        new_adj_carry = self._fresh()
+        self._emit(f"{new_adj_carry} = stablehlo.multiply {adj_total}, {d_carry_val} : {mlir_init}")
+
+        # For each sequence, compute adj_elem and accumulate
+        new_adj_seqs = []
+        for i in range(n_seqs):
+            d_elem_val = self._gen_expr(expr.d_body_d_elems[i], deriv_env)
+            adj_elem = self._fresh()
+            mlir_et = _mlir_type(elem_types[i])
+            self._emit(f"{adj_elem} = stablehlo.multiply {adj_total}, {d_elem_val} : {mlir_et}")
+            new_adj_seq = self._update_element(f"%{gas_names[i]}", adj_elem, f"%{gc_name}", seq_types[i], elem_types[i])
+            new_adj_seqs.append(new_adj_seq)
+
+        # Decrement counter
+        new_counter = self._fresh()
+        self._emit(f"{new_counter} = stablehlo.subtract %{gc_name}, {o} : {mlir_i32}")
+
+        # Return new values (include zero/one passthrough)
+        new_vals = [new_counter, new_adj_carry] + new_adj_seqs
+        new_vals += [f"%{gfwd_name}"] + [f"%{gos_names[i]}" for i in range(n_seqs)]
+        new_vals += [f"%{gadj_name}", f"%{ginit_name}", z, o]
+        vals_str = ", ".join(new_vals)
+        self._emit(f"stablehlo.return {vals_str} : {types_str}")
+
+        self._indent -= 1
+        self._indent -= 1
+        self._emit(f"}}) : ({in_types}) -> ({out_types})")
+
+        # Extract result based on wrt
+        if expr.wrt == "__init__":
+            return f"{while_result}#1"  # adj_carry
+        else:
+            for i, seq_expr in enumerate(expr.sequences):
+                if isinstance(seq_expr, Identifier) and seq_expr.name == expr.wrt:
+                    return f"{while_result}#{2 + i}"  # adj_seq_i
+            return f"{while_result}#2"  # fallback: first adj_seq
 
     # -- Map codegen --
 

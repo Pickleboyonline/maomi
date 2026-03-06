@@ -42,7 +42,6 @@ class FnDef:
     name: str
     params: list[Param]
     return_type: TypeAnnotation
-    effect: str | None
     body: Block
     span: Span
 
@@ -134,11 +133,12 @@ class CallExpr:
 @dataclass
 class ScanExpr:
     carry_var: str
-    elem_var: str
+    elem_vars: list[str]
     init: Expr
-    sequence: Expr
+    sequences: list[Expr]
     body: Block
     span: Span
+    reverse: bool = False
 
 
 @dataclass
@@ -156,8 +156,23 @@ class GradExpr:
     span: Span
 
 
+@dataclass
+class _ScanGrad:
+    """Internal: backward pass of scan. Created by AD, compiled by codegen."""
+    d_body_d_carry: Expr
+    d_body_d_elems: list[Expr]
+    carry_var: str
+    elem_vars: list[str]
+    init: Expr
+    sequences: list[Expr]
+    forward_result: Expr
+    adj: Expr
+    wrt: str
+    span: Span
+
+
 # Union types for convenience
-Expr = IntLiteral | FloatLiteral | BoolLiteral | Identifier | UnaryOp | BinOp | IfExpr | CallExpr | ScanExpr | MapExpr | GradExpr
+Expr = IntLiteral | FloatLiteral | BoolLiteral | Identifier | UnaryOp | BinOp | IfExpr | CallExpr | ScanExpr | MapExpr | GradExpr | _ScanGrad
 Stmt = LetStmt | ExprStmt
 
 
