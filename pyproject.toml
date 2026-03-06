@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "maomi"
+version = "0.3.0"
+description = "A pure functional ML language that compiles to XLA"
+requires-python = ">=3.11"
+
+[project.scripts]
+maomi = "maomi.cli:main"
+
+[project.optional-dependencies]
+run = ["jax[cpu]>=0.4.20"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/maomi"]
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
