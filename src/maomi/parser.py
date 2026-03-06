@@ -27,6 +27,8 @@ from .ast_nodes import (
     StructLiteral,
     FieldAccess,
     WithExpr,
+    IndexComponent,
+    IndexExpr,
     Expr,
 )
 from .errors import ParseError
@@ -418,6 +420,12 @@ class Parser:
             elif self._check(TokenType.LBRACE) and isinstance(expr, Identifier) and self._is_struct_literal():
                 # Struct literal: Name { field: expr, ... }
                 expr = self._parse_struct_literal(expr)
+            elif self._check(TokenType.LBRACKET):
+                # Array indexing: expr[i], expr[1:3], expr[:, 0], etc.
+                start_tok = self._advance()  # consume '['
+                indices = self._parse_index_components()
+                self._expect(TokenType.RBRACKET)
+                expr = IndexExpr(expr, indices, Span(expr.span.line_start, expr.span.col_start, self.tokens[self.pos - 1].line, self.tokens[self.pos - 1].col + 1))
             elif self._check(TokenType.DOT):
                 # DOT: either module-qualified name (math.relu(...)) or struct field access (point.x)
                 self._advance()
@@ -432,6 +440,38 @@ class Parser:
             else:
                 break
         return expr
+
+    def _parse_index_components(self) -> list[IndexComponent]:
+        """Parse comma-separated index components: single, slice, or full-axis."""
+        components: list[IndexComponent] = []
+        components.append(self._parse_one_index())
+        while self._match(TokenType.COMMA):
+            components.append(self._parse_one_index())
+        return components
+
+    def _parse_one_index(self) -> IndexComponent:
+        """Parse a single index component: expr, expr:expr, or : (full axis)."""
+        start = self._current()
+
+        # Leading colon: either full axis (:) or slice with omitted start (:end)
+        if self._check(TokenType.COLON):
+            colon_tok = self._advance()
+            # If followed by , or ] → full axis
+            if self._check(TokenType.COMMA) or self._check(TokenType.RBRACKET):
+                return IndexComponent("full", None, None, None, self._span_from(colon_tok))
+            # Otherwise it's :end — but we require both bounds for now
+            raise self._error("slice must have both start and end (e.g. 1:3)")
+
+        # Parse an expression
+        expr = self._parse_expr()
+
+        # If followed by colon → it's a slice start:end
+        if self._match(TokenType.COLON):
+            end_expr = self._parse_expr()
+            return IndexComponent("slice", None, expr, end_expr, Span(start.line, start.col, self.tokens[self.pos - 1].line, self.tokens[self.pos - 1].col + len(self.tokens[self.pos - 1].value)))
+
+        # Otherwise it's a single index
+        return IndexComponent("single", expr, None, None, Span(start.line, start.col, self.tokens[self.pos - 1].line, self.tokens[self.pos - 1].col + len(self.tokens[self.pos - 1].value)))
 
     def _is_struct_literal(self) -> bool:
         """Lookahead: check if LBRACE starts a struct literal (IDENT COLON) or a block."""

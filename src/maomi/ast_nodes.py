@@ -188,6 +188,22 @@ class WithExpr:
 
 
 @dataclass
+class IndexComponent:
+    kind: str              # "single" | "slice" | "full"
+    value: Expr | None     # the index expr (kind == "single")
+    start: Expr | None     # range start (kind == "slice")
+    end: Expr | None       # range end (kind == "slice")
+    span: Span
+
+
+@dataclass
+class IndexExpr:
+    base: Expr
+    indices: list[IndexComponent]
+    span: Span
+
+
+@dataclass
 class _ScanGrad:
     """Internal: backward pass of scan. Created by AD, compiled by codegen."""
     d_body_d_carry: Expr
@@ -202,8 +218,17 @@ class _ScanGrad:
     span: Span
 
 
+@dataclass
+class _IndexGrad:
+    """Internal: backward pass of indexing. Created by AD, compiled by codegen."""
+    base_expr: Expr               # original array being indexed (for shape)
+    adj: Expr                     # adjoint of the indexed result
+    indices: list[IndexComponent] # same indices as forward pass
+    span: Span
+
+
 # Union types for convenience
-Expr = IntLiteral | FloatLiteral | BoolLiteral | Identifier | UnaryOp | BinOp | IfExpr | CallExpr | ScanExpr | MapExpr | GradExpr | StructLiteral | FieldAccess | WithExpr | _ScanGrad
+Expr = IntLiteral | FloatLiteral | BoolLiteral | Identifier | UnaryOp | BinOp | IfExpr | CallExpr | ScanExpr | MapExpr | GradExpr | StructLiteral | FieldAccess | WithExpr | IndexExpr | _ScanGrad | _IndexGrad
 Stmt = LetStmt | ExprStmt
 
 
