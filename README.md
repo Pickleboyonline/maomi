@@ -73,10 +73,10 @@ fn slice_window(x: f32[10]) -> f32[3] {
 ## How It Works
 
 ```
-.mao → lexer → parser → resolver → type checker → AD transform → StableHLO → IREE
+.mao → lexer → parser → resolver → type checker → AD transform → StableHLO → JAX/XLA
 ```
 
-The compiler is written in Python. It emits StableHLO (an MLIR dialect), which can be lowered via IREE for execution on CPU/GPU/TPU. The resolver handles module imports — loading, prefixing, and merging functions from other `.mao` files.
+The compiler is written in Python. It emits StableHLO (an MLIR dialect), which is executed via JAX's XLA backend. The resolver handles module imports — loading, prefixing, and merging functions from other `.mao` files.
 
 ## Install
 
@@ -84,7 +84,7 @@ Requires Python >= 3.11.
 
 ```bash
 uv sync                  # compiler only
-uv sync --extra run      # with IREE execution backend
+uv sync --extra run      # with JAX execution backend
 ```
 
 ## Usage
@@ -96,7 +96,7 @@ uv run maomi compile examples/mlp.mao --emit stablehlo
 # Other emit formats: tokens, ast, types
 uv run maomi compile examples/mlp.mao --emit types
 
-# Compile and run (requires IREE)
+# Compile and run (requires JAX)
 uv run maomi run examples/grad.mao --fn grad_loss
 ```
 
@@ -104,7 +104,7 @@ uv run maomi run examples/grad.mao --fn grad_loss
 
 **v0.5** — 242 tests across lexer, parser, type checker, codegen, AD, modules, and indexing. Full pipeline from source to StableHLO.
 
-**Works:** shape-typed arrays, array indexing/slicing, named structs (nested, with functional updates), `scan`/`map`/`grad`, scan gradients, struct-shaped gradients, import/module system, StableHLO codegen, IREE execution for concrete-dimension programs.
+**Works:** shape-typed arrays, array indexing/slicing, named structs (nested, with functional updates), `scan`/`map`/`grad`, scan gradients, struct-shaped gradients, import/module system, StableHLO codegen, JAX/XLA execution for concrete-dimension programs.
 
 **Limitations:**
 - Codegen requires concrete dimensions (symbolic dims type-check but don't compile)
