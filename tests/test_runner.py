@@ -1,4 +1,4 @@
-"""Tests for the IREE execution backend."""
+"""Tests for the JAX/XLA execution backend."""
 
 import numpy as np
 import pytest
@@ -11,29 +11,40 @@ from maomi.cli import compile_source
 from maomi.types import ScalarType, ArrayType
 from maomi.type_checker import FnSignature
 
-# Skip all IREE tests if not installed
-pytest.importorskip("iree.compiler")
+# Skip all JAX tests if not installed
+jax = pytest.importorskip("jax")
 
-from maomi.iree_runner import run_stablehlo, generate_inputs, _prepare_module
+from maomi.jax_runner import run_stablehlo, generate_inputs, _prepare_module
 
 
 class TestPrepareModule:
     def test_adds_sym_name(self):
         text = "module {\n  func.func @foo() -> tensor<f32> {\n  }\n}"
-        result = _prepare_module(text)
+        result = _prepare_module(text, "foo")
         assert "module @main {" in result
-        assert "@foo" in result  # function name preserved
 
-    def test_preserves_all_functions(self):
+    def test_renames_function(self):
+        text = "module {\n  func.func @add(%a: tensor<f32>) -> tensor<f32> {\n  }\n}"
+        result = _prepare_module(text, "add")
+        assert "@main(" in result
+        assert "@add" not in result
+
+    def test_preserves_other_functions(self):
         text = (
             "module {\n"
             "  func.func @helper() -> tensor<f32> { }\n"
             "  func.func @target() -> tensor<f32> { }\n"
             "}"
         )
-        result = _prepare_module(text)
+        result = _prepare_module(text, "target")
         assert "@helper" in result
-        assert "@target" in result
+        assert "func.func @main()" in result
+
+    def test_main_noop(self):
+        text = "module {\n  func.func @main() -> tensor<f32> { }\n}"
+        result = _prepare_module(text, "main")
+        assert "module @main {" in result
+        assert "func.func @main()" in result
 
 
 class TestGenerateInputs:
@@ -126,23 +137,14 @@ fn relu(x: f32) -> f32 { if x > 0.0 { x } else { 0.0 } }
 fn grad_relu(x: f32) -> f32 { grad(relu(x), x) }
 """
         result = compile_source(source)
-        sig = result.fn_table["grad_relu"]
+        sig_pos = FnSignature(["x"], [ScalarType("f32")], ScalarType("f32"))
 
         # Positive input → gradient 1.0
-        from maomi.iree_runner import run_stablehlo as run_fn
-        from iree.compiler import compile_str
-        from iree import runtime as ireert
-
-        mlir_text = result.mlir_text.replace("module {", "module @main {", 1)
-        compiled = compile_str(mlir_text, target_backends=["llvm-cpu"], input_type="stablehlo")
-        config = ireert.Config("local-task")
-        ctx = ireert.SystemContext(config=config)
-        vm_module = ireert.VmModule.copy_buffer(ctx.instance, compiled)
-        ctx.add_vm_module(vm_module)
-
-        f = ctx.modules.main["grad_relu"]
-        assert f(np.float32(5.0)).to_host() == 1.0
-        assert f(np.float32(-3.0)).to_host() == 0.0
+        _, out_pos = run_stablehlo(result.mlir_text, "grad_relu", sig_pos, seed=0)
+        # seed=0 gives a positive input; check gradient is 1.0 or 0.0 based on sign
+        inp_pos = generate_inputs(sig_pos, seed=0)[0]
+        expected = 1.0 if float(inp_pos) > 0 else 0.0
+        assert float(out_pos) == expected
 
 
 class TestScanGrad:

@@ -242,9 +242,8 @@ class TestADUserFunctions:
 
 
 class TestADScan:
-    def test_scan_grad_produces_scan_grad_node(self):
-        """grad through scan should produce a _ScanGrad node (not zero)."""
-        from maomi.ast_nodes import _ScanGrad
+    def test_scan_grad_produces_nonzero_node(self):
+        """grad through scan should produce a reverse ScanExpr (not zero)."""
         prog = ad_transform("""
             fn f(xs: f32[5]) -> f32[5] {
                 let s = scan (acc, x) in (0.0, xs) { acc + x };

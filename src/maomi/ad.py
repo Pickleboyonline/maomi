@@ -776,7 +776,7 @@ class ADTransform:
                         init: Expr, sequences: list[Expr], body: Block,
                         adj: Expr, adjoints: dict[str, Expr],
                         var_map: dict[int, str], node: Expr):
-        """Backprop through scan: emit _ScanGrad nodes for init and each sequence."""
+        """Backprop through scan: emit reverse ScanExpr or _ScanGrad nodes."""
         body_expr = body.expr
         if body_expr is None:
             return
@@ -788,7 +788,7 @@ class ADTransform:
         # The forward result is the scan node itself — codegen will generate it
         fwd_ref = node
 
-        # Propagate to init
+        # Propagate to init (keep _ScanGrad — extracting final carry needs special handling)
         if id(init) in var_map:
             init_name = var_map[id(init)]
             grad_init = _ScanGrad(
@@ -808,29 +808,106 @@ class ADTransform:
                 self.type_map[id(grad_init)] = init_type
             self._accumulate(adjoints, init_name, grad_init)
 
+        # Check if derivatives are constant (don't reference carry/elem vars).
+        # When constant, we can emit a simple reverse ScanExpr (JAX-style)
+        # instead of the complex _ScanGrad node.
+        all_deriv_vars = _collect_free_vars(d_body_d_carry)
+        for de in d_body_d_elems:
+            all_deriv_vars |= _collect_free_vars(de)
+        constant_derivs = not (all_deriv_vars & {carry_var, *elem_vars})
+
         # Propagate to each sequence
         for i, seq in enumerate(sequences):
             if id(seq) not in var_map:
                 continue
             seq_name = var_map[id(seq)]
-            # wrt is the sequence variable name (the Identifier name)
-            wrt_name = seq.name if isinstance(seq, Identifier) else f"__seq_{i}__"
-            grad_seq = _ScanGrad(
-                d_body_d_carry=d_body_d_carry,
-                d_body_d_elems=d_body_d_elems,
-                carry_var=carry_var,
-                elem_vars=elem_vars,
-                init=init,
-                sequences=sequences,
-                forward_result=fwd_ref,
-                adj=adj,
-                wrt=wrt_name,
-                span=_DUMMY_SPAN,
-            )
+
+            if constant_derivs:
+                # JAX-style: backward pass is just a reverse scan
+                grad_seq = self._build_reverse_scan_grad(
+                    d_body_d_carry, d_body_d_elems[i], adj, seq, node)
+            else:
+                # Fallback: _ScanGrad for non-constant derivatives
+                wrt_name = seq.name if isinstance(seq, Identifier) else f"__seq_{i}__"
+                grad_seq = _ScanGrad(
+                    d_body_d_carry=d_body_d_carry,
+                    d_body_d_elems=d_body_d_elems,
+                    carry_var=carry_var,
+                    elem_vars=elem_vars,
+                    init=init,
+                    sequences=sequences,
+                    forward_result=fwd_ref,
+                    adj=adj,
+                    wrt=wrt_name,
+                    span=_DUMMY_SPAN,
+                )
+
             seq_type = self._type_of(seq)
             if seq_type is not None:
                 self.type_map[id(grad_seq)] = seq_type
             self._accumulate(adjoints, seq_name, grad_seq)
+
+    def _build_reverse_scan_grad(self, d_carry: Expr, d_elem: Expr,
+                                  adj: Expr, seq: Expr, scan_node: Expr) -> ScanExpr:
+        """Build a reverse ScanExpr for the backward pass (constant derivative case).
+
+        The backward scan accumulates: new_carry = carry * d_carry + adj_elem * d_elem
+        and stacks the carries as the gradient array.
+        """
+        fresh_carry = self._fresh_name("_adj_c")
+        fresh_elem = self._fresh_name("_adj_e")
+
+        # Carry type = element type of scan result (what each step produces)
+        scan_type = self._type_of(scan_node)
+        if isinstance(scan_type, ArrayType):
+            if len(scan_type.dims) == 1:
+                carry_type = ScalarType(scan_type.base)
+            else:
+                carry_type = ArrayType(scan_type.base, scan_type.dims[1:])
+        else:
+            carry_type = scan_type
+
+        # Create typed carry reference
+        carry_ref = Identifier(fresh_carry, _DUMMY_SPAN)
+        self.type_map[id(carry_ref)] = carry_type
+
+        # Determine adj element and backward sequence
+        adj_type = self._type_of(adj)
+        if isinstance(adj_type, ArrayType):
+            # adj is an array — use it as the sequence, elem_var gets sliced adj
+            back_seq = adj
+            adj_element = Identifier(fresh_elem, _DUMMY_SPAN)
+            if len(adj_type.dims) == 1:
+                self.type_map[id(adj_element)] = ScalarType(adj_type.base)
+            else:
+                self.type_map[id(adj_element)] = ArrayType(adj_type.base, adj_type.dims[1:])
+        else:
+            # adj is scalar — use original seq for iteration count, adj directly in body
+            back_seq = seq
+            adj_element = adj
+
+        # Build body: carry * d_carry + adj_element * d_elem
+        # Simplify: skip * 1.0 when derivative is FloatLiteral(1.0)
+        def is_one(e):
+            return isinstance(e, FloatLiteral) and e.value == 1.0
+
+        term1 = carry_ref if is_one(d_carry) else self._make_binop("*", carry_ref, d_carry)
+        term2 = adj_element if is_one(d_elem) else self._make_binop("*", adj_element, d_elem)
+        body_expr = self._make_binop("+", term1, term2)
+        body_block = Block([], body_expr, _DUMMY_SPAN)
+
+        # Init: zero with carry type
+        back_init = self._make_zero(carry_type)
+
+        return ScanExpr(
+            carry_var=fresh_carry,
+            elem_vars=[fresh_elem],
+            init=back_init,
+            sequences=[back_seq],
+            body=body_block,
+            span=_DUMMY_SPAN,
+            reverse=True,
+        )
 
     # -- AST construction helpers --
 

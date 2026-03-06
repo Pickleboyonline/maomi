@@ -159,10 +159,10 @@ def _run(path: str, fn_name: str, seed: int):
                     sys.exit(1)
 
     try:
-        from .iree_runner import run_stablehlo
+        from .jax_runner import run_stablehlo
     except ImportError:
         print(
-            "error: IREE is required for the 'run' command.\n"
+            "error: JAX is required for the 'run' command.\n"
             "Install with: uv sync --extra run",
             file=sys.stderr,
         )

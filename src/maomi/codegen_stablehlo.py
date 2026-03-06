@@ -26,6 +26,32 @@ from .types import MaomiType, ScalarType, ArrayType, StructType
 from .errors import MaomiError
 
 
+def _block_references_var(block: Block, var_name: str) -> bool:
+    """Check if a block's expression references a variable name."""
+    if block.expr is None:
+        return False
+    return _expr_references_var(block.expr, var_name)
+
+
+def _expr_references_var(expr: Expr, var_name: str) -> bool:
+    """Recursively check if an expression references a variable by name."""
+    match expr:
+        case Identifier(name=name):
+            return name == var_name
+        case UnaryOp(operand=operand):
+            return _expr_references_var(operand, var_name)
+        case BinOp(left=left, right=right):
+            return _expr_references_var(left, var_name) or _expr_references_var(right, var_name)
+        case CallExpr(args=args):
+            return any(_expr_references_var(a, var_name) for a in args)
+        case IfExpr(condition=c, then_block=tb, else_block=eb):
+            return (_expr_references_var(c, var_name)
+                    or _block_references_var(tb, var_name)
+                    or _block_references_var(eb, var_name))
+        case _:
+            return False
+
+
 # Maps Maomi base types to MLIR element types
 _MLIR_ETYPE = {
     "f32": "f32",
@@ -673,12 +699,13 @@ class StableHLOCodegen:
         self._emit("} do {")
         self._indent += 1
 
-        # Slice elements from each sequence
+        # Slice elements from each sequence (skip if elem_var unused in body)
         body_env = dict(env)
         body_env[expr.carry_var] = f"%{carry_name}"
         for i, (ev, st, et) in enumerate(zip(expr.elem_vars, seq_types, elem_types)):
-            b_elem = self._slice_element(f"%{seq_names[i]}", f"%{ctr_name}", st, et)
-            body_env[ev] = b_elem
+            if _block_references_var(expr.body, ev):
+                b_elem = self._slice_element(f"%{seq_names[i]}", f"%{ctr_name}", st, et)
+                body_env[ev] = b_elem
 
         new_carry = self._gen_block(expr.body, body_env)
 
