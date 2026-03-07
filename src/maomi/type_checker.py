@@ -45,6 +45,13 @@ COMPARISON_OPS = {"==", "!=", "<", ">", "<=", ">="}
 ARITHMETIC_OPS = {"+", "-", "*", "/", "**", "@"}
 
 
+def _try_negative_literal(expr) -> int | None:
+    """If expr is UnaryOp('-', IntLiteral(n)), return -n. Otherwise None."""
+    if isinstance(expr, UnaryOp) and expr.op == "-" and isinstance(expr.operand, IntLiteral):
+        return -expr.operand.value
+    return None
+
+
 def _is_numeric(t: MaomiType) -> bool:
     if isinstance(t, ScalarType):
         return t.base in NUMERIC_BASES
@@ -524,8 +531,60 @@ class TypeChecker:
                         f"index must be i32, got {idx_type}",
                         ic.span.line_start, ic.span.col_start,
                     )
+                # Normalize static negative literal: x[-1] on dim=10 → x[9]
+                neg = _try_negative_literal(ic.value)
+                if neg is not None:
+                    if not isinstance(dim, int):
+                        self._error(
+                            f"negative index requires concrete dimension, got '{dim}'",
+                            ic.span.line_start, ic.span.col_start,
+                        )
+                        return None
+                    normalized = dim + neg
+                    if normalized < 0:
+                        self._error(
+                            f"negative index {neg} out of bounds for axis of size {dim}",
+                            ic.span.line_start, ic.span.col_start,
+                        )
+                        return None
+                    ic.value = IntLiteral(normalized, ic.value.span)
+                    self.type_map[id(ic.value)] = I32
                 # Single index removes this dimension
             elif ic.kind == "slice":
+                # Fill open-ended bounds from known dimension
+                if ic.start is None:
+                    ic.start = IntLiteral(0, ic.span)
+                    self.type_map[id(ic.start)] = I32
+                if ic.end is None:
+                    if not isinstance(dim, int):
+                        self._error(
+                            f"open-ended slice requires concrete dimension, got '{dim}'",
+                            ic.span.line_start, ic.span.col_start,
+                        )
+                        return None
+                    ic.end = IntLiteral(dim, ic.span)
+                    self.type_map[id(ic.end)] = I32
+                # Normalize negative literals in bounds
+                neg_s = _try_negative_literal(ic.start)
+                if neg_s is not None:
+                    if not isinstance(dim, int):
+                        self._error(
+                            f"negative slice bound requires concrete dimension, got '{dim}'",
+                            ic.span.line_start, ic.span.col_start,
+                        )
+                        return None
+                    ic.start = IntLiteral(dim + neg_s, ic.start.span)
+                    self.type_map[id(ic.start)] = I32
+                neg_e = _try_negative_literal(ic.end)
+                if neg_e is not None:
+                    if not isinstance(dim, int):
+                        self._error(
+                            f"negative slice bound requires concrete dimension, got '{dim}'",
+                            ic.span.line_start, ic.span.col_start,
+                        )
+                        return None
+                    ic.end = IntLiteral(dim + neg_e, ic.end.span)
+                    self.type_map[id(ic.end)] = I32
                 start_type = self._infer(ic.start, env)
                 end_type = self._infer(ic.end, env)
                 # Slice bounds must be integer literals (static)

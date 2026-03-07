@@ -450,23 +450,27 @@ class Parser:
         return components
 
     def _parse_one_index(self) -> IndexComponent:
-        """Parse a single index component: expr, expr:expr, or : (full axis)."""
+        """Parse a single index component: expr, expr:expr, expr:, :expr, or : (full axis)."""
         start = self._current()
 
-        # Leading colon: either full axis (:) or slice with omitted start (:end)
+        # Leading colon: full axis (:), or open-start slice (:expr)
         if self._check(TokenType.COLON):
             colon_tok = self._advance()
             # If followed by , or ] → full axis
             if self._check(TokenType.COMMA) or self._check(TokenType.RBRACKET):
                 return IndexComponent("full", None, None, None, self._span_from(colon_tok))
-            # Otherwise it's :end — but we require both bounds for now
-            raise self._error("slice must have both start and end (e.g. 1:3)")
+            # Otherwise it's :end → open-start slice
+            end_expr = self._parse_expr()
+            return IndexComponent("slice", None, None, end_expr, self._span_from(colon_tok))
 
         # Parse an expression
         expr = self._parse_expr()
 
-        # If followed by colon → it's a slice start:end
+        # If followed by colon → it's a slice (start:end or start:)
         if self._match(TokenType.COLON):
+            # If followed by , or ] → open-end slice (expr:)
+            if self._check(TokenType.COMMA) or self._check(TokenType.RBRACKET):
+                return IndexComponent("slice", None, expr, None, Span(start.line, start.col, self.tokens[self.pos - 1].line, self.tokens[self.pos - 1].col + len(self.tokens[self.pos - 1].value)))
             end_expr = self._parse_expr()
             return IndexComponent("slice", None, expr, end_expr, Span(start.line, start.col, self.tokens[self.pos - 1].line, self.tokens[self.pos - 1].col + len(self.tokens[self.pos - 1].value)))
 

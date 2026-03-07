@@ -12,6 +12,7 @@ from maomi.ast_nodes import (
     IntLiteral,
     Identifier,
     Program,
+    UnaryOp,
 )
 
 
@@ -244,3 +245,142 @@ class TestADIndexing:
         """
         prog, tc, errors = _check(src)
         assert not errors
+
+
+# ---------- Open-ended slices and negative indices ----------
+
+
+class TestParserOpenEndedSlices:
+    def test_open_end_slice(self):
+        prog = _parse("fn f(x: f32[10]) -> f32[9] { x[1:] }")
+        body_expr = prog.functions[0].body.expr
+        assert isinstance(body_expr, IndexExpr)
+        ic = body_expr.indices[0]
+        assert ic.kind == "slice"
+        assert isinstance(ic.start, IntLiteral)
+        assert ic.start.value == 1
+        assert ic.end is None
+
+    def test_open_start_slice(self):
+        prog = _parse("fn f(x: f32[10]) -> f32[3] { x[:3] }")
+        body_expr = prog.functions[0].body.expr
+        ic = body_expr.indices[0]
+        assert ic.kind == "slice"
+        assert ic.start is None
+        assert isinstance(ic.end, IntLiteral)
+        assert ic.end.value == 3
+
+    def test_open_start_negative_end(self):
+        prog = _parse("fn f(x: f32[10]) -> f32[9] { x[:-1] }")
+        body_expr = prog.functions[0].body.expr
+        ic = body_expr.indices[0]
+        assert ic.kind == "slice"
+        assert ic.start is None
+        assert isinstance(ic.end, UnaryOp)
+        assert ic.end.op == "-"
+
+    def test_negative_single_index(self):
+        prog = _parse("fn f(x: f32[10]) -> f32 { x[-1] }")
+        body_expr = prog.functions[0].body.expr
+        ic = body_expr.indices[0]
+        assert ic.kind == "single"
+        assert isinstance(ic.value, UnaryOp)
+        assert ic.value.op == "-"
+
+    def test_negative_start_open_end(self):
+        prog = _parse("fn f(x: f32[10]) -> f32[2] { x[-2:] }")
+        body_expr = prog.functions[0].body.expr
+        ic = body_expr.indices[0]
+        assert ic.kind == "slice"
+        assert isinstance(ic.start, UnaryOp)
+        assert ic.end is None
+
+
+class TestTypeCheckerOpenEndedSlices:
+    def test_open_end_slice(self):
+        _, tc, errors = _check("fn f(x: f32[10]) -> f32[9] { x[1:] }")
+        assert not errors
+
+    def test_open_start_slice(self):
+        _, tc, errors = _check("fn f(x: f32[10]) -> f32[3] { x[:3] }")
+        assert not errors
+
+    def test_open_start_negative_end(self):
+        _, tc, errors = _check("fn f(x: f32[10]) -> f32[9] { x[:-1] }")
+        assert not errors
+
+    def test_negative_single_index(self):
+        _, tc, errors = _check("fn f(x: f32[10]) -> f32 { x[-1] }")
+        assert not errors
+
+    def test_negative_start_negative_end(self):
+        # x[1:-1] on f32[10] → start=1, end=9, size=8
+        _, tc, errors = _check("fn f(x: f32[10]) -> f32[8] { x[1:-1] }")
+        assert not errors
+
+    def test_negative_index_2d(self):
+        _, tc, errors = _check("fn f(x: f32[10, 20]) -> f32[10] { x[:, -1] }")
+        assert not errors
+
+    def test_negative_start_open_end(self):
+        # x[-2:] on f32[10] → start=8, end=10, size=2
+        _, tc, errors = _check("fn f(x: f32[10]) -> f32[2] { x[-2:] }")
+        assert not errors
+
+    def test_error_negative_out_of_bounds(self):
+        _, tc, errors = _check("fn f(x: f32[10]) -> f32 { x[-11] }")
+        assert len(errors) >= 1
+        assert any("out of bounds" in e.message for e in errors)
+
+    def test_error_negative_slice_out_of_bounds(self):
+        # x[:-11] on f32[10] → end = 10 + (-11) = -1 → normalized, then end < start
+        _, tc, errors = _check("fn f(x: f32[10]) -> f32[0] { x[:-11] }")
+        assert len(errors) >= 1
+
+
+class TestCodegenOpenEndedSlices:
+    def test_negative_static_index_uses_slice(self):
+        mlir = _compile("fn f(x: f32[10]) -> f32 { x[-1] }")
+        # After normalization, -1 → 9, so should use static stablehlo.slice
+        assert "stablehlo.slice" in mlir
+        assert "stablehlo.reshape" in mlir
+
+    def test_open_end_slice(self):
+        mlir = _compile("fn f(x: f32[10]) -> f32[9] { x[1:] }")
+        assert "stablehlo.slice" in mlir
+
+    def test_open_start_slice(self):
+        mlir = _compile("fn f(x: f32[10]) -> f32[3] { x[:3] }")
+        assert "stablehlo.slice" in mlir
+
+    def test_open_start_negative_end(self):
+        mlir = _compile("fn f(x: f32[10]) -> f32[9] { x[:-1] }")
+        assert "stablehlo.slice" in mlir
+
+    def test_dynamic_index_emits_normalization(self):
+        mlir = _compile("fn f(x: f32[10], i: i32) -> f32 { x[i] }")
+        # Should emit select-based normalization for dynamic indices
+        assert "stablehlo.compare" in mlir
+        assert "stablehlo.select" in mlir
+        assert "stablehlo.dynamic_slice" in mlir
+
+
+class TestADOpenEndedSlices:
+    def test_grad_through_negative_index(self):
+        src = """
+        fn f(x: f32[10]) -> f32[10] {
+            grad(x[-1] * 2.0, x)
+        }
+        """
+        mlir = _compile(src)
+        assert "stablehlo.dynamic_update_slice" in mlir
+
+    def test_grad_through_open_end_slice(self):
+        src = """
+        fn f(x: f32[10]) -> f32[10] {
+            let s: f32[9] = x[1:];
+            grad(s[0] * 2.0, x)
+        }
+        """
+        mlir = _compile(src)
+        assert "stablehlo.dynamic_update_slice" in mlir

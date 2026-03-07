@@ -41,6 +41,10 @@ fn slice_window(x: f32[10]) -> f32[3] {
     x[2:5]
 }
 
+fn drop_last(x: f32[10]) -> f32[9] {
+    x[:-1]
+}
+
 fn flatten(x: f32[4, 8]) -> f32[32] {
     reshape(x, 32)
 }
@@ -66,7 +70,7 @@ fn join(a: f32[4], b: f32[6]) -> f32[10] {
 | `grad(expr, var)` | Reverse-mode AD (supports structs, scan, indexing, reshape, concat) |
 | `reshape(x, 4, 8)` | Reshape array (element count must match) |
 | `concat(a, b)` `concat(a, b, 1)` | Concatenate arrays (optional axis, default 0) |
-| `x[i]` `x[1:3]` `x[:, 0]` | Array indexing and slicing |
+| `x[i]` `x[1:3]` `x[:, 0]` `x[-1]` `x[1:]` `x[:-1]` | Array indexing and slicing |
 | `import math;` | Qualified module import (`math.relu(x)`) |
 | `from math import { relu };` | Selective import (`relu(x)`) |
 | `import "../lib/nn" as nn;` | Path-based import with alias |
@@ -78,7 +82,7 @@ fn join(a: f32[4], b: f32[6]) -> f32[10] {
 
 **Operators:** `+` `-` `*` `/` `@` (matmul) `**` (power) `==` `!=` `<` `>` `<=` `>=`
 
-**Indexing:** `x[0]` (single), `x[i]` (dynamic), `x[1:3]` (slice, static bounds), `x[:, 0]` (multi-axis), `x[0][1]` (chaining). Fully differentiable — `grad` propagates through indexing via `dynamic_update_slice`.
+**Indexing:** `x[0]` (single), `x[i]` (dynamic), `x[-1]` (negative), `x[1:3]` (slice), `x[1:]` `x[:3]` `x[:-1]` (open-ended), `x[:, 0]` (multi-axis), `x[0][1]` (chaining). Dynamic indices support negative values at runtime. Fully differentiable — `grad` propagates through indexing via `dynamic_update_slice`.
 
 ## How It Works
 
@@ -121,6 +125,5 @@ uv run maomi run examples/grad.mao --fn grad_loss
 - `grad`: no grad-of-grad
 - `map`: elementwise bodies only
 - Slice bounds must be integer literals (no dynamic ranges)
-- No negative indices or open-ended ranges (`x[1:]`, `x[-1]`)
 - `callback`: compiles but doesn't execute host callbacks yet (IREE outfeed integration pending)
 - No rank polymorphism
