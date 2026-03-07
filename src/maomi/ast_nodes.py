@@ -278,6 +278,14 @@ class _BroadcastExpr:
     span: Span
 
 
+@dataclass
+class _ReduceSum:
+    """Internal: reduce-sum over specific dimensions. Created by AD for map free var gradients."""
+    expr: Expr                    # array to reduce
+    axes: tuple[int, ...]         # dimensions to reduce over
+    span: Span
+
+
 # Union types for convenience
 Expr = IntLiteral | FloatLiteral | BoolLiteral | Identifier | UnaryOp | BinOp | IfExpr | CallExpr | ScanExpr | MapExpr | GradExpr | StructLiteral | FieldAccess | WithExpr | IndexExpr | _ScanGrad | _IndexGrad | _GatherGrad | _Conv2dGrad | _MaxPoolGrad | _AvgPoolGrad | _BroadcastExpr
 Stmt = LetStmt | ExprStmt

@@ -463,3 +463,44 @@ class TestAvgPoolGrad:
         """)
         assert "stablehlo.pad" in out
         assert "stablehlo.reduce_window" in out
+
+
+class TestMapAD:
+    def test_grad_sum_in_map(self):
+        """grad of sum(map x in xs { sum(x) }) w.r.t. xs — result is all-ones."""
+        out = ad_codegen("""
+            fn f(xs: f32[4, 3]) -> f32[4, 3] {
+                grad(sum(map x in xs { sum(x) }), xs)
+            }
+        """)
+        # Gradient of sum(sum(x_i)) w.r.t. xs is all-ones — emits broadcast + multiply
+        assert "stablehlo.broadcast_in_dim" in out
+        assert "tensor<4x3xf32>" in out
+
+    def test_grad_map_free_var_scalar(self):
+        """grad of sum(map x in xs { x * w }) w.r.t. scalar w."""
+        out = ad_codegen("""
+            fn f(xs: f32[4], w: f32) -> f32 {
+                grad(sum(map x in xs { x * w }), w)
+            }
+        """)
+        assert "stablehlo.reduce" in out
+        assert "stablehlo.multiply" in out
+
+    def test_grad_map_free_var_array(self):
+        """grad of sum(map x in xs { sum(x * w) }) w.r.t. array w."""
+        out = ad_codegen("""
+            fn f(xs: f32[4, 3], w: f32[3]) -> f32[3] {
+                grad(sum(map x in xs { sum(x * w) }), w)
+            }
+        """)
+        assert "stablehlo.reduce" in out
+
+    def test_grad_matmul_in_map_wrt_weight(self):
+        """grad of sum(map x in xs { sum(x @ w) }) w.r.t. w."""
+        out = ad_codegen("""
+            fn f(w: f32[3, 2], xs: f32[4, 3]) -> f32[3, 2] {
+                grad(sum(map x in xs { sum(x @ w) }), w)
+            }
+        """)
+        assert "stablehlo.dot_general" in out or "stablehlo.reduce" in out
