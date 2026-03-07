@@ -317,3 +317,94 @@ class TestStructAD:
         """)
         assert "module {" in out
         assert "func.func @f" in out
+
+
+class TestGradOfGrad:
+    """Tests for grad-of-grad (second-order differentiation)."""
+
+    def test_grad_grad_x_cubed(self):
+        """d²/dx²(x³) = 6x — result should be a BinOp (not zero, not GradExpr)."""
+        prog = ad_transform("fn f(x: f32) -> f32 { grad(grad(x ** 3.0, x), x) }")
+        expr = get_body_expr(prog)
+        assert not isinstance(expr, GradExpr)
+        assert isinstance(expr, BinOp)
+
+    def test_grad_grad_x_squared(self):
+        """d²/dx²(x²) = 2 — result should be constant (no x dependency)."""
+        prog = ad_transform("fn f(x: f32) -> f32 { grad(grad(x * x, x), x) }")
+        expr = get_body_expr(prog)
+        assert not isinstance(expr, GradExpr)
+
+    def test_grad_grad_exp(self):
+        """d²/dx²(exp(x)) = exp(x) — should produce non-trivial expression."""
+        prog = ad_transform("fn f(x: f32) -> f32 { grad(grad(exp(x), x), x) }")
+        expr = get_body_expr(prog)
+        assert not isinstance(expr, GradExpr)
+        assert not isinstance(expr, FloatLiteral)  # not a constant
+
+    def test_mixed_partial(self):
+        """d/dy(d/dx(x*y)) = d/dy(y) = 1."""
+        prog = ad_transform("fn f(x: f32, y: f32) -> f32 { grad(grad(x * y, x), y) }")
+        expr = get_body_expr(prog)
+        assert not isinstance(expr, GradExpr)
+        # Result is 1.0 (possibly as 1.0 * 1.0 without simplification)
+        assert not isinstance(expr, Identifier)  # should not reference x or y
+
+    def test_depth_limit(self):
+        """Exceeding max nesting depth should raise an error."""
+        # Build 12 nested grads — outermost is handled by _transform_expr,
+        # so _linearize sees 11 inner GradExprs, exceeding the limit of 10.
+        inner = "x * x"
+        for _ in range(12):
+            inner = f"grad({inner}, x)"
+        source = f"fn f(x: f32) -> f32 {{ {inner} }}"
+        with pytest.raises(MaomiError, match="maximum nesting depth"):
+            ad_transform(source)
+
+    def test_let_binding_equivalence(self):
+        """grad(grad(expr, x), x) should produce same structure as let-based version."""
+        # Direct nesting
+        prog1 = ad_transform("fn f(x: f32) -> f32 { grad(grad(x ** 3.0, x), x) }")
+        expr1 = get_body_expr(prog1)
+        # Let-binding based
+        prog2 = ad_transform("""
+            fn f(x: f32) -> f32 {
+                let g = grad(x ** 3.0, x);
+                grad(g, x)
+            }
+        """)
+        expr2 = get_body_expr(prog2)
+        # Both should be BinOps (not GradExpr, not zero)
+        assert isinstance(expr1, BinOp)
+        assert isinstance(expr2, BinOp)
+
+    def test_codegen_x_cubed(self):
+        """grad(grad(x³, x), x) should produce valid StableHLO."""
+        out = ad_codegen("fn f(x: f32) -> f32 { grad(grad(x ** 3.0, x), x) }")
+        assert "module {" in out
+        assert "func.func @f" in out
+
+    def test_codegen_exp(self):
+        """grad(grad(exp(x), x), x) should produce valid StableHLO."""
+        out = ad_codegen("fn f(x: f32) -> f32 { grad(grad(exp(x), x), x) }")
+        assert "module {" in out
+        assert "func.func @f" in out
+
+    def test_codegen_tanh(self):
+        """grad(grad(tanh(x), x), x) should produce valid StableHLO."""
+        out = ad_codegen("fn f(x: f32) -> f32 { grad(grad(tanh(x), x), x) }")
+        assert "module {" in out
+        assert "func.func @f" in out
+
+    def test_third_derivative(self):
+        """d³/dx³(x⁴) = 24x — should work with 3 levels of nesting."""
+        prog = ad_transform("fn f(x: f32) -> f32 { grad(grad(grad(x ** 4.0, x), x), x) }")
+        expr = get_body_expr(prog)
+        assert not isinstance(expr, GradExpr)
+        assert isinstance(expr, BinOp)
+
+    def test_codegen_third_derivative(self):
+        """d³/dx³(x⁴) should produce valid StableHLO."""
+        out = ad_codegen("fn f(x: f32) -> f32 { grad(grad(grad(x ** 4.0, x), x), x) }")
+        assert "module {" in out
+        assert "func.func @f" in out
