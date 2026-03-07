@@ -20,6 +20,7 @@ from maomi.lsp import (
     _ca_edit_distance, _ca_find_similar, code_actions, _cache,
     _build_folding_ranges,
     _sel_collect_ancestors, _sel_build_chain,
+    _find_matching_brace,
 )
 from maomi.ast_nodes import (
     Identifier, IntLiteral, FloatLiteral, BinOp, CallExpr,
@@ -1567,3 +1568,35 @@ class TestDocComments:
     def test_signature_help_no_doc(self):
         sh = _build_signature_help("myfn", ["x"], ["f32"], "f32", 0)
         assert sh.signatures[0].documentation is None
+
+
+class TestMatchingBrace:
+    def test_simple_forward(self):
+        result = _find_matching_brace("{ }", 0, 0)
+        assert result == types.Position(line=0, character=2)
+
+    def test_simple_reverse(self):
+        result = _find_matching_brace("{ }", 0, 2)
+        assert result == types.Position(line=0, character=0)
+
+    def test_nested(self):
+        result = _find_matching_brace("{ { } }", 0, 0)
+        assert result == types.Position(line=0, character=6)
+
+    def test_multiline(self):
+        source = "fn f() {\n    x;\n}"
+        result = _find_matching_brace(source, 0, 8)
+        assert result == types.Position(line=2, character=0)
+
+    def test_no_brace_at_cursor(self):
+        result = _find_matching_brace("hello", 0, 0)
+        assert result is None
+
+    def test_unmatched(self):
+        result = _find_matching_brace("{ {", 0, 0)
+        assert result is None
+
+    def test_adjacent_check(self):
+        # Cursor right after '{' (col 1), should find match via adjacent check
+        result = _find_matching_brace("{ }", 0, 1)
+        assert result == types.Position(line=0, character=2)

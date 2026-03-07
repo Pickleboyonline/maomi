@@ -29,6 +29,20 @@
         "path": "./syntaxes/maomi.tmLanguage.json"
       }
     ],
+    "commands": [
+      {
+        "command": "maomi.matchBrace",
+        "title": "Maomi: Go to Matching Brace"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "maomi.matchBrace",
+        "key": "ctrl+shift+\\",
+        "mac": "cmd+shift+\\",
+        "when": "editorLangId == maomi"
+      }
+    ],
     "configuration": {
       "title": "Maomi",
       "properties": {

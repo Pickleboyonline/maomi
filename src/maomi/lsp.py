@@ -1813,6 +1813,72 @@ def selection_ranges(ls: LanguageServer, params: types.SelectionRangeParams):
 
 
 # ---------------------------------------------------------------------------
+# Matching Brace
+# ---------------------------------------------------------------------------
+
+
+def _find_matching_brace(source: str, line_0: int, col_0: int) -> types.Position | None:
+    """Return position of matching brace for the brace at/near (line_0, col_0)."""
+    lines = source.splitlines()
+    if line_0 >= len(lines):
+        return None
+    line_text = lines[line_0]
+
+    # Find brace at or near cursor
+    ch = line_text[col_0] if col_0 < len(line_text) else None
+    if ch not in ('{', '}'):
+        # Check adjacent position (cursor right after brace)
+        if col_0 > 0 and col_0 - 1 < len(line_text) and line_text[col_0 - 1] in ('{', '}'):
+            col_0 -= 1
+            ch = line_text[col_0]
+        else:
+            return None
+
+    if ch == '{':
+        # Search forward for matching '}'
+        depth = 0
+        for i in range(line_0, len(lines)):
+            start_col = col_0 if i == line_0 else 0
+            for j in range(start_col, len(lines[i])):
+                c = lines[i][j]
+                if c == '{':
+                    depth += 1
+                elif c == '}':
+                    depth -= 1
+                    if depth == 0:
+                        return types.Position(line=i, character=j)
+    elif ch == '}':
+        # Search backward for matching '{'
+        depth = 0
+        for i in range(line_0, -1, -1):
+            end_col = col_0 if i == line_0 else len(lines[i]) - 1
+            for j in range(end_col, -1, -1):
+                if j >= len(lines[i]):
+                    continue
+                c = lines[i][j]
+                if c == '}':
+                    depth += 1
+                elif c == '{':
+                    depth -= 1
+                    if depth == 0:
+                        return types.Position(line=i, character=j)
+    return None
+
+
+@server.feature("maomi/matchingBrace")
+def matching_brace(ls: LanguageServer, params):
+    uri = params.get("textDocument", {}).get("uri")
+    position = params.get("position", {})
+    line = position.get("line", 0)
+    col = position.get("character", 0)
+    doc = ls.workspace.get_text_document(uri)
+    result = _find_matching_brace(doc.source, line, col)
+    if result is None:
+        return None
+    return {"line": result.line, "character": result.character}
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 

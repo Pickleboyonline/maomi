@@ -24,6 +24,22 @@ function activate(context) {
     clientOptions
   );
 
+  const matchBraceDisposable = vscode.commands.registerCommand('maomi.matchBrace', async () => {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || !client) return;
+    const pos = editor.selection.active;
+    const result = await client.sendRequest('maomi/matchingBrace', {
+      textDocument: { uri: editor.document.uri.toString() },
+      position: { line: pos.line, character: pos.character },
+    });
+    if (result) {
+      const newPos = new vscode.Position(result.line, result.character);
+      editor.selection = new vscode.Selection(newPos, newPos);
+      editor.revealRange(new vscode.Range(newPos, newPos));
+    }
+  });
+  context.subscriptions.push(matchBraceDisposable);
+
   client.start();
   context.subscriptions.push(client);
 }
