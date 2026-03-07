@@ -3,7 +3,10 @@
 import pytest
 from lsprotocol import types
 
-from maomi.lsp import validate, _find_node_at, _error_to_diagnostic, _span_contains
+from maomi.lsp import (
+    validate, _find_node_at, _error_to_diagnostic, _span_contains,
+    _complete_general, _complete_dot, _vars_in_scope, AnalysisResult,
+)
 from maomi.ast_nodes import (
     Identifier, IntLiteral, FloatLiteral, BinOp, CallExpr,
     LetStmt, FnDef, Block, Span,
@@ -156,3 +159,122 @@ class TestFindNodeAt:
         # Line 99 is way outside the function
         node = _find_node_at(fn, 99, 1)
         assert node is None
+
+
+# ---------------------------------------------------------------------------
+# Completion tests
+# ---------------------------------------------------------------------------
+
+class TestCompletion:
+    def test_general_includes_keywords(self):
+        source = "fn f(x: f32) -> f32 { x }"
+        _, result = validate(source, "<test>")
+        pos = types.Position(line=0, character=23)  # inside body
+        comp = _complete_general(result, pos)
+        labels = {item.label for item in comp.items}
+        assert "fn" in labels
+        assert "let" in labels
+        assert "if" in labels
+        assert "scan" in labels
+        assert "grad" in labels
+
+    def test_general_includes_builtins(self):
+        source = "fn f(x: f32) -> f32 { x }"
+        _, result = validate(source, "<test>")
+        pos = types.Position(line=0, character=23)
+        comp = _complete_general(result, pos)
+        labels = {item.label for item in comp.items}
+        assert "exp" in labels
+        assert "mean" in labels
+        assert "tanh" in labels
+        assert "iota" in labels
+        assert "rng_key" in labels
+
+    def test_general_includes_type_names(self):
+        source = "fn f(x: f32) -> f32 { x }"
+        _, result = validate(source, "<test>")
+        pos = types.Position(line=0, character=23)
+        comp = _complete_general(result, pos)
+        labels = {item.label for item in comp.items}
+        assert "f32" in labels
+        assert "i32" in labels
+        assert "bool" in labels
+
+    def test_general_includes_user_functions(self):
+        source = """
+fn helper(x: f32) -> f32 { x }
+fn main(y: f32) -> f32 { y }
+"""
+        _, result = validate(source, "<test>")
+        pos = types.Position(line=2, character=26)
+        comp = _complete_general(result, pos)
+        labels = {item.label for item in comp.items}
+        assert "helper" in labels
+        assert "main" in labels
+
+    def test_general_includes_struct_names(self):
+        source = """
+struct Point { x: f32, y: f32 }
+fn f(p: Point) -> f32 { p.x }
+"""
+        _, result = validate(source, "<test>")
+        pos = types.Position(line=2, character=25)
+        comp = _complete_general(result, pos)
+        labels = {item.label for item in comp.items}
+        assert "Point" in labels
+
+    def test_vars_in_scope_includes_params(self):
+        source = "fn f(x: f32, y: i32) -> f32 { x }"
+        _, result = validate(source, "<test>")
+        pos = types.Position(line=0, character=32)
+        variables = _vars_in_scope(result, pos)
+        var_names = [v[0] for v in variables]
+        assert "x" in var_names
+        assert "y" in var_names
+
+    def test_vars_in_scope_includes_let_bindings(self):
+        source = """fn f(x: f32) -> f32 {
+    let a = 1.0;
+    let b = 2.0;
+    x
+}"""
+        _, result = validate(source, "<test>")
+        # Cursor on line 3 (0-indexed), after both let bindings
+        pos = types.Position(line=3, character=4)
+        variables = _vars_in_scope(result, pos)
+        var_names = [v[0] for v in variables]
+        assert "x" in var_names
+        assert "a" in var_names
+        assert "b" in var_names
+
+    def test_vars_in_scope_excludes_later_bindings(self):
+        source = """fn f(x: f32) -> f32 {
+    let a = 1.0;
+    x
+}"""
+        _, result = validate(source, "<test>")
+        # Cursor on line 1 (0-indexed), before the let binding completes
+        # Actually let's put cursor at start of line 1, before the let
+        pos = types.Position(line=1, character=0)
+        variables = _vars_in_scope(result, pos)
+        var_names = [v[0] for v in variables]
+        assert "x" in var_names
+        # 'a' should not be in scope yet (defined on this line)
+        assert "a" not in var_names
+
+    def test_dot_completion_struct_fields(self):
+        source = """
+struct Point { x: f32, y: f32 }
+fn f(p: Point) -> f32 { p.x }
+"""
+        _, result = validate(source, "<test>")
+        # Position at the dot after 'p' — need to find 'p' node
+        # 'p.' is at line 2, the dot is after 'p'
+        # In the source, line 2 is "fn f(p: Point) -> f32 { p.x }"
+        # 'p' starts at character 25, dot at 26
+        pos = types.Position(line=2, character=26)
+        comp = _complete_dot(result, pos)
+        assert comp is not None
+        labels = {item.label for item in comp.items}
+        assert "x" in labels
+        assert "y" in labels

@@ -19,7 +19,7 @@ from .ast_nodes import (
     _ScanGrad, _IndexGrad, _GatherGrad, _Conv2dGrad,
     _MaxPoolGrad, _AvgPoolGrad, _BroadcastExpr,
 )
-from .types import MaomiType
+from .types import MaomiType, StructType
 
 
 @dataclass
@@ -255,6 +255,193 @@ def _get_hover_text(node, fn: FnDef, result: AnalysisResult) -> str | None:
             return f"```maomi\n{node.name}: {typ}\n```"
         return f"```maomi\n{typ}\n```"
     return None
+
+
+# ---------------------------------------------------------------------------
+# Completion
+# ---------------------------------------------------------------------------
+
+_KEYWORDS = [
+    "fn", "let", "if", "else", "scan", "map", "grad",
+    "struct", "with", "import", "from", "in", "true", "false",
+]
+
+_TYPE_NAMES = ["f32", "f64", "i32", "i64", "bool"]
+
+_BUILTINS = [
+    "mean", "sum", "exp", "log", "tanh", "sqrt", "abs",
+    "reshape", "concat", "iota", "transpose", "callback",
+    "rng_key", "rng_split", "rng_uniform", "rng_normal",
+    "conv2d", "max_pool", "avg_pool",
+]
+
+_BUILTIN_SET = set(_BUILTINS)
+
+
+@server.feature(types.TEXT_DOCUMENT_COMPLETION)
+def completions(ls: LanguageServer, params: types.CompletionParams):
+    uri = params.text_document.uri
+    result = _cache.get(uri)
+    doc = ls.workspace.get_text_document(uri)
+
+    lines = doc.source.splitlines()
+    if params.position.line >= len(lines):
+        return None
+    line_text = lines[params.position.line]
+    col = params.position.character
+
+    # Dot context: struct field completion
+    if col > 0 and line_text[col - 1] == ".":
+        return _complete_dot(result, params.position)
+
+    return _complete_general(result, params.position)
+
+
+def _complete_dot(result: AnalysisResult | None, position: types.Position):
+    if not result or not result.program:
+        return None
+
+    line = position.line + 1
+    # The dot is at position.character (0-indexed), so the expr before it
+    # ends at position.character - 1 (0-indexed) = position.character (1-indexed)
+    col = position.character
+
+    for fn in result.program.functions:
+        node = _find_node_at(fn, line, col)
+        if node is not None:
+            typ = result.type_map.get(id(node))
+            if isinstance(typ, StructType):
+                return types.CompletionList(
+                    is_incomplete=False,
+                    items=[
+                        types.CompletionItem(
+                            label=fname,
+                            kind=types.CompletionItemKind.Field,
+                            detail=str(ftype),
+                        )
+                        for fname, ftype in typ.fields
+                    ],
+                )
+    return None
+
+
+def _complete_general(result: AnalysisResult | None, position: types.Position):
+    items: list[types.CompletionItem] = []
+
+    for kw in _KEYWORDS:
+        items.append(types.CompletionItem(
+            label=kw, kind=types.CompletionItemKind.Keyword,
+        ))
+
+    for t in _TYPE_NAMES:
+        items.append(types.CompletionItem(
+            label=t, kind=types.CompletionItemKind.TypeParameter,
+        ))
+
+    for b in _BUILTINS:
+        items.append(types.CompletionItem(
+            label=b, kind=types.CompletionItemKind.Function, detail="builtin",
+        ))
+
+    if result and result.program:
+        # User-defined functions
+        for name, sig in result.fn_table.items():
+            if name in _BUILTIN_SET or "." in name:
+                continue
+            params = ", ".join(
+                f"{n}: {t}" for n, t in zip(sig.param_names, sig.param_types)
+            )
+            items.append(types.CompletionItem(
+                label=name,
+                kind=types.CompletionItemKind.Function,
+                detail=f"({params}) -> {sig.return_type}",
+            ))
+
+        # Struct names
+        for name in result.struct_defs:
+            items.append(types.CompletionItem(
+                label=name, kind=types.CompletionItemKind.Struct,
+            ))
+
+        # Variables in scope
+        for var_name, var_type in _vars_in_scope(result, position):
+            items.append(types.CompletionItem(
+                label=var_name,
+                kind=types.CompletionItemKind.Variable,
+                detail=str(var_type) if var_type else None,
+            ))
+
+    return types.CompletionList(is_incomplete=False, items=items)
+
+
+def _vars_in_scope(
+    result: AnalysisResult, position: types.Position
+) -> list[tuple[str, MaomiType | None]]:
+    if not result.program:
+        return []
+
+    line = position.line + 1
+    col = position.character + 1
+    variables: list[tuple[str, MaomiType | None]] = []
+
+    for fn in result.program.functions:
+        if not _span_contains(fn.span, line, col):
+            continue
+
+        # Function params
+        sig = result.fn_table.get(fn.name)
+        if sig:
+            for pname, ptype in zip(sig.param_names, sig.param_types):
+                variables.append((pname, ptype))
+
+        # Let bindings and loop vars in scope
+        _collect_scope_vars(fn.body, line, col, result.type_map, variables)
+        break
+
+    return variables
+
+
+def _collect_scope_vars(
+    block: Block, line: int, col: int,
+    type_map: dict[int, MaomiType], variables: list,
+):
+    for stmt in block.stmts:
+        if isinstance(stmt, LetStmt):
+            # Only include let bindings that appear before the cursor
+            if stmt.span.line_start < line or (
+                stmt.span.line_start == line and stmt.span.col_end < col
+            ):
+                typ = type_map.get(id(stmt.value))
+                variables.append((stmt.name, typ))
+
+        if isinstance(stmt, ExprStmt):
+            _collect_from_expr(stmt.expr, line, col, type_map, variables)
+
+    if block.expr is not None:
+        _collect_from_expr(block.expr, line, col, type_map, variables)
+
+
+def _collect_from_expr(
+    expr, line: int, col: int,
+    type_map: dict[int, MaomiType], variables: list,
+):
+    if not hasattr(expr, "span") or not _span_contains(expr.span, line, col):
+        return
+
+    if isinstance(expr, ScanExpr):
+        # carry_var and elem_vars are in scope inside the body
+        variables.append((expr.carry_var, None))
+        for ev in expr.elem_vars:
+            variables.append((ev, None))
+        _collect_scope_vars(expr.body, line, col, type_map, variables)
+
+    elif isinstance(expr, MapExpr):
+        variables.append((expr.elem_var, None))
+        _collect_scope_vars(expr.body, line, col, type_map, variables)
+
+    elif isinstance(expr, IfExpr):
+        _collect_scope_vars(expr.then_block, line, col, type_map, variables)
+        _collect_scope_vars(expr.else_block, line, col, type_map, variables)
 
 
 # ---------------------------------------------------------------------------
