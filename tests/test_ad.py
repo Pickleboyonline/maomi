@@ -163,11 +163,10 @@ class TestADLetBindings:
 
 class TestADIfElse:
     def test_if_relu_grad(self):
-        """grad(if x > 0 { x } else { 0 }, x) should produce an IfExpr."""
+        """grad(if x > 0 { x } else { 0 }, x) should produce adj * if_expr."""
         prog = ad_transform("fn f(x: f32) -> f32 { grad(if x > 0.0 { x } else { 0.0 }, x) }")
         expr = get_body_expr(prog)
-        # Result should be if cond { 1.0 } else { 0.0 } (times adj=1.0)
-        assert isinstance(expr, BinOp)  # adj * if_expr
+        assert isinstance(expr, BinOp)  # adj * if cond { 1.0 } else { 0.0 }
 
     def test_if_different_branches(self):
         """grad(if x > 0 { x*x } else { -x }, x) differentiates both branches."""

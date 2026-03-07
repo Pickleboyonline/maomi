@@ -908,36 +908,44 @@ class ADTransform:
             case BinOp(op="+", left=left, right=right):
                 l_name = var_map[id(left)]
                 r_name = var_map[id(right)]
-                self._accumulate(adjoints, l_name, adj)
-                self._accumulate(adjoints, r_name, adj)
+                lt = self._type_of(left)
+                rt = self._type_of(right)
+                self._accumulate(adjoints, l_name, self._reduce_broadcast(adj, lt))
+                self._accumulate(adjoints, r_name, self._reduce_broadcast(adj, rt))
 
             case BinOp(op="-", left=left, right=right):
                 l_name = var_map[id(left)]
                 r_name = var_map[id(right)]
-                self._accumulate(adjoints, l_name, adj)
-                self._accumulate(adjoints, r_name, self._make_unary("-", adj))
+                lt = self._type_of(left)
+                rt = self._type_of(right)
+                self._accumulate(adjoints, l_name, self._reduce_broadcast(adj, lt))
+                self._accumulate(adjoints, r_name, self._reduce_broadcast(self._make_unary("-", adj), rt))
 
             case BinOp(op="*", left=left, right=right):
                 l_name = var_map[id(left)]
                 r_name = var_map[id(right)]
                 # dx = dz * y, dy = dz * x
-                l_ref = self._make_ref(l_name, self._type_of(left))
-                r_ref = self._make_ref(r_name, self._type_of(right))
-                self._accumulate(adjoints, l_name, self._make_binop("*", adj, r_ref))
-                self._accumulate(adjoints, r_name, self._make_binop("*", adj, l_ref))
+                lt = self._type_of(left)
+                rt = self._type_of(right)
+                l_ref = self._make_ref(l_name, lt)
+                r_ref = self._make_ref(r_name, rt)
+                self._accumulate(adjoints, l_name, self._reduce_broadcast(self._make_binop("*", adj, r_ref), lt))
+                self._accumulate(adjoints, r_name, self._reduce_broadcast(self._make_binop("*", adj, l_ref), rt))
 
             case BinOp(op="/", left=left, right=right):
                 l_name = var_map[id(left)]
                 r_name = var_map[id(right)]
-                l_ref = self._make_ref(l_name, self._type_of(left))
-                r_ref = self._make_ref(r_name, self._type_of(right))
+                lt = self._type_of(left)
+                rt = self._type_of(right)
+                l_ref = self._make_ref(l_name, lt)
+                r_ref = self._make_ref(r_name, rt)
                 # dx = dz / y
-                self._accumulate(adjoints, l_name, self._make_binop("/", adj, r_ref))
+                self._accumulate(adjoints, l_name, self._reduce_broadcast(self._make_binop("/", adj, r_ref), lt))
                 # dy = -dz * x / (y * y)
                 neg_adj = self._make_unary("-", adj)
                 num = self._make_binop("*", neg_adj, l_ref)
                 denom = self._make_binop("*", r_ref, r_ref)
-                self._accumulate(adjoints, r_name, self._make_binop("/", num, denom))
+                self._accumulate(adjoints, r_name, self._reduce_broadcast(self._make_binop("/", num, denom), rt))
 
             case BinOp(op="**", left=left, right=right):
                 l_name = var_map[id(left)]
@@ -1548,36 +1556,100 @@ class ADTransform:
     def _backprop_if(self, cond: Expr, then_b: Block, else_b: Block,
                       adj: Expr, adjoints: dict[str, Expr],
                       var_map: dict[int, str], node: Expr):
-        """Backprop through if/else: differentiate both branches, select with condition."""
+        """Backprop through if/else: differentiate both branches, select with condition.
+
+        Two strategies depending on whether branch expressions are already on the tape:
+
+        1. If a branch expr is on the tape (e.g. after function inlining), it's a direct
+           reference — propagate adj masked by the condition. This avoids differentiating
+           through compound expressions (like matmul) that the outer tape will handle.
+
+        2. Otherwise, use element-wise symbolic differentiation for each free variable
+           (the original approach, correct for element-wise branch expressions).
+        """
         then_expr = then_b.expr
         else_expr = else_b.expr
         if then_expr is None or else_expr is None:
             return
 
-        # Find all free variables referenced in both branches
+        # Check if branch expressions are directly on the tape
+        then_tape = var_map.get(id(then_expr))
+        else_tape = var_map.get(id(else_expr))
+
+        # Strategy 1: Direct tape references — propagate masked adjoint
+        if then_tape is not None or else_tape is not None:
+            self._backprop_if_direct(cond, adj, then_tape, else_tape, adjoints, node)
+            return
+
+        # Strategy 2: Element-wise differentiation (original approach)
+        self._backprop_if_elementwise(cond, then_expr, else_expr, adj, adjoints, var_map)
+
+    def _backprop_if_direct(self, cond: Expr, adj: Expr,
+                             then_tape: str | None, else_tape: str | None,
+                             adjoints: dict[str, Expr], node: Expr):
+        """Backprop when branch exprs are tape variables: mask adjoint with condition."""
+        adj_type = self.type_map.get(id(adj))
+        zero = self._make_zero(adj_type) if adj_type is not None else self._make_float(0.0)
+
+        if then_tape is not None and else_tape is not None:
+            if then_tape == else_tape:
+                # Both branches reference the same variable — full adjoint
+                self._accumulate(adjoints, then_tape, adj)
+            else:
+                # Different variables in each branch
+                then_block = Block([], adj, _DUMMY_SPAN)
+                else_block = Block([], zero, _DUMMY_SPAN)
+                then_if = IfExpr(cond, then_block, else_block, _DUMMY_SPAN)
+                if adj_type is not None:
+                    self.type_map[id(then_if)] = adj_type
+                self._accumulate(adjoints, then_tape, then_if)
+
+                zero2 = self._make_zero(adj_type) if adj_type is not None else self._make_float(0.0)
+                then_block2 = Block([], zero2, _DUMMY_SPAN)
+                else_block2 = Block([], adj, _DUMMY_SPAN)
+                else_if = IfExpr(cond, then_block2, else_block2, _DUMMY_SPAN)
+                if adj_type is not None:
+                    self.type_map[id(else_if)] = adj_type
+                self._accumulate(adjoints, else_tape, else_if)
+        elif then_tape is not None:
+            # Only then-branch is a tape var (else is constant like 0.0)
+            then_block = Block([], adj, _DUMMY_SPAN)
+            else_block = Block([], zero, _DUMMY_SPAN)
+            masked = IfExpr(cond, then_block, else_block, _DUMMY_SPAN)
+            if adj_type is not None:
+                self.type_map[id(masked)] = adj_type
+            self._accumulate(adjoints, then_tape, masked)
+        elif else_tape is not None:
+            # Only else-branch is a tape var
+            then_block = Block([], zero, _DUMMY_SPAN)
+            else_block = Block([], adj, _DUMMY_SPAN)
+            masked = IfExpr(cond, then_block, else_block, _DUMMY_SPAN)
+            if adj_type is not None:
+                self.type_map[id(masked)] = adj_type
+            self._accumulate(adjoints, else_tape, masked)
+
+    def _backprop_if_elementwise(self, cond: Expr, then_expr: Expr, else_expr: Expr,
+                                  adj: Expr, adjoints: dict[str, Expr],
+                                  var_map: dict[int, str]):
+        """Backprop for element-wise branches: compute d(branch)/d(var) symbolically."""
         free_vars = _collect_free_vars(then_expr) | _collect_free_vars(else_expr)
-        # Only propagate to variables that are on the tape
         tape_vars = set(var_map.values())
 
         for v_name in free_vars:
             if v_name not in tape_vars:
                 continue
 
-            # Differentiate each branch w.r.t. this variable
             then_grad = self._differentiate_branch(then_expr, v_name)
             else_grad = self._differentiate_branch(else_expr, v_name)
 
-            # Build: if cond { then_grad } else { else_grad }
             then_block = Block([], then_grad, _DUMMY_SPAN)
             else_block = Block([], else_grad, _DUMMY_SPAN)
             grad_if = IfExpr(cond, then_block, else_block, _DUMMY_SPAN)
 
-            # Type the if expression
             gt = self.type_map.get(id(then_grad))
             if gt is not None:
                 self.type_map[id(grad_if)] = gt
 
-            # contribution = adj * if cond { d_then } else { d_else }
             contribution = self._make_binop("*", adj, grad_if)
             self._accumulate(adjoints, v_name, contribution)
 
@@ -1586,28 +1658,28 @@ class ADTransform:
         saved_tape_exprs = self._tape_exprs
 
         tape: list[tuple[str, Expr]] = []
-        var_map: dict[int, str] = {}
-        self._linearize(expr, tape, var_map, {})
+        inner_var_map: dict[int, str] = {}
+        self._linearize(expr, tape, inner_var_map, {})
 
-        if id(expr) not in var_map:
+        if id(expr) not in inner_var_map:
             self._tape_exprs = saved_tape_exprs
             return self._make_float(0.0)
 
         self._tape_exprs = {name: node for name, node in tape}
 
-        output_name = var_map[id(expr)]
-        adjoints: dict[str, Expr] = {output_name: self._make_float(1.0)}
+        output_name = inner_var_map[id(expr)]
+        inner_adjoints: dict[str, Expr] = {output_name: self._make_float(1.0)}
 
         for name, node in reversed(tape):
-            if name not in adjoints:
+            if name not in inner_adjoints:
                 continue
-            adj = adjoints[name]
-            self._backprop(name, node, adj, adjoints, var_map)
+            adj = inner_adjoints[name]
+            self._backprop(name, node, adj, inner_adjoints, inner_var_map)
 
         self._tape_exprs = saved_tape_exprs
 
-        if wrt in adjoints:
-            return adjoints[wrt]
+        if wrt in inner_adjoints:
+            return inner_adjoints[wrt]
         return self._make_float(0.0)
 
     def _backprop_map(self, elem_var: str, seq: Expr, body: Block,
@@ -1941,6 +2013,76 @@ class ADTransform:
         self.type_map[id(node)] = ScalarType("f32")
         return node
 
+    def _make_zero(self, t: MaomiType) -> Expr:
+        """Create a zero expression matching the given type."""
+        if isinstance(t, ScalarType):
+            if t.base in ("f32", "f64"):
+                return self._make_float(0.0)
+            node = IntLiteral(0, _DUMMY_SPAN)
+            self.type_map[id(node)] = t
+            return node
+        if isinstance(t, ArrayType):
+            # Use broadcast: 0.0 broadcast to the array shape
+            zero = self._make_float(0.0)
+            broadcast = _BroadcastExpr(zero, list(t.dims), _DUMMY_SPAN)
+            self.type_map[id(broadcast)] = t
+            return broadcast
+        # Struct: create a struct literal with zero fields
+        if isinstance(t, StructType):
+            fields = []
+            for fname, ftype in t.fields:
+                fields.append((fname, self._make_zero(ftype)))
+            node = StructLiteral(t.name, fields, _DUMMY_SPAN)
+            self.type_map[id(node)] = t
+            return node
+        return self._make_float(0.0)
+
+    def _reduce_broadcast(self, adj: Expr, operand_type: MaomiType) -> Expr:
+        """Reduce adj to match operand_type by summing over broadcast dims.
+
+        When x: f32[8] is broadcast to f32[32, 8] in an addition,
+        the gradient must be sum(adj, 0) to reduce back to f32[8].
+        """
+        adj_type = self.type_map.get(id(adj))
+        if adj_type is None or adj_type == operand_type:
+            return adj
+
+        # Scalar operand: reduce all dims
+        if isinstance(operand_type, ScalarType) and isinstance(adj_type, ArrayType):
+            node = CallExpr("sum", [adj], _DUMMY_SPAN)
+            self.type_map[id(node)] = operand_type
+            return node
+
+        if not isinstance(adj_type, ArrayType) or not isinstance(operand_type, ArrayType):
+            return adj
+
+        adj_dims = adj_type.dims
+        op_dims = operand_type.dims
+
+        if adj_dims == op_dims:
+            return adj
+
+        # Rank broadcasting: adj has more leading dims than operand
+        # e.g. adj: f32[32, 8], operand: f32[8] → sum over axis 0
+        if len(adj_dims) > len(op_dims):
+            result = adj
+            result_type = adj_type
+            # Sum over each extra leading dimension (always axis 0 after each reduction)
+            for _ in range(len(adj_dims) - len(op_dims)):
+                axis_arg = IntLiteral(0, _DUMMY_SPAN)
+                self.type_map[id(axis_arg)] = ScalarType("i32")
+                node = CallExpr("sum", [result, axis_arg], _DUMMY_SPAN)
+                new_dims = result_type.dims[1:]
+                if len(new_dims) == 0:
+                    result_type = ScalarType(result_type.base)
+                else:
+                    result_type = ArrayType(result_type.base, new_dims)
+                self.type_map[id(node)] = result_type
+                result = node
+            return result
+
+        return adj
+
     def _make_ref(self, name: str, t: MaomiType | None) -> Expr:
         # If the name is a tape-internal name, return the original expression
         # so codegen sees valid AST instead of undefined internal variables.
@@ -2012,21 +2154,7 @@ class ADTransform:
                 self.type_map[id(node)] = t
         return node
 
-    def _make_zero(self, t: MaomiType) -> Expr:
-        if isinstance(t, StructType):
-            return self._make_zero_struct(t)
-        node = FloatLiteral(0.0, _DUMMY_SPAN)
-        self.type_map[id(node)] = t
-        return node
-
-    def _make_zero_struct(self, t: StructType) -> Expr:
-        """Create a struct literal with all fields zeroed."""
-        fields = []
-        for fn, ft in t.fields:
-            fields.append((fn, self._make_zero(ft)))
-        node = StructLiteral(t.name, fields, _DUMMY_SPAN)
-        self.type_map[id(node)] = t
-        return node
+    # _make_zero is defined above (near _make_float) with full type support
 
     def _make_struct_with_field(self, stype: StructType, field_name: str, value: Expr) -> Expr:
         """Create a struct literal with one field set to value, rest zeroed."""

@@ -11,7 +11,7 @@ from .ad import transform_grad
 from .resolver import resolve
 from .errors import MaomiError
 from .ast_nodes import Span
-from .types import MaomiType, ArrayType
+from .types import MaomiType, ArrayType, StructType
 
 
 @dataclass
@@ -20,6 +20,7 @@ class CompileResult:
     fn_table: dict[str, FnSignature]
     callback_count: int = 0
     callback_labels: dict[int, list[str]] = field(default_factory=dict)
+    struct_defs: dict[str, StructType] = field(default_factory=dict)
 
 
 @dataclass
@@ -40,7 +41,7 @@ def compile_source(source: str, filename: str = "<stdin>") -> CompileResult:
     program = transform_grad(program, checker.type_map)
     codegen = StableHLOCodegen(program, checker.type_map)
     mlir_text = codegen.generate()
-    return CompileResult(mlir_text, dict(checker.fn_table), codegen._callback_count, codegen._callback_labels)
+    return CompileResult(mlir_text, dict(checker.fn_table), codegen._callback_count, codegen._callback_labels, dict(checker.struct_defs))
 
 
 def compile_source_relax(source: str, filename: str = "<stdin>") -> RelaxCompileResult:

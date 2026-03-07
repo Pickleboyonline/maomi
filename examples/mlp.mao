@@ -1,10 +1,12 @@
 // Multi-layer perceptron
 
+/// lin mapping
 fn linear(x: f32[B, N], w: f32[N, M], b: f32[M]) -> f32[B, M] {
     x @ w + b
 }
 
 fn relu(x: f32[B, N]) -> f32[B, N] {
+    let a = linear();
     if x > 0.0 { x } else { 0.0 }
 }
 

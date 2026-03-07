@@ -2091,7 +2091,7 @@ def prepare_call_hierarchy(ls: LanguageServer, params: types.CallHierarchyPrepar
         return None
     line = params.position.line + 1
     col = params.position.character + 1
-    return _build_document_highlights(result, line, col)
+    return _call_hierarchy_prepare(result, uri, line, col)
 
 
 @server.feature(types.TEXT_DOCUMENT_TYPE_DEFINITION)
@@ -2109,6 +2109,9 @@ def goto_type_definition(ls: LanguageServer, params: types.TypeDefinitionParams)
             if span is not None:
                 return types.Location(uri=uri, range=_span_to_range(span))
     return None
+
+
+# ---------------------------------------------------------------------------
 # Workspace Symbols
 # ---------------------------------------------------------------------------
 
@@ -2145,10 +2148,6 @@ def _workspace_symbols(query: str) -> list[types.SymbolInformation]:
 @server.feature(types.WORKSPACE_SYMBOL)
 def workspace_symbols(ls: LanguageServer, params: types.WorkspaceSymbolParams):
     return _workspace_symbols(params.query)
-    return _build_code_lenses(result, uri)
-    line = params.position.line
-    col = params.position.character
-    return _call_hierarchy_prepare(result, uri, line, col)
 
 
 @server.feature(types.CALL_HIERARCHY_INCOMING_CALLS)

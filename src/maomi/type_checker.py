@@ -1797,6 +1797,17 @@ class TypeChecker:
                         return False
             return True
 
+        # Struct vs Struct — same name means same type
+        if isinstance(arg_type, StructType) and isinstance(param_type, StructType):
+            if arg_type.name == param_type.name:
+                return True
+            self._error(
+                f"argument {arg_index} of '{expr.callee}': expected {param_type}, got {arg_type}",
+                expr.args[arg_index].span.line_start,
+                expr.args[arg_index].span.col_start,
+            )
+            return False
+
         # Scalar arg for array param (e.g. builtin elementwise functions accept scalars too)
         if isinstance(arg_type, ScalarType) and isinstance(param_type, ArrayType):
             if arg_type.base == param_type.base:
