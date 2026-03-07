@@ -20,6 +20,12 @@ class CompileResult:
     fn_table: dict[str, FnSignature]
 
 
+@dataclass
+class RelaxCompileResult:
+    ir_mod: object  # tvm.IRModule (lazy import)
+    fn_table: dict[str, FnSignature]
+
+
 def compile_source(source: str, filename: str = "<stdin>") -> CompileResult:
     """Full compilation pipeline: lex -> parse -> resolve imports -> typecheck -> AD -> codegen."""
     tokens = Lexer(source, filename=filename).tokenize()
@@ -34,6 +40,22 @@ def compile_source(source: str, filename: str = "<stdin>") -> CompileResult:
     return CompileResult(mlir_text, dict(checker.fn_table))
 
 
+def compile_source_relax(source: str, filename: str = "<stdin>") -> RelaxCompileResult:
+    """Full compilation pipeline with Relax backend: lex -> parse -> resolve -> typecheck -> AD -> relax codegen."""
+    from .codegen_relax import RelaxCodegen
+
+    tokens = Lexer(source, filename=filename).tokenize()
+    program = Parser(tokens, filename=filename).parse()
+    program = resolve(program, filename)
+    checker = TypeChecker(filename=filename)
+    errors = checker.check(program)
+    if errors:
+        raise errors[0]
+    program = transform_grad(program, checker.type_map)
+    ir_mod = RelaxCodegen(program, checker.type_map).generate()
+    return RelaxCompileResult(ir_mod, dict(checker.fn_table))
+
+
 def main():
     parser = argparse.ArgumentParser(prog="maomi", description="Maomi - a pure functional ML language")
     subparsers = parser.add_subparsers(dest="command")
@@ -46,11 +68,29 @@ def main():
         default="stablehlo",
         help="Output format (default: stablehlo)",
     )
+    compile_p.add_argument(
+        "--backend",
+        choices=["stablehlo", "relax"],
+        default="stablehlo",
+        help="Code generation backend (default: stablehlo)",
+    )
 
-    run_p = subparsers.add_parser("run", help="Compile and run a .mao file (requires JAX)")
+    run_p = subparsers.add_parser("run", help="Compile and run a .mao file")
     run_p.add_argument("file", help="Path to .mao source file")
     run_p.add_argument("--fn", required=True, help="Function to execute")
     run_p.add_argument("--seed", type=int, default=42, help="Random seed for input generation (default: 42)")
+    run_p.add_argument(
+        "--backend",
+        choices=["stablehlo", "relax"],
+        default="stablehlo",
+        help="Code generation backend (default: stablehlo)",
+    )
+    run_p.add_argument(
+        "--target",
+        choices=["llvm", "metal", "cuda"],
+        default="llvm",
+        help="Execution target for relax backend (default: llvm)",
+    )
 
     args = parser.parse_args()
     if args.command is None:
@@ -58,12 +98,16 @@ def main():
         sys.exit(1)
 
     if args.command == "compile":
-        _compile(args.file, args.emit)
+        _compile(args.file, args.emit, getattr(args, "backend", "stablehlo"))
     elif args.command == "run":
-        _run(args.file, args.fn, args.seed)
+        backend = getattr(args, "backend", "stablehlo")
+        if backend == "relax":
+            _run_relax(args.file, args.fn, args.seed, args.target)
+        else:
+            _run(args.file, args.fn, args.seed)
 
 
-def _compile(path: str, emit: str):
+def _compile(path: str, emit: str, backend: str = "stablehlo"):
     try:
         with open(path) as f:
             source = f.read()
@@ -117,8 +161,13 @@ def _compile(path: str, emit: str):
         program = transform_grad(program, checker.type_map)
 
         # Codegen
-        output = StableHLOCodegen(program, checker.type_map).generate()
-        print(output)
+        if backend == "relax":
+            from .codegen_relax import RelaxCodegen
+            ir_mod = RelaxCodegen(program, checker.type_map).generate()
+            print(ir_mod)
+        else:
+            output = StableHLOCodegen(program, checker.type_map).generate()
+            print(output)
 
     except MaomiError as e:
         print(f"{e}", file=sys.stderr)
@@ -176,6 +225,60 @@ def _run(path: str, fn_name: str, seed: int):
 
     # Print results
     print(f"--- {fn_name} ---")
+    for name, val in zip(fn_sig.param_names, inputs):
+        print(f"  {name} = {val}")
+    print(f"  -> {outputs}")
+
+
+def _run_relax(path: str, fn_name: str, seed: int, target: str):
+    try:
+        with open(path) as f:
+            source = f.read()
+    except FileNotFoundError:
+        print(f"error: file not found: {path}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        result = compile_source_relax(source, filename=path)
+    except MaomiError as e:
+        print(f"{e}", file=sys.stderr)
+        sys.exit(1)
+
+    if fn_name not in result.fn_table:
+        available = [k for k in result.fn_table if k not in ("mean", "sum", "exp", "log", "tanh", "sqrt", "abs")]
+        print(f"error: function '{fn_name}' not found. Available: {available}", file=sys.stderr)
+        sys.exit(1)
+
+    fn_sig = result.fn_table[fn_name]
+
+    for pt in fn_sig.param_types:
+        if isinstance(pt, ArrayType):
+            for d in pt.dims:
+                if isinstance(d, str):
+                    print(
+                        f"error: cannot run function with symbolic dimension '{d}'. "
+                        f"All dimensions must be concrete integers.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+
+    try:
+        from .tvm_runner import run_relax
+    except ImportError:
+        print(
+            "error: TVM is required for the 'relax' backend.\n"
+            "Install with: uv sync --extra tvm",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        inputs, outputs = run_relax(result.ir_mod, fn_name, fn_sig, target=target, seed=seed)
+    except Exception as e:
+        print(f"error: execution failed: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"--- {fn_name} ({target}) ---")
     for name, val in zip(fn_sig.param_names, inputs):
         print(f"  {name} = {val}")
     print(f"  -> {outputs}")
