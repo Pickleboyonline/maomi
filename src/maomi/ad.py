@@ -46,6 +46,7 @@ from .ast_nodes import (
     GradExpr,
     CastExpr,
     FoldExpr,
+    ArrayLiteral,
     StructLiteral,
     FieldAccess,
     WithExpr,
@@ -147,6 +148,9 @@ def _collect_free_vars_inner(expr: Expr, result: set[str]):
                 _collect_free_vars_inner(body.expr, inner)
             inner.discard(sv)
             result.update(inner)
+        case ArrayLiteral(elements=elems):
+            for e in elems:
+                _collect_free_vars_inner(e, result)
         case StructLiteral(fields=fields):
             for _, fv in fields:
                 _collect_free_vars_inner(fv, result)
@@ -341,6 +345,11 @@ class ADTransform:
                 )
                 self._copy_type(expr, result)
                 return result
+            case ArrayLiteral(elements=elems):
+                new_elems = [self._transform_expr(e) for e in elems]
+                result = ArrayLiteral(new_elems, expr.span)
+                self._copy_type(expr, result)
+                return result
             case StructLiteral(name=name, fields=fields):
                 new_fields = [(fn, self._transform_expr(fv)) for fn, fv in fields]
                 result = StructLiteral(name, new_fields, expr.span)
@@ -498,6 +507,12 @@ class ADTransform:
                 tape.append((name, expr))
             case FieldAccess(object=obj):
                 self._linearize(obj, tape, var_map, let_env)
+                name = self._fresh_name("v")
+                var_map[id(expr)] = name
+                tape.append((name, expr))
+            case ArrayLiteral(elements=elems):
+                for e in elems:
+                    self._linearize(e, tape, var_map, let_env)
                 name = self._fresh_name("v")
                 var_map[id(expr)] = name
                 tape.append((name, expr))
@@ -742,6 +757,11 @@ class ADTransform:
                 new_cond = self._substitute_block(cond, inner_subst)
                 new_body = self._substitute_block(body, inner_subst)
                 node = WhileExpr(sv, new_init, expr.max_iters, new_cond, new_body, expr.span)
+                self._copy_type(expr, node)
+                return node
+            case ArrayLiteral(elements=elems):
+                new_elems = [self._substitute(e, subst) for e in elems]
+                node = ArrayLiteral(new_elems, expr.span)
                 self._copy_type(expr, node)
                 return node
             case StructLiteral(name=name, fields=fields):
@@ -1027,6 +1047,20 @@ class ADTransform:
                 if isinstance(obj_type, StructType):
                     partial = self._make_struct_with_field(obj_type, field, adj)
                     self._accumulate(adjoints, obj_name, partial)
+
+            case ArrayLiteral(elements=elems):
+                # adj of element i = adj[i]
+                for i, e in enumerate(elems):
+                    if id(e) in var_map:
+                        e_name = var_map[id(e)]
+                        idx_node = IntLiteral(i, _DUMMY_SPAN)
+                        self.type_map[id(idx_node)] = ScalarType("i32")
+                        ic = IndexComponent(kind="single", value=idx_node, start=None, end=None, span=_DUMMY_SPAN)
+                        elem_adj = IndexExpr(adj, [ic], _DUMMY_SPAN)
+                        et = self._type_of(e)
+                        if et is not None:
+                            self.type_map[id(elem_adj)] = et
+                        self._accumulate(adjoints, e_name, elem_adj)
 
             case StructLiteral(name=sname, fields=fields):
                 # adj of each field value = extract that field from adj

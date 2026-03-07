@@ -26,6 +26,7 @@ from .ast_nodes import (
     GradExpr,
     CastExpr,
     FoldExpr,
+    ArrayLiteral,
     StructDef,
     StructLiteral,
     FieldAccess,
@@ -370,6 +371,21 @@ class Parser:
         TokenType.BOOL_TYPE: "bool",
     }
 
+    def _parse_array_literal(self) -> ArrayLiteral:
+        start = self._expect(TokenType.LBRACKET)
+        elements: list = []
+        if self._current().type != TokenType.RBRACKET:
+            elements.append(self._parse_expr())
+            while self._current().type == TokenType.COMMA:
+                self._advance()
+                if self._current().type == TokenType.RBRACKET:
+                    break  # trailing comma
+                elements.append(self._parse_expr())
+        self._expect(TokenType.RBRACKET)
+        if len(elements) == 0:
+            raise self._error("empty array literal")
+        return ArrayLiteral(elements, self._span_from(start))
+
     def _parse_cast(self) -> CastExpr:
         start = self._expect(TokenType.CAST)
         self._expect(TokenType.LPAREN)
@@ -640,6 +656,9 @@ class Parser:
             self._advance()
             span = Span(tok.line, tok.col, tok.line, tok.col + len(tok.value))
             return Identifier(tok.value, span)
+
+        if tok.type == TokenType.LBRACKET:
+            return self._parse_array_literal()
 
         if tok.type == TokenType.LPAREN:
             self._advance()
