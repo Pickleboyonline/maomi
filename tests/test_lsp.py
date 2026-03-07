@@ -20,6 +20,7 @@ from maomi.lsp import (
     _ca_edit_distance, _ca_find_similar, code_actions, _cache,
     _build_folding_ranges,
     _sel_collect_ancestors, _sel_build_chain,
+    _build_document_highlights,
 )
 from maomi.ast_nodes import (
     Identifier, IntLiteral, FloatLiteral, BinOp, CallExpr,
@@ -1567,3 +1568,72 @@ class TestDocComments:
     def test_signature_help_no_doc(self):
         sh = _build_signature_help("myfn", ["x"], ["f32"], "f32", 0)
         assert sh.signatures[0].documentation is None
+
+
+# ---------------------------------------------------------------------------
+# Document Highlight tests
+# ---------------------------------------------------------------------------
+
+class TestDocumentHighlight:
+    def test_variable_highlight(self):
+        source = "fn f(x: f32) -> f32 { x + x }"
+        _, result = validate(source, "<test>")
+        # Cursor on first "x" usage in body — 0-indexed line 0, col 22
+        # "fn f(x: f32) -> f32 { x + x }"
+        #  0         1         2
+        #  0123456789012345678901234567890
+        highlights = _build_document_highlights(result, 1, 23)  # 1-indexed
+        assert highlights is not None
+        assert len(highlights) == 3  # param decl + 2 uses
+        kinds = [h.kind for h in highlights]
+        assert kinds.count(types.DocumentHighlightKind.Write) == 1  # param decl
+        assert kinds.count(types.DocumentHighlightKind.Read) == 2  # two uses
+
+    def test_function_highlight(self):
+        source = "fn helper(x: f32) -> f32 { x }\nfn main(y: f32) -> f32 { helper(y) }"
+        _, result = validate(source, "<test>")
+        # Cursor on "helper" at call site — line 2 (1-indexed), col 26 (1-indexed)
+        # "fn main(y: f32) -> f32 { helper(y) }"
+        #  0         1         2
+        #  1234567890123456789012345678
+        highlights = _build_document_highlights(result, 2, 26)  # 1-indexed
+        assert highlights is not None
+        assert len(highlights) == 2  # definition + call
+        kinds = [h.kind for h in highlights]
+        assert types.DocumentHighlightKind.Write in kinds  # definition
+        assert types.DocumentHighlightKind.Read in kinds  # call site
+
+    def test_struct_highlight(self):
+        source = "struct Point { x: f32, y: f32 }\nfn f(p: Point) -> f32 { let q = Point { x: 1.0, y: 2.0 }; q.x }"
+        _, result = validate(source, "<test>")
+        # Cursor on "Point" at struct def — line 1, col 8 (1-indexed)
+        highlights = _build_document_highlights(result, 1, 8)  # 1-indexed
+        assert highlights is not None
+        assert len(highlights) >= 2  # struct def + at least one usage
+        kinds = [h.kind for h in highlights]
+        assert types.DocumentHighlightKind.Write in kinds  # struct definition
+
+    def test_no_symbol(self):
+        source = "fn f(x: f32) -> f32 { 1.0 }"
+        _, result = validate(source, "<test>")
+        # Cursor on "1.0" — a literal, not a symbol
+        # "fn f(x: f32) -> f32 { 1.0 }"
+        #  0         1         2
+        #  1234567890123456789012345678
+        highlights = _build_document_highlights(result, 1, 23)  # 1-indexed
+        assert highlights is None
+
+    def test_let_binding_highlight(self):
+        source = "fn f(x: f32) -> f32 { let a = x; a + a }"
+        _, result = validate(source, "<test>")
+        # Cursor on first "a" usage after let — 1-indexed
+        # "fn f(x: f32) -> f32 { let a = x; a + a }"
+        #  0         1         2         3
+        #  1234567890123456789012345678901234567890
+        #                                   34
+        highlights = _build_document_highlights(result, 1, 34)  # 1-indexed
+        assert highlights is not None
+        assert len(highlights) == 3  # let decl + 2 uses
+        kinds = [h.kind for h in highlights]
+        assert kinds.count(types.DocumentHighlightKind.Write) == 1  # let binding
+        assert kinds.count(types.DocumentHighlightKind.Read) == 2  # two uses
