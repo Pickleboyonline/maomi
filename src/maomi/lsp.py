@@ -2148,6 +2148,100 @@ def outgoing_calls(ls: LanguageServer, params: types.CallHierarchyOutgoingCallsP
     fn_name = params.item.name
     result = _cache.get(uri)
     return _call_hierarchy_outgoing(result, uri, fn_name)
+# On-Type Formatting
+# ---------------------------------------------------------------------------
+
+def _compute_brace_depth(lines: list[str], target_line: int) -> int:
+    """Count net { minus } through all lines before *target_line*."""
+    depth = 0
+    for i in range(target_line):
+        for ch in lines[i]:
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+    return max(0, depth)
+
+
+def _indent_edit(
+    line_0: int, current_line: str, expected_indent: str
+) -> types.TextEdit | None:
+    """Return a TextEdit replacing leading whitespace, or *None* if already correct."""
+    stripped = current_line.lstrip()
+    actual_len = len(current_line) - len(stripped)
+    if current_line[:actual_len] == expected_indent:
+        return None
+    return types.TextEdit(
+        range=types.Range(
+            start=types.Position(line=line_0, character=0),
+            end=types.Position(line=line_0, character=actual_len),
+        ),
+        new_text=expected_indent,
+    )
+
+
+def _on_type_format(
+    source: str, line_0: int, col_0: int, ch: str
+) -> list[types.TextEdit]:
+    lines = source.splitlines()
+    if line_0 >= len(lines):
+        return []
+    current_line = lines[line_0]
+    edits: list[types.TextEdit] = []
+
+    if ch == "}":
+        # Fix indentation of closing brace.
+        stripped = current_line.lstrip()
+        if stripped.startswith("}"):
+            depth = max(0, _compute_brace_depth(lines, line_0) - 1)
+            edit = _indent_edit(line_0, current_line, "    " * depth)
+            if edit is not None:
+                edits.append(edit)
+
+    elif ch == ";":
+        # Remove trailing whitespace.
+        rstripped = current_line.rstrip()
+        if len(rstripped) < len(current_line):
+            edits.append(
+                types.TextEdit(
+                    range=types.Range(
+                        start=types.Position(
+                            line=line_0, character=len(rstripped)
+                        ),
+                        end=types.Position(
+                            line=line_0, character=len(current_line)
+                        ),
+                    ),
+                    new_text="",
+                )
+            )
+
+    elif ch == "\n":
+        # Auto-indent new line based on brace depth.
+        if line_0 > 0:
+            depth = _compute_brace_depth(lines, line_0)
+            edit = _indent_edit(line_0, current_line, "    " * depth)
+            if edit is not None:
+                edits.append(edit)
+
+    return edits
+
+
+@server.feature(
+    types.TEXT_DOCUMENT_ON_TYPE_FORMATTING,
+    types.DocumentOnTypeFormattingOptions(
+        first_trigger_character="}",
+        more_trigger_character=[";", "\n"],
+    ),
+)
+def on_type_formatting(
+    ls: LanguageServer, params: types.DocumentOnTypeFormattingParams
+):
+    uri = params.text_document.uri
+    doc = ls.workspace.get_text_document(uri)
+    line = params.position.line  # already 0-indexed
+    col = params.position.character
+    return _on_type_format(doc.source, line, col, params.ch)
 
 
 # ---------------------------------------------------------------------------
