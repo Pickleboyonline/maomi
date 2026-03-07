@@ -4,6 +4,8 @@ A pure functional ML language that compiles to XLA via StableHLO. **If it compil
 
 LLMs write JAX code that works but is slow — Python loops instead of `scan`/`vmap`, unintentional retracing, host-device transfers, numpy mixed with jnp. No errors, just silent performance loss. Maomi eliminates this: there is no Python to fall back on. The language only expresses operations XLA can optimize. The fast path is the only path.
 
+**[Getting Started](docs/getting-started.md)** · **[Language Reference](docs/reference.md)**
+
 ## Example
 
 ```maomi
@@ -33,24 +35,20 @@ fn cumsum(xs: f32[10], init: f32) -> f32[10] {
     }
 }
 
-fn get_row(matrix: f32[4, 8], i: i32) -> f32[8] {
-    matrix[i]
+fn init_weights(seed: i32) -> f32[4, 4] {
+    let key: Key = rng_key(seed);
+    let keys = rng_split(key, 2);
+    rng_normal(keys[0], 0.0, 1.0, 4, 4)
 }
 
-fn slice_window(x: f32[10]) -> f32[3] {
-    x[2:5]
+fn conv_block(x: f32[1, 3, 8, 8], w: f32[16, 3, 3, 3]) -> f32[1, 16, 2, 2] {
+    let h = conv2d(x, w, 2, 1);
+    max_pool(h, 2, 2, 2, 2)
 }
 
-fn drop_last(x: f32[10]) -> f32[9] {
-    x[:-1]
-}
-
-fn flatten(x: f32[4, 8]) -> f32[32] {
-    reshape(x, 32)
-}
-
-fn join(a: f32[4], b: f32[6]) -> f32[10] {
-    concat(a, b)
+fn hessian_diag(x: f32[4]) -> f32[4] {
+    let loss = sum(x * x * x);
+    grad(sum(grad(loss, x)), x)
 }
 ```
 
@@ -67,22 +65,31 @@ fn join(a: f32[4], b: f32[6]) -> f32[10] {
 | `if c { a } else { b }` | Conditional expression (returns a value) |
 | `map x in xs { ... }` | Elementwise transform (compiles to vectorized op) |
 | `scan (acc, x) in (init, xs) { ... }` | Sequential fold with carried state |
-| `grad(expr, var)` | Reverse-mode AD (supports structs, scan, indexing, reshape, concat) |
+| `grad(expr, var)` | Reverse-mode AD (supports grad-of-grad, structs, scan, indexing, conv2d) |
 | `reshape(x, 4, 8)` | Reshape array (element count must match) |
 | `concat(a, b)` `concat(a, b, 1)` | Concatenate arrays (optional axis, default 0) |
+| `iota(N)` | Integer sequence `[0, 1, ..., N-1]` |
+| `conv2d(x, w)` `conv2d(x, w, stride, pad)` | 2D convolution (NCHW layout) |
+| `max_pool(x, wh, ww, sh, sw)` | Max pooling |
+| `avg_pool(x, wh, ww, sh, sw)` | Average pooling |
+| `rng_key(seed)` | Create RNG key from integer seed |
+| `rng_split(key, n)` | Split key into n subkeys |
+| `rng_uniform(key, lo, hi, d1, d2, ...)` | Uniform random in [lo, hi) |
+| `rng_normal(key, mu, std, d1, d2, ...)` | Normal random (Box-Muller) |
 | `x[i]` `x[1:3]` `x[:, 0]` `x[-1]` `x[1:]` `x[:-1]` | Array indexing and slicing |
+| `table[ids]` | Gather indexing (ids is an integer array) |
 | `import math;` | Qualified module import (`math.relu(x)`) |
 | `from math import { relu };` | Selective import (`relu(x)`) |
 | `import "../lib/nn" as nn;` | Path-based import with alias |
 | `callback(args...);` | Host callback (no-op in codegen, ignored by `grad`) |
 
-**Types:** `f32` `f64` `i32` `i64` `bool` — arrays as `f32[B, 128]` with symbolic or concrete dims. Named structs for grouping data.
+**Types:** `f32` `f64` `i32` `i64` `bool` `Key` — arrays as `f32[B, 128]` with symbolic or concrete dims. Named structs for grouping data. `Key` is `i32[4]` (RNG key alias).
 
-**Builtins:** `mean` `sum` `exp` `log` `tanh` `sqrt` `abs` `reshape` `concat` `callback` — elementwise builtins lift to arrays automatically.
+**Builtins:** `exp` `log` `tanh` `sqrt` `abs` `mean` `sum` `reshape` `concat` `iota` `conv2d` `max_pool` `avg_pool` `rng_key` `rng_split` `rng_uniform` `rng_normal` `callback`
 
 **Operators:** `+` `-` `*` `/` `@` (matmul) `**` (power) `==` `!=` `<` `>` `<=` `>=`
 
-**Indexing:** `x[0]` (single), `x[i]` (dynamic), `x[-1]` (negative), `x[1:3]` (slice), `x[1:]` `x[:3]` `x[:-1]` (open-ended), `x[:, 0]` (multi-axis), `x[0][1]` (chaining). Dynamic indices support negative values at runtime. Fully differentiable — `grad` propagates through indexing via `dynamic_update_slice`.
+**Indexing:** `x[0]` (single), `x[i]` (dynamic), `x[-1]` (negative), `x[1:3]` (slice), `x[1:]` `x[:3]` `x[:-1]` (open-ended), `x[:, 0]` (multi-axis), `x[0][1]` (chaining), `table[ids]` (gather). Fully differentiable — `grad` propagates through all indexing forms.
 
 ## How It Works
 
@@ -112,18 +119,19 @@ uv run maomi compile examples/mlp.mao --emit types
 
 # Compile and run (requires JAX)
 uv run maomi run examples/grad.mao --fn grad_loss
+uv run maomi run examples/cnn.mao --fn conv_forward --seed 7
 ```
 
 ## Status
 
-**v0.6** — 272 tests across lexer, parser, type checker, codegen, AD, modules, indexing, and array manipulation. Full pipeline from source to StableHLO.
+**v0.7** — 416 tests across lexer, parser, type checker, codegen, AD, modules, indexing, array manipulation, conv/pooling, and RNG. Full pipeline from source to StableHLO.
 
-**Works:** shape-typed arrays, array indexing/slicing, `reshape`/`concat` builtins, named structs (nested, with functional updates), `scan`/`map`/`grad`, scan gradients, struct-shaped gradients, import/module system, StableHLO codegen, JAX/XLA execution for concrete-dimension programs.
+**Works:** shape-typed arrays, array indexing/slicing (including negative indices, open-ended ranges, gather), `reshape`/`concat`/`transpose`/`iota` builtins, named structs (nested, with functional updates), `scan`/`map`/`grad`, grad-of-grad (higher-order differentiation), scan gradients, struct-shaped gradients, `conv2d`/`max_pool`/`avg_pool` with AD support, deterministic RNG (`rng_key`/`rng_split`/`rng_uniform`/`rng_normal`), import/module system, StableHLO codegen, JAX/XLA execution.
 
 **Limitations:**
 - Codegen requires concrete dimensions (symbolic dims type-check but don't compile)
-- `grad`: no grad-of-grad
 - `map`: elementwise bodies only
 - Slice bounds must be integer literals (no dynamic ranges)
-- `callback`: compiles but doesn't execute host callbacks yet (IREE outfeed integration pending)
+- `callback`: compiles but doesn't execute host callbacks yet
 - No rank polymorphism
+- Literal types fixed: `int` → `i32`, `float` → `f32`
