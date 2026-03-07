@@ -21,6 +21,7 @@ from .ast_nodes import (
     GradExpr,
     CastExpr,
     FoldExpr,
+    ArrayLiteral,
     StructLiteral,
     FieldAccess,
     WithExpr,
@@ -313,6 +314,8 @@ class TypeChecker:
                 return self._check_cast(expr, env)
             case FoldExpr():
                 return self._check_fold(expr, env)
+            case ArrayLiteral():
+                return self._check_array_literal(expr, env)
             case StructLiteral():
                 return self._check_struct_literal(expr, env)
             case FieldAccess():
@@ -557,6 +560,31 @@ class TypeChecker:
 
         # fold returns the final carry (not stacked)
         return carry_type
+
+    def _check_array_literal(self, expr: ArrayLiteral, env: TypeEnv) -> MaomiType | None:
+        elem_types = [self._infer(e, env) for e in expr.elements]
+        if any(t is None for t in elem_types):
+            return None
+        first = elem_types[0]
+        for i, t in enumerate(elem_types[1:], 1):
+            if not self._types_compatible(t, first):
+                self._error(
+                    f"array literal: element {i} has type {t}, expected {first}",
+                    expr.elements[i].span.line_start,
+                    expr.elements[i].span.col_start,
+                )
+                return None
+        n = len(expr.elements)
+        if isinstance(first, ScalarType):
+            return ArrayType(first.base, (n,))
+        elif isinstance(first, ArrayType):
+            return ArrayType(first.base, (n,) + first.dims)
+        else:
+            self._error(
+                f"array literal: unsupported element type {first}",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
 
     def _check_struct_literal(self, expr: StructLiteral, env: TypeEnv) -> MaomiType | None:
         stype = self.struct_defs.get(expr.name)

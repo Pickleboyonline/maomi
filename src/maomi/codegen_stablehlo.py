@@ -19,6 +19,7 @@ from .ast_nodes import (
     MapExpr,
     CastExpr,
     FoldExpr,
+    ArrayLiteral,
     StructLiteral,
     FieldAccess,
     WithExpr,
@@ -69,6 +70,8 @@ def _expr_references_var(expr: Expr, var_name: str) -> bool:
             return (_expr_references_var(c, var_name)
                     or _block_references_var(tb, var_name)
                     or _block_references_var(eb, var_name))
+        case ArrayLiteral(elements=elems):
+            return any(_expr_references_var(e, var_name) for e in elems)
         case StructLiteral(fields=fields):
             return any(_expr_references_var(v, var_name) for _, v in fields)
         case FieldAccess(object=obj):
@@ -216,6 +219,9 @@ def _collect_refs_expr(expr: Expr, refs: set[str]):
                     _collect_refs_expr(ic.start, refs)
                 if ic.end is not None:
                     _collect_refs_expr(ic.end, refs)
+        case ArrayLiteral(elements=elems):
+            for e in elems:
+                _collect_refs_expr(e, refs)
         case StructLiteral(fields=fields):
             for _, fv in fields:
                 _collect_refs_expr(fv, refs)
@@ -396,6 +402,8 @@ class StableHLOCodegen:
                 return self._gen_cast(expr, env)
             case FoldExpr():
                 return self._gen_fold(expr, env)
+            case ArrayLiteral():
+                return self._gen_array_literal(expr, env)
             case StructLiteral():
                 return self._gen_struct_literal(expr, env)
             case FieldAccess():
@@ -1438,6 +1446,36 @@ class StableHLOCodegen:
         return var
 
     # -- Struct codegen --
+
+    def _gen_array_literal(self, expr: ArrayLiteral, env: dict[str, str]) -> str:
+        result_type = self._type_of(expr)
+        elem_ssas = [self._gen_expr(e, env) for e in expr.elements]
+        elem_types = [self._type_of(e) for e in expr.elements]
+
+        # Reshape each element to add a leading dim of 1
+        reshaped = []
+        for ssa, et in zip(elem_ssas, elem_types):
+            if isinstance(et, ScalarType):
+                update_type = ArrayType(et.base, (1,))
+            elif isinstance(et, ArrayType):
+                update_type = ArrayType(et.base, (1,) + et.dims)
+            else:
+                raise MaomiError("codegen: array literal element must be scalar or array", "<codegen>", 0, 0)
+            mlir_from = _mlir_type(et)
+            mlir_to = _mlir_type(update_type)
+            v = self._fresh()
+            self._emit(f"{v} = stablehlo.reshape {ssa} : ({mlir_from}) -> {mlir_to}")
+            reshaped.append((v, update_type))
+
+        # Concatenate along dim 0
+        args_str = ", ".join(v for v, _ in reshaped)
+        types_str = ", ".join(_mlir_type(t) for _, t in reshaped)
+        var = self._fresh()
+        self._emit(
+            f"{var} = stablehlo.concatenate {args_str}, dim = 0 "
+            f": ({types_str}) -> {_mlir_type(result_type)}"
+        )
+        return var
 
     def _gen_struct_literal(self, expr: StructLiteral, env: dict[str, str]) -> str:
         result_type = self._type_of(expr)
