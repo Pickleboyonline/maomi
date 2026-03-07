@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+_STDLIB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stdlib")
+
 from .ast_nodes import (
     Program,
     ImportDecl,
@@ -138,6 +140,15 @@ class _ResolveContext:
 
         # Simple module name: look for <name>.mao relative to importing file
         candidate = os.path.join(base_dir, f"{path}.mao")
+        if os.path.exists(candidate):
+            return os.path.abspath(candidate)
+
+        # Fallback: look in stdlib
+        stdlib_candidate = os.path.join(_STDLIB_DIR, f"{path}.mao")
+        if os.path.exists(stdlib_candidate):
+            return os.path.abspath(stdlib_candidate)
+
+        # Return original candidate (will error in _load_module with good message)
         return os.path.abspath(candidate)
 
 

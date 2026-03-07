@@ -56,7 +56,7 @@ Symbolic dimensions are valid in type annotations for type checking, but codegen
 
 ```maomi
 fn init(key: Key) -> f32[4, 4] {
-    rng_normal(key, 0.0, 1.0, 4, 4)
+    random.normal(key, 0.0, 1.0, 4, 4)
 }
 ```
 
@@ -450,57 +450,57 @@ Differentiable — gradient distributes evenly across the pooling window.
 
 Maomi uses deterministic, key-threaded random number generation (same model as JAX). All randomness is explicit: you create a key from a seed, split it to get independent subkeys, and pass keys to sampling functions. Same seed always produces the same output.
 
-### rng_key
+### random.key
 
 Create an RNG key from an integer seed.
 
 ```maomi
-rng_key(seed: i32) -> Key    // Key = i32[4]
+random.key(seed: i32) -> Key    // Key = i32[4]
 ```
 
 ```maomi
-let key = rng_key(42);
+let key = random.key(42);
 ```
 
-### rng_split
+### random.split
 
 Split one key into `n` independent subkeys.
 
 ```maomi
-rng_split(key: Key, n: int_literal) -> i32[n, 4]
+random.split(key: Key, n: int_literal) -> i32[n, 4]
 ```
 
 ```maomi
-let keys = rng_split(key, 3);
+let keys = random.split(key, 3);
 let k1 = keys[0];   // use for one operation
 let k2 = keys[1];   // use for another
 ```
 
 The count `n` must be an integer literal (known at compile time).
 
-### rng_uniform
+### random.uniform
 
 Sample from a uniform distribution in `[low, high)`.
 
 ```maomi
-rng_uniform(key: Key, low: f32, high: f32, d1, d2, ...) -> f32[d1, d2, ...]
+random.uniform(key: Key, low: f32, high: f32, d1, d2, ...) -> f32[d1, d2, ...]
 ```
 
 ```maomi
-let x = rng_uniform(key, 0.0, 1.0, 4, 4);    // f32[4, 4] in [0, 1)
-let y = rng_uniform(key, -0.1, 0.1, 128);     // f32[128] in [-0.1, 0.1)
+let x = random.uniform(key, 0.0, 1.0, 4, 4);    // f32[4, 4] in [0, 1)
+let y = random.uniform(key, -0.1, 0.1, 128);     // f32[128] in [-0.1, 0.1)
 ```
 
-### rng_normal
+### random.normal
 
 Sample from a normal (Gaussian) distribution.
 
 ```maomi
-rng_normal(key: Key, mean: f32, std: f32, d1, d2, ...) -> f32[d1, d2, ...]
+random.normal(key: Key, mean: f32, std: f32, d1, d2, ...) -> f32[d1, d2, ...]
 ```
 
 ```maomi
-let w = rng_normal(key, 0.0, 1.0, 128, 64);   // standard normal, f32[128, 64]
+let w = random.normal(key, 0.0, 1.0, 128, 64);   // standard normal, f32[128, 64]
 ```
 
 Uses the Box-Muller transform internally.
@@ -509,9 +509,9 @@ Uses the Box-Muller transform internally.
 
 ```maomi
 fn init_weights(seed: i32) -> f32[128, 64] {
-    let key: Key = rng_key(seed);
-    let keys = rng_split(key, 2);
-    let w = rng_normal(keys[0], 0.0, 0.01, 128, 64);
+    let key: Key = random.key(seed);
+    let keys = random.split(key, 2);
+    let w = random.normal(keys[0], 0.0, 0.01, 128, 64);
     w
 }
 ```

@@ -293,9 +293,11 @@ class TestScan:
 
 
 class TestSymbolicDimError:
-    def test_symbolic_dim_rejected(self):
-        with pytest.raises(MaomiError, match="unresolved symbolic dimension"):
-            codegen("fn f(x: f32[N]) -> f32 { mean(x) }")
+    def test_symbolic_dim_generic_not_called(self):
+        """A generic function with symbolic dims that's never called should compile (skipped by codegen)."""
+        out = codegen("fn f(x: f32[N]) -> f32 { mean(x) }")
+        # The function is generic (symbolic dim), so it's skipped — only monomorphized copies are generated
+        assert "func.func @f" not in out
 
 
 class TestCallbackCodegen:

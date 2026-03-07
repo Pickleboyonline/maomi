@@ -203,7 +203,7 @@ class TestCompletion:
         assert "mean" in labels
         assert "tanh" in labels
         assert "iota" in labels
-        assert "rng_key" in labels
+        assert "random" in labels  # builtin namespace
 
     def test_general_includes_type_names(self):
         source = "fn f(x: f32) -> f32 { x }"
@@ -814,18 +814,17 @@ class TestSignatureHelp:
         assert idx == 1
 
     def test_parse_call_context_third_param(self):
-        source = "fn f(a: f32) -> f32 { rng_uniform(k, 0.0, 1.0, 4) }"
+        source = "fn f(a: f32) -> f32 { random.uniform(k, 0.0, 1.0, 4) }"
         # Cursor after second comma — should be param index 2
-        # "rng_uniform(k, 0.0, 1.0, 4)" — '(' at 33, k at 34, ',' at 35, ' 0.0' ends, ',' at 39, ' 1.0' ends, ',' at 44
-        name, idx = _sig_parse_call_context(source, types.Position(line=0, character=45))
-        assert name == "rng_uniform"
+        name, idx = _sig_parse_call_context(source, types.Position(line=0, character=48))
+        assert name == "random.uniform"
         assert idx == 2
 
     def test_builtin_signatures_contains_expected_entries(self):
         expected = [
             "exp", "log", "tanh", "sqrt", "abs", "mean", "sum",
-            "reshape", "concat", "iota", "rng_key", "rng_split",
-            "rng_uniform", "rng_normal", "conv2d", "max_pool", "avg_pool",
+            "reshape", "concat", "iota", "random.key", "random.split",
+            "random.uniform", "random.normal", "conv2d", "max_pool", "avg_pool",
         ]
         for name in expected:
             assert name in _BUILTIN_SIGNATURES, f"Missing builtin: {name}"

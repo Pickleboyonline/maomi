@@ -212,12 +212,17 @@ class Parser:
         if start.type in BASE_TYPES:
             base = self._advance().value
             dims = None
+            wildcard = False
             if self._match(TokenType.LBRACKET):
-                dims = [self._parse_dim()]
-                while self._match(TokenType.COMMA):
-                    dims.append(self._parse_dim())
+                if self._check(TokenType.DOTDOT):
+                    self._advance()
+                    wildcard = True
+                else:
+                    dims = [self._parse_dim()]
+                    while self._match(TokenType.COMMA):
+                        dims.append(self._parse_dim())
                 self._expect(TokenType.RBRACKET)
-            return TypeAnnotation(base, dims, self._span_from(start))
+            return TypeAnnotation(base, dims, self._span_from(start), wildcard=wildcard)
         if start.type == TokenType.IDENT:
             base = self._advance().value
             return TypeAnnotation(base, None, self._span_from(start))

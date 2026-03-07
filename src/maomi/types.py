@@ -31,7 +31,15 @@ class StructType:
         return f"{self.name} {{ {fields_str} }}"
 
 
-MaomiType = ScalarType | ArrayType | StructType
+@dataclass(frozen=True)
+class WildcardArrayType:
+    base: str  # "f32", "i32", etc.
+
+    def __str__(self) -> str:
+        return f"{self.base}[..]"
+
+
+MaomiType = ScalarType | ArrayType | StructType | WildcardArrayType
 
 # Convenience constants
 F32 = ScalarType("f32")
