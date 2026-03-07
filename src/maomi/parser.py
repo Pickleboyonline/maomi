@@ -15,6 +15,7 @@ from .ast_nodes import (
     IntLiteral,
     FloatLiteral,
     BoolLiteral,
+    StringLiteral,
     Identifier,
     UnaryOp,
     BinOp,
@@ -651,6 +652,11 @@ class Parser:
             self._advance()
             span = Span(tok.line, tok.col, tok.line, tok.col + 5)
             return BoolLiteral(False, span)
+
+        if tok.type == TokenType.STRING_LIT:
+            self._advance()
+            span = Span(tok.line, tok.col, tok.line, tok.col + len(tok.value) + 2)
+            return StringLiteral(tok.value, span)
 
         if tok.type == TokenType.IDENT:
             self._advance()

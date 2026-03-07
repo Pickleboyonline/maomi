@@ -503,3 +503,30 @@ class TestDocComments:
         prog = parse("/// Doc for f.\nfn f(x: f32) -> f32 { x }\nfn g(x: f32) -> f32 { x }")
         assert prog.functions[0].doc == "Doc for f."
         assert prog.functions[1].doc is None
+
+
+class TestStringLiteral:
+    def test_string_literal_parsed(self):
+        expr = parse_expr('"hello"')
+        assert isinstance(expr, StringLiteral)
+        assert expr.value == "hello"
+
+    def test_string_literal_in_callback(self):
+        prog = parse('fn f(x: f32) -> f32 { callback("label", x); x }')
+        block = prog.functions[0].body
+        stmt = block.stmts[0]
+        assert isinstance(stmt, ExprStmt)
+        call = stmt.expr
+        assert isinstance(call, CallExpr)
+        assert isinstance(call.args[0], StringLiteral)
+        assert call.args[0].value == "label"
+
+    def test_empty_string(self):
+        expr = parse_expr('""')
+        assert isinstance(expr, StringLiteral)
+        assert expr.value == ""
+
+    def test_string_span_includes_quotes(self):
+        expr = parse_expr('"hi"')
+        assert isinstance(expr, StringLiteral)
+        assert expr.span.col_end - expr.span.col_start == 4  # "hi" = 4 chars

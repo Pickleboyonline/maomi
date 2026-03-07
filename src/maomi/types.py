@@ -39,7 +39,13 @@ class WildcardArrayType:
         return f"{self.base}[..]"
 
 
-MaomiType = ScalarType | ArrayType | StructType | WildcardArrayType
+@dataclass(frozen=True)
+class StringType:
+    def __str__(self) -> str:
+        return "str"
+
+
+MaomiType = ScalarType | ArrayType | StructType | WildcardArrayType | StringType
 
 # Convenience constants
 F32 = ScalarType("f32")
@@ -47,3 +53,4 @@ F64 = ScalarType("f64")
 I32 = ScalarType("i32")
 I64 = ScalarType("i64")
 BOOL = ScalarType("bool")
+STRING = StringType()

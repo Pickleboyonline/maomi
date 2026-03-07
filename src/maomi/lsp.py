@@ -16,7 +16,7 @@ from .ast_nodes import (
     Program, FnDef, Block, LetStmt, ExprStmt, Param,
     BinOp, UnaryOp, IfExpr, CallExpr, ScanExpr, WhileExpr, MapExpr,
     GradExpr, CastExpr, FoldExpr,
-    Identifier, IntLiteral, FloatLiteral, BoolLiteral,
+    Identifier, IntLiteral, FloatLiteral, BoolLiteral, StringLiteral,
     StructLiteral, FieldAccess, WithExpr, IndexExpr, StructDef,
     TypeAnnotation,
     _ScanGrad, _IndexGrad, _GatherGrad, _Conv2dGrad,
@@ -1365,7 +1365,7 @@ def inlay_hints(ls: LanguageServer, params: types.InlayHintParams):
 
 _SEM_TOKEN_TYPES = [
     "function", "parameter", "variable", "struct",
-    "property", "type", "number", "keyword",
+    "property", "type", "number", "keyword", "string",
 ]
 
 _SEM_TOKEN_MODIFIERS = ["declaration", "definition"]
@@ -1383,6 +1383,7 @@ _ST_PROPERTY = 4
 _ST_TYPE = 5
 _ST_NUMBER = 6
 _ST_KEYWORD = 7
+_ST_STRING = 8
 
 _MOD_DECLARATION = 1
 _MOD_DEFINITION = 2
@@ -1479,6 +1480,16 @@ def _sem_collect_tokens(node, tokens: list, param_names: set[str]):
             node.span.col_start - 1,
             node.span.col_end - node.span.col_start,
             _ST_NUMBER,
+            0,
+        ))
+        return
+
+    if isinstance(node, StringLiteral):
+        tokens.append((
+            node.span.line_start - 1,
+            node.span.col_start - 1,
+            node.span.col_end - node.span.col_start,
+            _ST_STRING,
             0,
         ))
         return

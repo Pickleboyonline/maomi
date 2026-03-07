@@ -10,6 +10,7 @@ from .ast_nodes import (
     IntLiteral,
     FloatLiteral,
     BoolLiteral,
+    StringLiteral,
     Identifier,
     UnaryOp,
     BinOp,
@@ -30,7 +31,7 @@ from .ast_nodes import (
     TypeAnnotation,
     Expr,
 )
-from .types import MaomiType, ScalarType, ArrayType, StructType, WildcardArrayType, F32, F64, I32, I64, BOOL
+from .types import MaomiType, ScalarType, ArrayType, StructType, WildcardArrayType, StringType, F32, F64, I32, I64, BOOL, STRING
 from .errors import MaomiTypeError
 
 
@@ -261,6 +262,14 @@ class TypeChecker:
         if inferred is None:
             return
 
+        if isinstance(inferred, StringType):
+            self._error(
+                "cannot bind string to a variable",
+                stmt.span.line_start,
+                stmt.span.col_start,
+            )
+            return
+
         if stmt.type_annotation is not None:
             declared = self._resolve_type_annotation(stmt.type_annotation)
             if declared and not self._types_compatible(inferred, declared):
@@ -289,6 +298,8 @@ class TypeChecker:
                 return F32
             case BoolLiteral():
                 return BOOL
+            case StringLiteral():
+                return STRING
             case Identifier(name=name):
                 t = env.lookup(name)
                 if t is None:
@@ -1037,6 +1048,14 @@ class TypeChecker:
             arg_type = self._infer(arg, env)
             arg_types.append(arg_type)
             if arg_type is None:
+                continue
+
+            if isinstance(arg_type, StringType):
+                self._error(
+                    "string literals can only be used as callback arguments",
+                    arg.span.line_start,
+                    arg.span.col_start,
+                )
                 continue
 
             if not self._unify_arg(arg_type, param_type, substitution, expr, i):

@@ -1,7 +1,7 @@
 import argparse
 import json
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 from .lexer import Lexer
 from .parser import Parser
@@ -19,6 +19,7 @@ class CompileResult:
     mlir_text: str
     fn_table: dict[str, FnSignature]
     callback_count: int = 0
+    callback_labels: dict[int, list[str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -39,7 +40,7 @@ def compile_source(source: str, filename: str = "<stdin>") -> CompileResult:
     program = transform_grad(program, checker.type_map)
     codegen = StableHLOCodegen(program, checker.type_map)
     mlir_text = codegen.generate()
-    return CompileResult(mlir_text, dict(checker.fn_table), codegen._callback_count)
+    return CompileResult(mlir_text, dict(checker.fn_table), codegen._callback_count, codegen._callback_labels)
 
 
 def compile_source_relax(source: str, filename: str = "<stdin>") -> RelaxCompileResult:
@@ -237,9 +238,11 @@ def _run(path: str, fn_name: str, seed: int):
     import numpy as np
     host_callbacks = []
     for i in range(result.callback_count):
-        def _print_cb(*args, _idx=i):
+        labels = result.callback_labels.get(i, [])
+        prefix = labels[0] if labels else "callback"
+        def _print_cb(*args, _idx=i, _prefix=prefix):
             vals = [np.asarray(a) for a in args]
-            print(f"[callback]", *vals)
+            print(f"[{_prefix}]", *vals)
             return ()
         host_callbacks.append(_print_cb)
 

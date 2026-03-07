@@ -506,3 +506,41 @@ class TestWhere:
 
     def test_where_wrong_arg_count(self):
         check_err("fn f(m: bool[4], x: f32[4]) -> f32[4] { where(m, x) }", "3 arguments")
+
+
+class TestStringLiteral:
+    def test_callback_with_string_label(self):
+        check_ok("""
+            fn f(x: f32) -> f32 {
+                callback("loss", x);
+                x
+            }
+        """)
+
+    def test_callback_string_only(self):
+        check_ok("""
+            fn f(x: f32) -> f32 {
+                callback("hello");
+                x
+            }
+        """)
+
+    def test_callback_multiple_strings(self):
+        check_ok("""
+            fn f(x: f32) -> f32 {
+                callback("epoch", "loss", x);
+                x
+            }
+        """)
+
+    def test_string_let_binding_rejected(self):
+        check_err(
+            'fn f() -> f32 { let s = "hello"; 0.0 }',
+            "cannot bind string",
+        )
+
+    def test_string_in_user_function_rejected(self):
+        check_err(
+            'fn g(x: f32) -> f32 { x }\nfn f() -> f32 { g("hello") }',
+            "string literals can only be used as callback arguments",
+        )

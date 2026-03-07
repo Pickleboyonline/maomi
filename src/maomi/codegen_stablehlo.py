@@ -9,6 +9,7 @@ from .ast_nodes import (
     IntLiteral,
     FloatLiteral,
     BoolLiteral,
+    StringLiteral,
     Identifier,
     UnaryOp,
     BinOp,
@@ -248,6 +249,7 @@ class StableHLOCodegen:
         self._batch_dims: list[int] = []
         self._batched_fns: dict[tuple[str, tuple[int, ...]], str] = {}
         self._callback_count: int = 0
+        self._callback_labels: dict[int, list[str]] = {}
 
     def generate(self) -> str:
         self._emit("module {")
@@ -640,11 +642,22 @@ class StableHLOCodegen:
 
     def _gen_callback(self, expr: CallExpr, env: dict[str, str]) -> str:
         """Emit stablehlo.custom_call targeting JAX's FFI callback handler."""
-        arg_ssas = [self._gen_expr(a, env) for a in expr.args]
-        arg_types = [self._type_of(a) for a in expr.args]
+        # Separate string labels from tensor args
+        tensor_exprs = []
+        labels = []
+        for a in expr.args:
+            if isinstance(a, StringLiteral):
+                labels.append(a.value)
+            else:
+                tensor_exprs.append(a)
+
+        arg_ssas = [self._gen_expr(a, env) for a in tensor_exprs]
+        arg_types = [self._type_of(a) for a in tensor_exprs]
 
         idx = self._callback_count
         self._callback_count += 1
+        if labels:
+            self._callback_labels[idx] = labels
 
         if arg_ssas:
             operands = ", ".join(arg_ssas)
