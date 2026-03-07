@@ -20,6 +20,7 @@ from maomi.lsp import (
     _ca_edit_distance, _ca_find_similar, code_actions, _cache,
     _build_folding_ranges,
     _sel_collect_ancestors, _sel_build_chain,
+    _format_document, _format_line_content,
 )
 from maomi.ast_nodes import (
     Identifier, IntLiteral, FloatLiteral, BinOp, CallExpr,
@@ -1567,3 +1568,78 @@ class TestDocComments:
     def test_signature_help_no_doc(self):
         sh = _build_signature_help("myfn", ["x"], ["f32"], "f32", 0)
         assert sh.signatures[0].documentation is None
+
+
+class TestDocumentFormatting:
+    def test_wrong_indentation(self):
+        source = "fn f() {\n  x;\n}"
+        edits = _format_document(source)
+        assert len(edits) == 1
+        assert edits[0].new_text == "fn f() {\n    x;\n}\n"
+
+    def test_trailing_whitespace(self):
+        source = "fn f() {   \n    x;   \n}   "
+        edits = _format_document(source)
+        assert len(edits) == 1
+        for line in edits[0].new_text.split("\n"):
+            assert line == line.rstrip(), f"trailing whitespace in: {line!r}"
+
+    def test_comment_spacing(self):
+        source = "//comment\n///doc\n"
+        edits = _format_document(source)
+        assert len(edits) == 1
+        lines = edits[0].new_text.splitlines()
+        assert lines[0] == "// comment"
+        assert lines[1] == "/// doc"
+
+    def test_already_formatted(self):
+        source = "fn f() {\n    x;\n}\n"
+        edits = _format_document(source)
+        assert edits == []
+
+    def test_nested_blocks(self):
+        source = "fn f() {\nif true {\nx;\n}\n}"
+        edits = _format_document(source)
+        assert len(edits) == 1
+        expected = "fn f() {\n    if true {\n        x;\n    }\n}\n"
+        assert edits[0].new_text == expected
+
+    def test_else_block(self):
+        source = "fn f() {\nif true {\nx;\n} else {\ny;\n}\n}"
+        edits = _format_document(source)
+        assert len(edits) == 1
+        expected = (
+            "fn f() {\n"
+            "    if true {\n"
+            "        x;\n"
+            "    } else {\n"
+            "        y;\n"
+            "    }\n"
+            "}\n"
+        )
+        assert edits[0].new_text == expected
+
+    def test_multiple_functions(self):
+        source = "fn a() {\nx;\n}\n\nfn b() {\ny;\n}"
+        edits = _format_document(source)
+        assert len(edits) == 1
+        expected = "fn a() {\n    x;\n}\n\nfn b() {\n    y;\n}\n"
+        assert edits[0].new_text == expected
+
+    def test_trailing_newline_added(self):
+        source = "fn f() {\n    x;\n}"
+        edits = _format_document(source)
+        assert len(edits) == 1
+        assert edits[0].new_text.endswith("\n")
+        assert not edits[0].new_text.endswith("\n\n")
+
+    def test_format_line_content_comment(self):
+        assert _format_line_content("//hello") == "// hello"
+        assert _format_line_content("// hello") == "// hello"
+
+    def test_format_line_content_doc_comment(self):
+        assert _format_line_content("///doc") == "/// doc"
+        assert _format_line_content("/// doc") == "/// doc"
+
+    def test_format_line_content_regular(self):
+        assert _format_line_content("let x = 1;") == "let x = 1;"

@@ -1813,6 +1813,77 @@ def selection_ranges(ls: LanguageServer, params: types.SelectionRangeParams):
 
 
 # ---------------------------------------------------------------------------
+# Document Formatting
+# ---------------------------------------------------------------------------
+
+
+def _format_line_content(stripped: str) -> str:
+    """Format a single line's content (already stripped)."""
+    if stripped.startswith("///"):
+        if len(stripped) > 3 and stripped[3] != " ":
+            return "/// " + stripped[3:]
+    elif stripped.startswith("//"):
+        if len(stripped) > 2 and stripped[2] != " ":
+            return "// " + stripped[2:]
+    return stripped
+
+
+def _format_document(source: str) -> list[types.TextEdit]:
+    """Format a .mao source string, returning a list of TextEdits."""
+    lines = source.splitlines()
+    formatted_lines: list[str] = []
+    depth = 0
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            formatted_lines.append("")
+            continue
+
+        # Count leading } characters for this line's indent
+        temp = stripped
+        leading_closes = 0
+        while temp.startswith("}"):
+            leading_closes += 1
+            temp = temp[1:].lstrip()
+
+        # This line's depth = depth - leading_closes
+        line_depth = max(0, depth - leading_closes)
+        content = _format_line_content(stripped)
+        formatted_lines.append("    " * line_depth + content)
+
+        # Update depth for next line
+        depth += stripped.count("{") - stripped.count("}")
+        depth = max(0, depth)
+
+    result = "\n".join(formatted_lines)
+    # Ensure single trailing newline
+    result = result.rstrip("\n") + "\n"
+
+    if result == source:
+        return []
+
+    # Single edit replacing entire document
+    line_count = len(lines)
+    return [types.TextEdit(
+        range=types.Range(
+            start=types.Position(line=0, character=0),
+            end=types.Position(line=line_count, character=0),
+        ),
+        new_text=result,
+    )]
+
+
+@server.feature(types.TEXT_DOCUMENT_FORMATTING)
+def document_formatting(
+    ls: LanguageServer, params: types.DocumentFormattingParams
+):
+    uri = params.text_document.uri
+    doc = ls.workspace.get_text_document(uri)
+    return _format_document(doc.source)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
