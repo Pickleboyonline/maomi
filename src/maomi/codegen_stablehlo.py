@@ -621,6 +621,26 @@ class StableHLOCodegen:
 
     # -- Index codegen --
 
+    def _normalize_index(self, idx_ssa: str, dim: int) -> str:
+        """Emit runtime normalization for potentially negative index: select(i < 0, i + dim, i)."""
+        mlir_i32 = "tensor<i32>"
+        mlir_i1 = "tensor<i1>"
+        zero = self._gen_literal(0, ScalarType("i32"))
+        dim_ssa = self._gen_literal(dim, ScalarType("i32"))
+        is_neg = self._fresh()
+        self._emit(
+            f"{is_neg} = stablehlo.compare LT, {idx_ssa}, {zero}, SIGNED "
+            f": ({mlir_i32}, {mlir_i32}) -> {mlir_i1}"
+        )
+        wrapped = self._fresh()
+        self._emit(f"{wrapped} = stablehlo.add {idx_ssa}, {dim_ssa} : {mlir_i32}")
+        result = self._fresh()
+        self._emit(
+            f"{result} = stablehlo.select {is_neg}, {wrapped}, {idx_ssa} "
+            f": ({mlir_i1}, {mlir_i32}, {mlir_i32}) -> {mlir_i32}"
+        )
+        return result
+
     def _gen_index(self, expr: IndexExpr, env: dict[str, str]) -> str:
         base_ssa = self._gen_expr(expr.base, env)
         base_type = self._type_of(expr.base)
@@ -639,6 +659,9 @@ class StableHLOCodegen:
             dim = base_type.dims[i]
             if ic.kind == "single":
                 idx_ssa = self._gen_expr(ic.value, env)
+                # Runtime normalization for dynamic indices (may be negative)
+                if not isinstance(ic.value, IntLiteral):
+                    idx_ssa = self._normalize_index(idx_ssa, dim)
                 start_ssas.append(idx_ssa)
                 slice_sizes.append(1)
                 squeezed_axes.append(i)
@@ -750,6 +773,9 @@ class StableHLOCodegen:
             dim = base_type.dims[i]
             if ic.kind == "single":
                 idx_ssa = self._gen_expr(ic.value, env)
+                # Runtime normalization for dynamic indices (may be negative)
+                if not isinstance(ic.value, IntLiteral):
+                    idx_ssa = self._normalize_index(idx_ssa, dim)
                 start_ssas.append(idx_ssa)
                 slice_sizes.append(1)
                 squeezed_axes.append(i)
