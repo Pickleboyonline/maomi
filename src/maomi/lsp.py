@@ -1359,7 +1359,7 @@ def _sem_delta_encode(tokens: list[tuple]) -> list[int]:
 
 @server.feature(
     types.TEXT_DOCUMENT_SEMANTIC_TOKENS_FULL,
-    types.SemanticTokensOptions(legend=_SEM_LEGEND, full=True),
+    types.SemanticTokensRegistrationOptions(legend=_SEM_LEGEND, full=True),
 )
 def semantic_tokens_full(ls: LanguageServer, params: types.SemanticTokensParams):
     uri = params.text_document.uri

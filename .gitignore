@@ -18,6 +18,9 @@ build/
 # OS
 .DS_Store
 
+# Claude Code
+.claude/
+
 # uv
 uv.lock
 /editors/vscode/maomi/node_modules
