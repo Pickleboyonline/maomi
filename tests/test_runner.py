@@ -163,6 +163,174 @@ fn f(xs: f32[5]) -> f32[5] {
         assert np.allclose(output, expected, atol=1e-5)
 
 
+class TestConv2dRunner:
+    def test_conv2d_forward(self):
+        """conv2d forward pass: compare with numpy conv2d."""
+        source = """
+fn f(x: f32[1, 1, 4, 4], w: f32[1, 1, 3, 3]) -> f32[1, 1, 2, 2] {
+    conv2d(x, w)
+}
+"""
+        result = compile_source(source)
+        sig = result.fn_table["f"]
+
+        # Create deterministic inputs
+        x = np.arange(16, dtype=np.float32).reshape(1, 1, 4, 4)
+        w = np.ones((1, 1, 3, 3), dtype=np.float32)
+
+        _, output = run_stablehlo(result.mlir_text, "f", sig, inputs=[x, w])
+
+        # Manual: each output = sum of 3x3 window
+        # (0,0): sum of x[0,0,0:3,0:3] = 0+1+2+4+5+6+8+9+10 = 45
+        # (0,1): 1+2+3+5+6+7+9+10+11 = 54
+        # (1,0): 4+5+6+8+9+10+12+13+14 = 81
+        # (1,1): 5+6+7+9+10+11+13+14+15 = 90
+        expected = np.array([[[[45., 54.], [81., 90.]]]], dtype=np.float32)
+        assert np.allclose(output, expected, atol=1e-4)
+
+
+class TestMaxPoolRunner:
+    def test_max_pool_forward(self):
+        """max_pool forward: pick max from each 2x2 window."""
+        source = """
+fn f(x: f32[1, 1, 4, 4]) -> f32[1, 1, 2, 2] {
+    max_pool(x, 2, 2, 2, 2)
+}
+"""
+        result = compile_source(source)
+        sig = result.fn_table["f"]
+        x = np.arange(16, dtype=np.float32).reshape(1, 1, 4, 4)
+        _, output = run_stablehlo(result.mlir_text, "f", sig, inputs=[x])
+        # max of each 2x2: [5, 7, 13, 15]
+        expected = np.array([[[[5., 7.], [13., 15.]]]], dtype=np.float32)
+        assert np.allclose(output, expected, atol=1e-4)
+
+
+class TestAvgPoolRunner:
+    def test_avg_pool_forward(self):
+        """avg_pool forward: average of each 2x2 window."""
+        source = """
+fn f(x: f32[1, 1, 4, 4]) -> f32[1, 1, 2, 2] {
+    avg_pool(x, 2, 2, 2, 2)
+}
+"""
+        result = compile_source(source)
+        sig = result.fn_table["f"]
+        x = np.arange(16, dtype=np.float32).reshape(1, 1, 4, 4)
+        _, output = run_stablehlo(result.mlir_text, "f", sig, inputs=[x])
+        # avg of each 2x2: [(0+1+4+5)/4, (2+3+6+7)/4, (8+9+12+13)/4, (10+11+14+15)/4]
+        expected = np.array([[[[2.5, 4.5], [10.5, 12.5]]]], dtype=np.float32)
+        assert np.allclose(output, expected, atol=1e-4)
+
+
+class TestConv2dGradRunner:
+    def test_conv2d_grad_wrt_input(self):
+        """grad of sum(reshape(conv2d(x,w))) w.r.t. x, compare with JAX."""
+        source = """
+fn f(x: f32[1, 1, 4, 4], w: f32[1, 1, 3, 3]) -> f32[1, 1, 4, 4] {
+    let y = conv2d(x, w);
+    let flat = reshape(y, 4);
+    grad(sum(flat), x)
+}
+"""
+        result = compile_source(source)
+        sig = result.fn_table["f"]
+        x = np.ones((1, 1, 4, 4), dtype=np.float32)
+        w = np.ones((1, 1, 3, 3), dtype=np.float32)
+        _, output = run_stablehlo(result.mlir_text, "f", sig, inputs=[x, w])
+
+        # Compare with JAX
+        from jax import lax, grad as jax_grad
+        import jax.numpy as jnp
+
+        def jax_fn(x):
+            y = lax.conv_general_dilated(x, jnp.array(w), (1, 1), 'VALID',
+                                          dimension_numbers=('NCHW', 'OIHW', 'NCHW'))
+            return jnp.sum(y)
+
+        expected = jax_grad(jax_fn)(jnp.array(x))
+        assert np.allclose(output, np.array(expected), atol=1e-5), f"got {output}, expected {expected}"
+
+    def test_conv2d_grad_wrt_kernel(self):
+        """grad of sum(reshape(conv2d(x,w))) w.r.t. w, compare with JAX."""
+        source = """
+fn f(x: f32[1, 1, 4, 4], w: f32[1, 1, 3, 3]) -> f32[1, 1, 3, 3] {
+    let y = conv2d(x, w);
+    let flat = reshape(y, 4);
+    grad(sum(flat), w)
+}
+"""
+        result = compile_source(source)
+        sig = result.fn_table["f"]
+        x = np.arange(16, dtype=np.float32).reshape(1, 1, 4, 4)
+        w = np.ones((1, 1, 3, 3), dtype=np.float32)
+        _, output = run_stablehlo(result.mlir_text, "f", sig, inputs=[x, w])
+
+        from jax import lax, grad as jax_grad
+        import jax.numpy as jnp
+
+        def jax_fn(w):
+            y = lax.conv_general_dilated(jnp.array(x), w, (1, 1), 'VALID',
+                                          dimension_numbers=('NCHW', 'OIHW', 'NCHW'))
+            return jnp.sum(y)
+
+        expected = jax_grad(jax_fn)(jnp.array(w))
+        assert np.allclose(output, np.array(expected), atol=1e-5), f"got {output}, expected {expected}"
+
+
+class TestAvgPoolGradRunner:
+    def test_avg_pool_grad(self):
+        """grad of sum(reshape(avg_pool(x))) w.r.t. x, compare with JAX."""
+        source = """
+fn f(x: f32[1, 1, 4, 4]) -> f32[1, 1, 4, 4] {
+    let y = avg_pool(x, 2, 2, 2, 2);
+    let flat = reshape(y, 4);
+    grad(sum(flat), x)
+}
+"""
+        result = compile_source(source)
+        sig = result.fn_table["f"]
+        x = np.arange(16, dtype=np.float32).reshape(1, 1, 4, 4)
+        _, output = run_stablehlo(result.mlir_text, "f", sig, inputs=[x])
+
+        from jax import lax, grad as jax_grad
+        import jax.numpy as jnp
+
+        def jax_fn(x):
+            y = lax.reduce_window(x, 0.0, lax.add, (1,1,2,2), (1,1,2,2), 'VALID')
+            y = y / 4.0  # avg
+            return jnp.sum(y)
+
+        expected = jax_grad(jax_fn)(jnp.array(x))
+        assert np.allclose(output, np.array(expected), atol=1e-5), f"got {output}, expected {expected}"
+
+
+class TestMaxPoolGradRunner:
+    def test_max_pool_grad(self):
+        """grad of sum(reshape(max_pool(x))) w.r.t. x, compare with JAX."""
+        source = """
+fn f(x: f32[1, 1, 4, 4]) -> f32[1, 1, 4, 4] {
+    let y = max_pool(x, 2, 2, 2, 2);
+    let flat = reshape(y, 4);
+    grad(sum(flat), x)
+}
+"""
+        result = compile_source(source)
+        sig = result.fn_table["f"]
+        x = np.arange(16, dtype=np.float32).reshape(1, 1, 4, 4)
+        _, output = run_stablehlo(result.mlir_text, "f", sig, inputs=[x])
+
+        from jax import lax, grad as jax_grad
+        import jax.numpy as jnp
+
+        def jax_fn(x):
+            y = lax.reduce_window(x, -jnp.inf, lax.max, (1,1,2,2), (1,1,2,2), 'VALID')
+            return jnp.sum(y)
+
+        expected = jax_grad(jax_fn)(jnp.array(x))
+        assert np.allclose(output, np.array(expected), atol=1e-5), f"got {output}, expected {expected}"
+
+
 class TestCompileSource:
     def test_returns_mlir_and_fn_table(self):
         result = compile_source("fn f(x: f32) -> f32 { x }")

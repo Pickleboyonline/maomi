@@ -45,6 +45,7 @@ def run_stablehlo(
     fn_name: str,
     fn_sig: FnSignature,
     seed: int = 42,
+    inputs: list[np.ndarray] | None = None,
 ) -> tuple[list[np.ndarray], np.ndarray]:
     """Compile and execute a StableHLO module, returning (inputs, output).
 
@@ -53,6 +54,7 @@ def run_stablehlo(
         fn_name: Name of the function to execute
         fn_sig: Function signature (param names, types, return type)
         seed: Random seed for reproducible input generation
+        inputs: Optional pre-built inputs (overrides seed-based generation)
 
     Returns:
         (inputs, output) where inputs is a list of numpy arrays and
@@ -78,8 +80,9 @@ def run_stablehlo(
         [],
     )
 
-    # Generate inputs
-    inputs = generate_inputs(fn_sig, seed)
+    # Generate inputs if not provided
+    if inputs is None:
+        inputs = generate_inputs(fn_sig, seed)
 
     # Execute
     buffers = [backend.buffer_from_pyval(arr) for arr in inputs]

@@ -380,3 +380,55 @@ class TestFixtures:
         source = (self.fixtures_dir / "mlp.mao").read_text()
         errors = check(source)
         assert errors == []
+
+
+class TestConv2d:
+    def test_basic_conv2d(self):
+        check_ok("fn f(x: f32[1, 3, 8, 8], w: f32[16, 3, 3, 3]) -> f32[1, 16, 6, 6] { conv2d(x, w) }")
+
+    def test_conv2d_with_stride_pad(self):
+        # stride=2, pad=1: (8 + 2*1 - 3) / 2 + 1 = 4
+        check_ok("fn f(x: f32[1, 3, 8, 8], w: f32[16, 3, 3, 3]) -> f32[1, 16, 4, 4] { conv2d(x, w, 2, 1) }")
+
+    def test_conv2d_6_args(self):
+        # stride_h=1, stride_w=2, pad_h=1, pad_w=0: OH=(8+2-3)/1+1=8, OW=(8+0-3)/2+1=3
+        check_ok("fn f(x: f32[1, 3, 8, 8], w: f32[16, 3, 3, 3]) -> f32[1, 16, 8, 3] { conv2d(x, w, 1, 2, 1, 0) }")
+
+    def test_conv2d_channel_mismatch(self):
+        check_err(
+            "fn f(x: f32[1, 3, 8, 8], w: f32[16, 5, 3, 3]) -> f32[1, 16, 6, 6] { conv2d(x, w) }",
+            "input channels",
+        )
+
+    def test_conv2d_wrong_rank(self):
+        check_err(
+            "fn f(x: f32[3, 8, 8], w: f32[16, 3, 3, 3]) -> f32[1, 16, 6, 6] { conv2d(x, w) }",
+            "4D",
+        )
+
+    def test_conv2d_wrong_arg_count(self):
+        check_err(
+            "fn f(x: f32[1, 3, 8, 8], w: f32[16, 3, 3, 3]) -> f32[1, 16, 6, 6] { conv2d(x, w, 1) }",
+            "2, 4, or 6",
+        )
+
+
+class TestPool:
+    def test_max_pool(self):
+        # (8 - 2) / 2 + 1 = 4
+        check_ok("fn f(x: f32[1, 16, 8, 8]) -> f32[1, 16, 4, 4] { max_pool(x, 2, 2, 2, 2) }")
+
+    def test_avg_pool(self):
+        check_ok("fn f(x: f32[1, 16, 8, 8]) -> f32[1, 16, 4, 4] { avg_pool(x, 2, 2, 2, 2) }")
+
+    def test_pool_wrong_rank(self):
+        check_err(
+            "fn f(x: f32[16, 8, 8]) -> f32[16, 4, 4] { max_pool(x, 2, 2, 2, 2) }",
+            "4D",
+        )
+
+    def test_pool_wrong_arg_count(self):
+        check_err(
+            "fn f(x: f32[1, 16, 8, 8]) -> f32[1, 16, 4, 4] { max_pool(x, 2, 2) }",
+            "5 arguments",
+        )

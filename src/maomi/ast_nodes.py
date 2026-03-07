@@ -238,8 +238,48 @@ class _GatherGrad:
     span: Span
 
 
+@dataclass
+class _Conv2dGrad:
+    """Internal: backward pass of conv2d. Created by AD, compiled by codegen."""
+    input_expr: Expr              # original input (for grad w.r.t. kernel, and for shape)
+    kernel_expr: Expr             # original kernel (for grad w.r.t. input, and for shape)
+    adj: Expr                     # upstream adjoint
+    wrt: str                      # "lhs" (input grad) or "rhs" (kernel grad)
+    strides: tuple[int, int]
+    padding: tuple[int, int]
+    span: Span
+
+
+@dataclass
+class _MaxPoolGrad:
+    """Internal: backward pass of max_pool. Created by AD, compiled by codegen."""
+    input_expr: Expr              # original input (to find max positions)
+    adj: Expr                     # upstream adjoint
+    window: tuple[int, int]
+    strides: tuple[int, int]
+    span: Span
+
+
+@dataclass
+class _AvgPoolGrad:
+    """Internal: backward pass of avg_pool. Created by AD, compiled by codegen."""
+    input_expr: Expr              # original input (for shape)
+    adj: Expr                     # upstream adjoint
+    window: tuple[int, int]
+    strides: tuple[int, int]
+    span: Span
+
+
+@dataclass
+class _BroadcastExpr:
+    """Internal: broadcast scalar to array shape. Created by AD for sum/mean backprop."""
+    expr: Expr                    # scalar expression to broadcast
+    target_dims: tuple[int, ...]  # target shape dimensions
+    span: Span
+
+
 # Union types for convenience
-Expr = IntLiteral | FloatLiteral | BoolLiteral | Identifier | UnaryOp | BinOp | IfExpr | CallExpr | ScanExpr | MapExpr | GradExpr | StructLiteral | FieldAccess | WithExpr | IndexExpr | _ScanGrad | _IndexGrad | _GatherGrad
+Expr = IntLiteral | FloatLiteral | BoolLiteral | Identifier | UnaryOp | BinOp | IfExpr | CallExpr | ScanExpr | MapExpr | GradExpr | StructLiteral | FieldAccess | WithExpr | IndexExpr | _ScanGrad | _IndexGrad | _GatherGrad | _Conv2dGrad | _MaxPoolGrad | _AvgPoolGrad | _BroadcastExpr
 Stmt = LetStmt | ExprStmt
 
 

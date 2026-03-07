@@ -4,6 +4,7 @@ from maomi.type_checker import TypeChecker
 from maomi.ad import transform_grad
 from maomi.codegen_stablehlo import StableHLOCodegen
 from maomi.ast_nodes import *
+from maomi.ast_nodes import _BroadcastExpr
 from maomi.errors import MaomiError
 import pytest
 
@@ -108,11 +109,12 @@ class TestADBuiltins:
 
 class TestADReductions:
     def test_mean(self):
-        """d/dx(mean(x)) = 1/numel for each element."""
+        """d/dx(mean(x)) = 1/numel for each element, broadcast to input shape."""
         prog = ad_transform("fn f(x: f32[4]) -> f32[4] { grad(mean(x), x) }")
         expr = get_body_expr(prog)
-        # Should be 1.0 / 4.0 (scalar that gets broadcast)
-        assert isinstance(expr, BinOp) and expr.op == "/"
+        # Should be broadcast(1.0 / 4.0) to input shape
+        assert isinstance(expr, _BroadcastExpr)
+        assert isinstance(expr.expr, BinOp) and expr.expr.op == "/"
 
 
 class TestADCodegen:
@@ -408,3 +410,56 @@ class TestGradOfGrad:
         out = ad_codegen("fn f(x: f32) -> f32 { grad(grad(grad(x ** 4.0, x), x), x) }")
         assert "module {" in out
         assert "func.func @f" in out
+
+
+class TestConv2dGrad:
+    def test_grad_wrt_input(self):
+        """grad of sum(reshape(conv2d(x, w))) w.r.t. x should produce a backward convolution."""
+        out = ad_codegen("""
+            fn f(x: f32[1, 1, 4, 4], w: f32[1, 1, 3, 3]) -> f32[1, 1, 4, 4] {
+                let y = conv2d(x, w);
+                let flat = reshape(y, 4);
+                grad(sum(flat), x)
+            }
+        """)
+        assert "stablehlo.convolution" in out
+        assert "stablehlo.reverse" in out
+
+    def test_grad_wrt_kernel(self):
+        """grad of sum(reshape(conv2d(x, w))) w.r.t. w should produce a backward convolution."""
+        out = ad_codegen("""
+            fn f(x: f32[1, 1, 4, 4], w: f32[1, 1, 3, 3]) -> f32[1, 1, 3, 3] {
+                let y = conv2d(x, w);
+                let flat = reshape(y, 4);
+                grad(sum(flat), w)
+            }
+        """)
+        # Kernel gradient is a convolution (no reverse needed)
+        assert "stablehlo.convolution" in out
+
+
+class TestMaxPoolGrad:
+    def test_grad_max_pool(self):
+        """grad of sum(reshape(max_pool(x))) w.r.t. x should produce select_and_scatter."""
+        out = ad_codegen("""
+            fn f(x: f32[1, 1, 4, 4]) -> f32[1, 1, 4, 4] {
+                let y = max_pool(x, 2, 2, 2, 2);
+                let flat = reshape(y, 4);
+                grad(sum(flat), x)
+            }
+        """)
+        assert "select_and_scatter" in out
+
+
+class TestAvgPoolGrad:
+    def test_grad_avg_pool(self):
+        """grad of sum(reshape(avg_pool(x))) w.r.t. x should produce pad + reduce_window."""
+        out = ad_codegen("""
+            fn f(x: f32[1, 1, 4, 4]) -> f32[1, 1, 4, 4] {
+                let y = avg_pool(x, 2, 2, 2, 2);
+                let flat = reshape(y, 4);
+                grad(sum(flat), x)
+            }
+        """)
+        assert "stablehlo.pad" in out
+        assert "stablehlo.reduce_window" in out

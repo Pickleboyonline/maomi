@@ -49,6 +49,10 @@ from .ast_nodes import (
     _ScanGrad,
     _IndexGrad,
     _GatherGrad,
+    _Conv2dGrad,
+    _MaxPoolGrad,
+    _AvgPoolGrad,
+    _BroadcastExpr,
     Span,
     Expr,
 )
@@ -62,6 +66,7 @@ _REDUCTION_BUILTINS = {"mean", "sum"}
 _SHAPE_BUILTINS = {"reshape", "concat"}
 _NONDIFF_BUILTINS = {"callback"}
 _IOTA_BUILTINS = {"iota"}
+_CONV_POOL_BUILTINS = {"conv2d", "max_pool", "avg_pool"}
 _MAX_GRAD_DEPTH = 10
 
 
@@ -132,6 +137,18 @@ def _collect_free_vars_inner(expr: Expr, result: set[str]):
             _collect_free_vars_inner(indices, result)
         case GradExpr(expr=inner_expr):
             _collect_free_vars_inner(inner_expr, result)
+        case _Conv2dGrad(input_expr=ie, kernel_expr=ke, adj=adj):
+            _collect_free_vars_inner(ie, result)
+            _collect_free_vars_inner(ke, result)
+            _collect_free_vars_inner(adj, result)
+        case _MaxPoolGrad(input_expr=ie, adj=adj):
+            _collect_free_vars_inner(ie, result)
+            _collect_free_vars_inner(adj, result)
+        case _AvgPoolGrad(input_expr=ie, adj=adj):
+            _collect_free_vars_inner(ie, result)
+            _collect_free_vars_inner(adj, result)
+        case _BroadcastExpr(expr=e):
+            _collect_free_vars_inner(e, result)
 
 
 def transform_grad(program: Program, type_map: dict[int, MaomiType]) -> Program:
@@ -348,7 +365,7 @@ class ADTransform:
                 if callee in _NONDIFF_BUILTINS:
                     # Callback: no value, no gradient. Skip entirely.
                     return
-                elif callee in _IOTA_BUILTINS | _ELEMENTWISE_BUILTINS | _REDUCTION_BUILTINS | _SHAPE_BUILTINS | {"transpose"}:
+                elif callee in _IOTA_BUILTINS | _ELEMENTWISE_BUILTINS | _REDUCTION_BUILTINS | _SHAPE_BUILTINS | _CONV_POOL_BUILTINS | {"transpose"}:
                     # Built-in: put on tape as-is
                     for a in args:
                         self._linearize(a, tape, var_map, let_env)
@@ -553,6 +570,30 @@ class ADTransform:
                 node = GradExpr(new_inner, wrt, expr.span)
                 self._copy_type(expr, node)
                 return node
+            case _Conv2dGrad():
+                new_input = self._substitute(expr.input_expr, subst)
+                new_kernel = self._substitute(expr.kernel_expr, subst)
+                new_adj = self._substitute(expr.adj, subst)
+                node = _Conv2dGrad(new_input, new_kernel, new_adj, expr.wrt, expr.strides, expr.padding, expr.span)
+                self._copy_type(expr, node)
+                return node
+            case _MaxPoolGrad():
+                new_input = self._substitute(expr.input_expr, subst)
+                new_adj = self._substitute(expr.adj, subst)
+                node = _MaxPoolGrad(new_input, new_adj, expr.window, expr.strides, expr.span)
+                self._copy_type(expr, node)
+                return node
+            case _AvgPoolGrad():
+                new_input = self._substitute(expr.input_expr, subst)
+                new_adj = self._substitute(expr.adj, subst)
+                node = _AvgPoolGrad(new_input, new_adj, expr.window, expr.strides, expr.span)
+                self._copy_type(expr, node)
+                return node
+            case _BroadcastExpr():
+                new_expr = self._substitute(expr.expr, subst)
+                node = _BroadcastExpr(new_expr, expr.target_dims, expr.span)
+                self._copy_type(expr, node)
+                return node
             case _:
                 return expr
 
@@ -662,6 +703,8 @@ class ADTransform:
                     arg = args[0]
                     arg_name = var_map[id(arg)]
                     self._accumulate(adjoints, arg_name, self._make_call("transpose", [adj]))
+                elif callee in _CONV_POOL_BUILTINS:
+                    self._backprop_conv_pool(callee, args, adj, adjoints, var_map, node)
                 else:
                     raise MaomiError(
                         f"grad: unsupported function call '{callee}' inside grad",
@@ -773,7 +816,7 @@ class ADTransform:
         arg_type = self._type_of(arg)
 
         if callee == "mean":
-            # d/dx mean(x) = broadcast(dz / numel)
+            # d/dx mean(x) = broadcast(dz / numel) to input shape
             if isinstance(arg_type, ArrayType):
                 numel = 1
                 for d in arg_type.dims:
@@ -782,15 +825,21 @@ class ADTransform:
                     else:
                         raise MaomiError(f"grad: cannot differentiate mean with symbolic dim '{d}'", "<ad>", 0, 0)
                 scaled = self._make_binop("/", adj, self._make_float(float(numel)))
-                # The scalar adjoint needs to be broadcast back — but since we're
-                # building AST nodes, the type checker/codegen will handle broadcasting
-                self._accumulate(adjoints, arg_name, scaled)
+                # Broadcast scalar back to input shape (JAX: broadcast_in_dim)
+                broadcast = _BroadcastExpr(scaled, tuple(arg_type.dims), _DUMMY_SPAN)
+                self.type_map[id(broadcast)] = arg_type
+                self._accumulate(adjoints, arg_name, broadcast)
             else:
                 self._accumulate(adjoints, arg_name, adj)
 
         elif callee == "sum":
-            # d/dx sum(x) = broadcast(dz)
-            self._accumulate(adjoints, arg_name, adj)
+            # d/dx sum(x) = broadcast(dz) to input shape (JAX: broadcast_in_dim)
+            if isinstance(arg_type, ArrayType):
+                broadcast = _BroadcastExpr(adj, tuple(arg_type.dims), _DUMMY_SPAN)
+                self.type_map[id(broadcast)] = arg_type
+                self._accumulate(adjoints, arg_name, broadcast)
+            else:
+                self._accumulate(adjoints, arg_name, adj)
 
     def _backprop_reshape(self, args: list[Expr], adj: Expr,
                            adjoints: dict[str, Expr], var_map: dict[int, str]):
@@ -867,6 +916,80 @@ class ADTransform:
                 self._accumulate(adjoints, arg_name, slice_expr)
 
             offset += size
+
+    def _backprop_conv_pool(self, callee: str, args: list[Expr], adj: Expr,
+                             adjoints: dict[str, Expr], var_map: dict[int, str],
+                             node: Expr):
+        """Backprop through conv2d, max_pool, avg_pool."""
+        if callee == "conv2d":
+            # conv2d(input, kernel, ...) — bilinear
+            input_expr = args[0]
+            kernel_expr = args[1]
+            input_type = self._type_of(input_expr)
+            kernel_type = self._type_of(kernel_expr)
+            assert isinstance(input_type, ArrayType) and isinstance(kernel_type, ArrayType)
+
+            # Extract stride/pad from literal args
+            nargs = len(args)
+            if nargs == 2:
+                sh, sw, ph, pw = 1, 1, 0, 0
+            elif nargs == 4:
+                sh = sw = args[2].value
+                ph = pw = args[3].value
+            else:
+                sh, sw = args[2].value, args[3].value
+                ph, pw = args[4].value, args[5].value
+
+            strides = (sh, sw)
+            padding = (ph, pw)
+
+            # grad w.r.t. input
+            if id(input_expr) in var_map:
+                input_name = var_map[id(input_expr)]
+                grad_node = _Conv2dGrad(
+                    input_expr, kernel_expr, adj, "lhs", strides, padding, _DUMMY_SPAN,
+                )
+                self.type_map[id(grad_node)] = input_type
+                self._accumulate(adjoints, input_name, grad_node)
+
+            # grad w.r.t. kernel
+            if id(kernel_expr) in var_map:
+                kernel_name = var_map[id(kernel_expr)]
+                grad_node = _Conv2dGrad(
+                    input_expr, kernel_expr, adj, "rhs", strides, padding, _DUMMY_SPAN,
+                )
+                self.type_map[id(grad_node)] = kernel_type
+                self._accumulate(adjoints, kernel_name, grad_node)
+
+        elif callee == "max_pool":
+            # max_pool(input, wh, ww, sh, sw)
+            input_expr = args[0]
+            input_type = self._type_of(input_expr)
+            wh, ww = args[1].value, args[2].value
+            sh, sw = args[3].value, args[4].value
+
+            if id(input_expr) in var_map:
+                input_name = var_map[id(input_expr)]
+                grad_node = _MaxPoolGrad(
+                    input_expr, adj, (wh, ww), (sh, sw), _DUMMY_SPAN,
+                )
+                self.type_map[id(grad_node)] = input_type
+                self._accumulate(adjoints, input_name, grad_node)
+
+        elif callee == "avg_pool":
+            # avg_pool(input, wh, ww, sh, sw)
+            input_expr = args[0]
+            input_type = self._type_of(input_expr)
+            wh, ww = args[1].value, args[2].value
+            sh, sw = args[3].value, args[4].value
+
+            if id(input_expr) in var_map:
+                input_name = var_map[id(input_expr)]
+                grad_node = _AvgPoolGrad(
+                    input_expr, adj, (wh, ww), (sh, sw), _DUMMY_SPAN,
+                )
+                self.type_map[id(grad_node)] = input_type
+                self._accumulate(adjoints, input_name, grad_node)
 
     def _backprop_if(self, cond: Expr, then_b: Block, else_b: Block,
                       adj: Expr, adjoints: dict[str, Expr],

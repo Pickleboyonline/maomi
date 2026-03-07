@@ -225,3 +225,32 @@ class TestStructCodegen:
         """)
         # Should have multiple get_tuple_element: one to extract inner, one to extract x
         assert out.count("get_tuple_element") >= 2
+
+
+class TestConv2d:
+    def test_conv2d_basic(self):
+        out = codegen("fn f(x: f32[1, 3, 8, 8], w: f32[16, 3, 3, 3]) -> f32[1, 16, 6, 6] { conv2d(x, w) }")
+        assert "stablehlo.convolution" in out
+        assert "dim_numbers = [b, f, 0, 1]x[o, i, 0, 1]->[b, f, 0, 1]" in out
+        assert "stride = [1, 1]" in out
+        assert "pad = [[0, 0], [0, 0]]" in out
+        assert "tensor<1x16x6x6xf32>" in out
+
+    def test_conv2d_with_stride_pad(self):
+        out = codegen("fn f(x: f32[1, 3, 8, 8], w: f32[16, 3, 3, 3]) -> f32[1, 16, 4, 4] { conv2d(x, w, 2, 1) }")
+        assert "stablehlo.convolution" in out
+        assert "stride = [2, 2]" in out
+        assert "pad = [[1, 1], [1, 1]]" in out
+
+
+class TestPool:
+    def test_max_pool(self):
+        out = codegen("fn f(x: f32[1, 16, 8, 8]) -> f32[1, 16, 4, 4] { max_pool(x, 2, 2, 2, 2) }")
+        assert "stablehlo.reduce_window" in out
+        assert "stablehlo.maximum" in out
+
+    def test_avg_pool(self):
+        out = codegen("fn f(x: f32[1, 16, 8, 8]) -> f32[1, 16, 4, 4] { avg_pool(x, 2, 2, 2, 2) }")
+        assert "stablehlo.reduce_window" in out
+        assert "stablehlo.add" in out
+        assert "stablehlo.divide" in out

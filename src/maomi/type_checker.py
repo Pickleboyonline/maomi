@@ -798,6 +798,14 @@ class TypeChecker:
             self._infer(arg, env)
             return ArrayType("i32", (arg.value,))
 
+        # conv2d(input, kernel, ...) — 2D convolution
+        if expr.callee == "conv2d":
+            return self._check_conv2d(expr, env)
+
+        # max_pool / avg_pool(input, wh, ww, sh, sw)
+        if expr.callee in ("max_pool", "avg_pool"):
+            return self._check_pool(expr, env)
+
         sig = self.fn_table.get(expr.callee)
         if sig is None:
             self._error(
@@ -989,6 +997,144 @@ class TypeChecker:
         result_dims = list(first.dims)
         result_dims[axis] = axis_sum
         return ArrayType(first.base, tuple(result_dims))
+
+    def _check_conv2d(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
+        # conv2d(input, kernel) — stride=1, pad=0
+        # conv2d(input, kernel, stride, pad) — same for both spatial dims
+        # conv2d(input, kernel, stride_h, stride_w, pad_h, pad_w)
+        nargs = len(expr.args)
+        if nargs not in (2, 4, 6):
+            self._error(
+                "conv2d expects 2, 4, or 6 arguments: (input, kernel[, stride, pad | stride_h, stride_w, pad_h, pad_w])",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        input_type = self._infer(expr.args[0], env)
+        kernel_type = self._infer(expr.args[1], env)
+        # Infer remaining args (stride/pad literals)
+        for a in expr.args[2:]:
+            self._infer(a, env)
+
+        if input_type is None or kernel_type is None:
+            return None
+        if not isinstance(input_type, ArrayType) or len(input_type.dims) != 4:
+            self._error(
+                f"conv2d: input must be a 4D array [N, Ci, H, W], got {input_type}",
+                expr.args[0].span.line_start, expr.args[0].span.col_start,
+            )
+            return None
+        if not isinstance(kernel_type, ArrayType) or len(kernel_type.dims) != 4:
+            self._error(
+                f"conv2d: kernel must be a 4D array [Co, Ci, Kh, Kw], got {kernel_type}",
+                expr.args[1].span.line_start, expr.args[1].span.col_start,
+            )
+            return None
+        if input_type.base != kernel_type.base:
+            self._error(
+                f"conv2d: input and kernel must have same base type, got {input_type.base} and {kernel_type.base}",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        N, Ci, H, W = input_type.dims
+        Co, Ki, Kh, Kw = kernel_type.dims
+        if isinstance(Ci, int) and isinstance(Ki, int) and Ci != Ki:
+            self._error(
+                f"conv2d: input channels ({Ci}) must match kernel input channels ({Ki})",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        # Extract stride/pad
+        if nargs == 2:
+            sh, sw, ph, pw = 1, 1, 0, 0
+        elif nargs == 4:
+            for i in (2, 3):
+                if not isinstance(expr.args[i], IntLiteral):
+                    self._error("conv2d: stride and pad must be integer literals",
+                                expr.args[i].span.line_start, expr.args[i].span.col_start)
+                    return None
+            sh = sw = expr.args[2].value
+            ph = pw = expr.args[3].value
+        else:  # nargs == 6
+            for i in range(2, 6):
+                if not isinstance(expr.args[i], IntLiteral):
+                    self._error("conv2d: stride and pad must be integer literals",
+                                expr.args[i].span.line_start, expr.args[i].span.col_start)
+                    return None
+            sh, sw = expr.args[2].value, expr.args[3].value
+            ph, pw = expr.args[4].value, expr.args[5].value
+
+        # Compute output spatial dims
+        if not isinstance(H, int) or not isinstance(W, int):
+            self._error("conv2d: input spatial dimensions must be concrete",
+                        expr.span.line_start, expr.span.col_start)
+            return None
+        if not isinstance(Kh, int) or not isinstance(Kw, int):
+            self._error("conv2d: kernel spatial dimensions must be concrete",
+                        expr.span.line_start, expr.span.col_start)
+            return None
+
+        OH = (H + 2 * ph - Kh) // sh + 1
+        OW = (W + 2 * pw - Kw) // sw + 1
+        if OH <= 0 or OW <= 0:
+            self._error(
+                f"conv2d: output spatial dimensions must be positive, got ({OH}, {OW})",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        return ArrayType(input_type.base, (N, Co, OH, OW))
+
+    def _check_pool(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
+        # max_pool(input, wh, ww, sh, sw) or avg_pool(input, wh, ww, sh, sw)
+        name = expr.callee
+        if len(expr.args) != 5:
+            self._error(
+                f"{name} expects 5 arguments: (input, window_h, window_w, stride_h, stride_w)",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        input_type = self._infer(expr.args[0], env)
+        for a in expr.args[1:]:
+            self._infer(a, env)
+
+        if input_type is None:
+            return None
+        if not isinstance(input_type, ArrayType) or len(input_type.dims) != 4:
+            self._error(
+                f"{name}: input must be a 4D array [N, C, H, W], got {input_type}",
+                expr.args[0].span.line_start, expr.args[0].span.col_start,
+            )
+            return None
+
+        for i in range(1, 5):
+            if not isinstance(expr.args[i], IntLiteral):
+                self._error(f"{name}: window and stride must be integer literals",
+                            expr.args[i].span.line_start, expr.args[i].span.col_start)
+                return None
+
+        wh, ww = expr.args[1].value, expr.args[2].value
+        sh, sw = expr.args[3].value, expr.args[4].value
+
+        N, C, H, W = input_type.dims
+        if not isinstance(H, int) or not isinstance(W, int):
+            self._error(f"{name}: spatial dimensions must be concrete",
+                        expr.span.line_start, expr.span.col_start)
+            return None
+
+        OH = (H - wh) // sh + 1
+        OW = (W - ww) // sw + 1
+        if OH <= 0 or OW <= 0:
+            self._error(
+                f"{name}: output spatial dimensions must be positive, got ({OH}, {OW})",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        return ArrayType(input_type.base, (N, C, OH, OW))
 
     def _unify_arg(
         self,
