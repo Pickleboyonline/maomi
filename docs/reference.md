@@ -750,7 +750,7 @@ fn train(model: Model, data: f32[60000, 784], labels: f32[60000, 10]) -> Model {
 }
 ```
 
-**AD:** `grad` through `fold` itself is not supported — use `grad` inside the fold body instead. This is the intended pattern: differentiate each step, not the entire loop.
+**AD:** `grad` through `fold` is fully supported. The compiler internally records a forward trajectory and runs a reverse accumulation loop, identical to scan's backward pass.
 
 ---
 
