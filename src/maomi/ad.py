@@ -67,6 +67,7 @@ _SHAPE_BUILTINS = {"reshape", "concat"}
 _NONDIFF_BUILTINS = {"callback"}
 _IOTA_BUILTINS = {"iota"}
 _CONV_POOL_BUILTINS = {"conv2d", "max_pool", "avg_pool"}
+_RNG_BUILTINS = {"rng_key", "rng_split", "rng_uniform", "rng_normal"}
 _MAX_GRAD_DEPTH = 10
 
 
@@ -365,7 +366,7 @@ class ADTransform:
                 if callee in _NONDIFF_BUILTINS:
                     # Callback: no value, no gradient. Skip entirely.
                     return
-                elif callee in _IOTA_BUILTINS | _ELEMENTWISE_BUILTINS | _REDUCTION_BUILTINS | _SHAPE_BUILTINS | _CONV_POOL_BUILTINS | {"transpose"}:
+                elif callee in _IOTA_BUILTINS | _ELEMENTWISE_BUILTINS | _REDUCTION_BUILTINS | _SHAPE_BUILTINS | _CONV_POOL_BUILTINS | _RNG_BUILTINS | {"transpose"}:
                     # Built-in: put on tape as-is
                     for a in args:
                         self._linearize(a, tape, var_map, let_env)
@@ -690,6 +691,8 @@ class ADTransform:
             case CallExpr(callee=callee, args=args):
                 if callee in _IOTA_BUILTINS:
                     pass  # iota produces integers — no gradient flows through
+                elif callee in _RNG_BUILTINS:
+                    pass  # RNG has zero gradient — non-differentiable
                 elif callee in _ELEMENTWISE_BUILTINS:
                     self._backprop_elementwise(callee, args, adj, adjoints, var_map, node)
                 elif callee in _REDUCTION_BUILTINS:

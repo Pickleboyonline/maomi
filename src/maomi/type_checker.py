@@ -82,6 +82,10 @@ def _make_builtins() -> dict[str, FnSignature]:
 BUILTINS = _make_builtins()
 _ELEMENTWISE_BUILTINS = {"exp", "log", "tanh", "sqrt", "abs"}
 _CALLBACK_BUILTINS = {"callback"}
+_RNG_BUILTINS = {"rng_key", "rng_split", "rng_uniform", "rng_normal"}
+
+# Key type alias — compiler-level alias for i32[4]
+KEY_TYPE = ArrayType("i32", (4,))
 
 
 # -- Scoped environment --
@@ -175,6 +179,15 @@ class TypeChecker:
                 return ScalarType(ta.base)
             dims = tuple(d.value for d in ta.dims)
             return ArrayType(ta.base, dims)
+        # Key type alias
+        if ta.base == "Key":
+            if ta.dims is not None:
+                self._error(
+                    "Key type does not take dimensions (it is already i32[4])",
+                    ta.span.line_start, ta.span.col_start,
+                )
+                return None
+            return KEY_TYPE
         # Struct type
         if ta.base in self.struct_defs:
             return self.struct_defs[ta.base]
@@ -775,6 +788,10 @@ class TypeChecker:
                 self._infer(arg, env)
             return None
 
+        # RNG builtins
+        if expr.callee in _RNG_BUILTINS:
+            return self._check_rng_call(expr, env)
+
         # reshape(array, dim1, dim2, ...) — variadic shape builtin
         if expr.callee == "reshape":
             return self._check_reshape(expr, env)
@@ -1135,6 +1152,73 @@ class TypeChecker:
             return None
 
         return ArrayType(input_type.base, (N, C, OH, OW))
+
+    def _check_rng_call(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
+        callee = expr.callee
+        args = expr.args
+        span = expr.span
+
+        if callee == "rng_key":
+            if len(args) != 1:
+                self._error(f"rng_key expects 1 argument (seed), got {len(args)}", span.line_start, span.col_start)
+                return None
+            seed_type = self._infer(args[0], env)
+            if seed_type is not None and seed_type != I32:
+                self._error(f"rng_key: seed must be i32, got {seed_type}", args[0].span.line_start, args[0].span.col_start)
+                return None
+            return KEY_TYPE
+
+        if callee == "rng_split":
+            if len(args) != 2:
+                self._error(f"rng_split expects 2 arguments (key, count), got {len(args)}", span.line_start, span.col_start)
+                return None
+            key_type = self._infer(args[0], env)
+            if key_type is not None and key_type != KEY_TYPE:
+                self._error(f"rng_split: first argument must be Key (i32[4]), got {key_type}", args[0].span.line_start, args[0].span.col_start)
+                return None
+            if not isinstance(args[1], IntLiteral):
+                self._error("rng_split: count must be an integer literal", args[1].span.line_start, args[1].span.col_start)
+                return None
+            n = args[1].value
+            if n < 1:
+                self._error(f"rng_split: count must be >= 1, got {n}", args[1].span.line_start, args[1].span.col_start)
+                return None
+            # Infer the literal so it gets a type in the type_map
+            self._infer(args[1], env)
+            return ArrayType("i32", (n, 4))
+
+        # rng_uniform / rng_normal
+        if len(args) < 4:
+            self._error(
+                f"{callee} expects at least 4 arguments (key, param1, param2, dim...), got {len(args)}",
+                span.line_start, span.col_start,
+            )
+            return None
+        key_type = self._infer(args[0], env)
+        if key_type is not None and key_type != KEY_TYPE:
+            self._error(f"{callee}: first argument must be Key (i32[4]), got {key_type}", args[0].span.line_start, args[0].span.col_start)
+            return None
+        for i in (1, 2):
+            t = self._infer(args[i], env)
+            if t is not None and t != F32:
+                param_name = ("low", "high") if callee == "rng_uniform" else ("mean", "stddev")
+                self._error(
+                    f"{callee}: {param_name[i-1]} must be f32, got {t}",
+                    args[i].span.line_start, args[i].span.col_start,
+                )
+                return None
+        dims: list[int] = []
+        for i in range(3, len(args)):
+            if not isinstance(args[i], IntLiteral):
+                self._error(f"{callee}: dimension arguments must be integer literals", args[i].span.line_start, args[i].span.col_start)
+                return None
+            if args[i].value < 1:
+                self._error(f"{callee}: dimensions must be >= 1, got {args[i].value}", args[i].span.line_start, args[i].span.col_start)
+                return None
+            dims.append(args[i].value)
+            # Infer the literal so it gets a type in the type_map
+            self._infer(args[i], env)
+        return ArrayType("f32", tuple(dims))
 
     def _unify_arg(
         self,
