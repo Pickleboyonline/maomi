@@ -149,7 +149,11 @@ class Lexer:
 
         match ch:
             case ".":
-                self._add(TokenType.DOT, ch, line, col)
+                if self.pos < len(self.source) and self.source[self.pos] == ".":
+                    self._advance()
+                    self._add(TokenType.DOTDOT, "..", line, col)
+                else:
+                    self._add(TokenType.DOT, ch, line, col)
             case '"':
                 self._read_string(line, col)
             case "(":
@@ -170,8 +174,6 @@ class Lexer:
                 self._add(TokenType.COLON, ch, line, col)
             case ";":
                 self._add(TokenType.SEMICOLON, ch, line, col)
-            case ".":
-                self._add(TokenType.DOT, ch, line, col)
             case "@":
                 self._add(TokenType.AT, ch, line, col)
             case "+":

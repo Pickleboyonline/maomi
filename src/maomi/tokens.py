@@ -50,6 +50,7 @@ class TokenType(StrEnum):
     COLON = auto()
     SEMICOLON = auto()
     DOT = auto()
+    DOTDOT = auto()
 
     # String literal
     STRING_LIT = auto()

@@ -29,7 +29,7 @@ from .ast_nodes import (
     TypeAnnotation,
     Expr,
 )
-from .types import MaomiType, ScalarType, ArrayType, StructType, F32, F64, I32, I64, BOOL
+from .types import MaomiType, ScalarType, ArrayType, StructType, WildcardArrayType, F32, F64, I32, I64, BOOL
 from .errors import MaomiTypeError
 
 
@@ -82,7 +82,7 @@ def _make_builtins() -> dict[str, FnSignature]:
 BUILTINS = _make_builtins()
 _ELEMENTWISE_BUILTINS = {"exp", "log", "tanh", "sqrt", "abs"}
 _CALLBACK_BUILTINS = {"callback"}
-_RNG_BUILTINS = {"rng_key", "rng_split", "rng_uniform", "rng_normal"}
+_RNG_BUILTINS = {"random.key", "random.split", "random.uniform", "random.normal"}
 
 # Key type alias — compiler-level alias for i32[4]
 KEY_TYPE = ArrayType("i32", (4,))
@@ -120,8 +120,11 @@ class TypeChecker:
         self.struct_defs: dict[str, StructType] = {}
         self.errors: list[MaomiTypeError] = []
         self.type_map: dict[int, MaomiType] = {}  # id(expr) -> inferred type
+        self._generic_fns: dict[str, FnDef] = {}   # name -> FnDef with wildcard types
+        self._program: Program | None = None
 
     def check(self, program: Program) -> list[MaomiTypeError]:
+        self._program = program
         # Pass 0: register all struct definitions
         for sd in program.struct_defs:
             self._register_struct(sd)
@@ -130,11 +133,15 @@ class TypeChecker:
         for fn in program.functions:
             sig = self._resolve_signature(fn)
             if sig:
-                self.fn_table[fn.name] = sig
+                if self._is_generic_sig(sig):
+                    self._generic_fns[fn.name] = fn
+                else:
+                    self.fn_table[fn.name] = sig
 
-        # Pass 2: check each function body
+        # Pass 2: check each function body (skip generics — checked per-monomorphization)
         for fn in program.functions:
-            self._check_fn(fn)
+            if fn.name not in self._generic_fns:
+                self._check_fn(fn)
 
         return self.errors
 
@@ -151,6 +158,21 @@ class TypeChecker:
                 return
             fields.append((field_name, t))
         self.struct_defs[sd.name] = StructType(sd.name, tuple(fields))
+
+    @staticmethod
+    def _is_generic_sig(sig: FnSignature) -> bool:
+        """True if function has wildcard or symbolic types needing monomorphization."""
+        for pt in sig.param_types:
+            if isinstance(pt, WildcardArrayType):
+                return True
+            if isinstance(pt, ArrayType) and any(isinstance(d, str) for d in pt.dims):
+                return True
+        rt = sig.return_type
+        if isinstance(rt, WildcardArrayType):
+            return True
+        if isinstance(rt, ArrayType) and any(isinstance(d, str) for d in rt.dims):
+            return True
+        return False
 
     def _error(self, msg: str, line: int, col: int):
         self.errors.append(MaomiTypeError(msg, self.filename, line, col))
@@ -175,6 +197,8 @@ class TypeChecker:
 
     def _resolve_type_annotation(self, ta: TypeAnnotation) -> MaomiType | None:
         if ta.base in self._BASE_TYPES:
+            if ta.wildcard:
+                return WildcardArrayType(ta.base)
             if ta.dims is None:
                 return ScalarType(ta.base)
             dims = tuple(d.value for d in ta.dims)
@@ -959,6 +983,9 @@ class TypeChecker:
 
         sig = self.fn_table.get(expr.callee)
         if sig is None:
+            # Check for generic (wildcard) function
+            if expr.callee in self._generic_fns:
+                return self._check_generic_call(expr, env)
             self._error(
                 f"undefined function: '{expr.callee}'",
                 expr.span.line_start,
@@ -1446,41 +1473,187 @@ class TypeChecker:
 
         return ArrayType(input_type.base, (N, C, OH, OW))
 
+    def _check_generic_call(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
+        """Handle calls to generic (wildcard / symbolic-dim) functions via monomorphization."""
+        import copy
+        from .ast_nodes import Dim, Span as ASTSpan
+
+        generic_fn = self._generic_fns[expr.callee]
+        generic_sig = self._resolve_signature(generic_fn)
+        if generic_sig is None:
+            return None
+
+        # Check arg count
+        if len(expr.args) != len(generic_sig.param_types):
+            self._error(
+                f"function '{expr.callee}' expects {len(generic_sig.param_types)} arguments, got {len(expr.args)}",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        # Infer arg types, unify symbolic dims, resolve wildcard shapes
+        substitution: dict[str, int | str] = {}
+        wildcard_shape: tuple[int | str, ...] | None = None
+        wildcard_scalar = False
+        arg_types: list[MaomiType | None] = []
+
+        for i, (arg, param_type) in enumerate(zip(expr.args, generic_sig.param_types)):
+            arg_type = self._infer(arg, env)
+            arg_types.append(arg_type)
+            if arg_type is None:
+                continue
+
+            if isinstance(param_type, WildcardArrayType):
+                # Wildcard param — match any shape with matching dtype
+                if isinstance(arg_type, ArrayType):
+                    if arg_type.base != param_type.base:
+                        self._error(
+                            f"argument {i+1}: expected {param_type.base}[..], got {arg_type}",
+                            arg.span.line_start, arg.span.col_start,
+                        )
+                        return None
+                    if wildcard_shape is None:
+                        wildcard_shape = arg_type.dims
+                    elif wildcard_shape != arg_type.dims:
+                        self._error(
+                            f"shape mismatch: wildcard resolved to {wildcard_shape} but argument {i+1} has shape {arg_type.dims}",
+                            arg.span.line_start, arg.span.col_start,
+                        )
+                        return None
+                elif isinstance(arg_type, ScalarType):
+                    if arg_type.base != param_type.base:
+                        self._error(
+                            f"argument {i+1}: expected {param_type.base}[..], got {arg_type}",
+                            arg.span.line_start, arg.span.col_start,
+                        )
+                        return None
+                    if wildcard_shape is None:
+                        wildcard_scalar = True
+                else:
+                    self._error(
+                        f"argument {i+1}: expected {param_type.base}[..], got {arg_type}",
+                        arg.span.line_start, arg.span.col_start,
+                    )
+                    return None
+            else:
+                # Non-wildcard param — normal type unification (handles symbolic dims)
+                if not self._unify_arg(arg_type, param_type, substitution, expr, i):
+                    return None
+
+        # Resolve return type
+        ret = generic_sig.return_type
+        if isinstance(ret, WildcardArrayType):
+            if wildcard_scalar or wildcard_shape is None:
+                concrete_ret: MaomiType = ScalarType(ret.base)
+            else:
+                concrete_ret = ArrayType(ret.base, wildcard_shape)
+        else:
+            concrete_ret = self._apply_substitution(ret, substitution)
+
+        # Build monomorphized name from all resolved shapes/dims
+        shape_parts: list[str] = []
+        for at in arg_types:
+            if at is None:
+                shape_parts.append("?")
+            elif isinstance(at, ArrayType):
+                shape_parts.append("x".join(str(d) for d in at.dims))
+            elif isinstance(at, ScalarType):
+                shape_parts.append(at.base)
+            else:
+                shape_parts.append(str(at))
+        mono_name = f"{expr.callee}${','.join(shape_parts)}"
+
+        # Create monomorphized copy if needed
+        if mono_name not in self.fn_table:
+            mono_fn = copy.deepcopy(generic_fn)
+            mono_fn.name = mono_name
+
+            # Replace type annotations with concrete types
+            for p in mono_fn.params:
+                ta = p.type_annotation
+                if ta.wildcard:
+                    if wildcard_scalar or wildcard_shape is None:
+                        p.type_annotation = TypeAnnotation(ta.base, None, ta.span)
+                    else:
+                        dims = [Dim(d, ASTSpan(0, 0, 0, 0)) for d in wildcard_shape]
+                        p.type_annotation = TypeAnnotation(ta.base, dims, ta.span)
+                elif ta.dims is not None:
+                    # Resolve symbolic dims in annotation
+                    new_dims = []
+                    for d in ta.dims:
+                        if isinstance(d.value, str) and d.value in substitution:
+                            new_dims.append(Dim(substitution[d.value], d.span))
+                        else:
+                            new_dims.append(d)
+                    p.type_annotation = TypeAnnotation(ta.base, new_dims, ta.span)
+
+            # Resolve return type annotation
+            rta = mono_fn.return_type
+            if rta.wildcard:
+                if wildcard_scalar or wildcard_shape is None:
+                    mono_fn.return_type = TypeAnnotation(rta.base, None, rta.span)
+                else:
+                    dims = [Dim(d, ASTSpan(0, 0, 0, 0)) for d in wildcard_shape]
+                    mono_fn.return_type = TypeAnnotation(rta.base, dims, rta.span)
+            elif rta.dims is not None:
+                new_dims = []
+                for d in rta.dims:
+                    if isinstance(d.value, str) and d.value in substitution:
+                        new_dims.append(Dim(substitution[d.value], d.span))
+                    else:
+                        new_dims.append(d)
+                mono_fn.return_type = TypeAnnotation(rta.base, new_dims, rta.span)
+
+            # Register and type-check the monomorphized function
+            sig = self._resolve_signature(mono_fn)
+            if sig is None:
+                return None
+            self.fn_table[mono_name] = sig
+            self._check_fn(mono_fn)
+
+            # Add to program's function list so codegen can find it
+            if self._program is not None:
+                self._program.functions.append(mono_fn)
+
+        # Rewrite the call to target the monomorphized function
+        expr.callee = mono_name
+        return concrete_ret
+
     def _check_rng_call(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
         callee = expr.callee
         args = expr.args
         span = expr.span
 
-        if callee == "rng_key":
+        if callee == "random.key":
             if len(args) != 1:
-                self._error(f"rng_key expects 1 argument (seed), got {len(args)}", span.line_start, span.col_start)
+                self._error(f"random.key expects 1 argument (seed), got {len(args)}", span.line_start, span.col_start)
                 return None
             seed_type = self._infer(args[0], env)
             if seed_type is not None and seed_type != I32:
-                self._error(f"rng_key: seed must be i32, got {seed_type}", args[0].span.line_start, args[0].span.col_start)
+                self._error(f"random.key: seed must be i32, got {seed_type}", args[0].span.line_start, args[0].span.col_start)
                 return None
             return KEY_TYPE
 
-        if callee == "rng_split":
+        if callee == "random.split":
             if len(args) != 2:
-                self._error(f"rng_split expects 2 arguments (key, count), got {len(args)}", span.line_start, span.col_start)
+                self._error(f"random.split expects 2 arguments (key, count), got {len(args)}", span.line_start, span.col_start)
                 return None
             key_type = self._infer(args[0], env)
             if key_type is not None and key_type != KEY_TYPE:
-                self._error(f"rng_split: first argument must be Key (i32[4]), got {key_type}", args[0].span.line_start, args[0].span.col_start)
+                self._error(f"random.split: first argument must be Key (i32[4]), got {key_type}", args[0].span.line_start, args[0].span.col_start)
                 return None
             if not isinstance(args[1], IntLiteral):
-                self._error("rng_split: count must be an integer literal", args[1].span.line_start, args[1].span.col_start)
+                self._error("random.split: count must be an integer literal", args[1].span.line_start, args[1].span.col_start)
                 return None
             n = args[1].value
             if n < 1:
-                self._error(f"rng_split: count must be >= 1, got {n}", args[1].span.line_start, args[1].span.col_start)
+                self._error(f"random.split: count must be >= 1, got {n}", args[1].span.line_start, args[1].span.col_start)
                 return None
             # Infer the literal so it gets a type in the type_map
             self._infer(args[1], env)
             return ArrayType("i32", (n, 4))
 
-        # rng_uniform / rng_normal
+        # random.uniform / random.normal
         if len(args) < 4:
             self._error(
                 f"{callee} expects at least 4 arguments (key, param1, param2, dim...), got {len(args)}",
@@ -1494,7 +1667,7 @@ class TypeChecker:
         for i in (1, 2):
             t = self._infer(args[i], env)
             if t is not None and t != F32:
-                param_name = ("low", "high") if callee == "rng_uniform" else ("mean", "stddev")
+                param_name = ("low", "high") if callee == "random.uniform" else ("mean", "stddev")
                 self._error(
                     f"{callee}: {param_name[i-1]} must be f32, got {t}",
                     args[i].span.line_start, args[i].span.col_start,

@@ -158,17 +158,17 @@ Real models need random weight initialization. Maomi provides deterministic, key
 
 ```maomi
 fn init(seed: i32) -> f32[128, 64] {
-    let key: Key = rng_key(seed);
-    let keys = rng_split(key, 2);
-    let w = rng_normal(keys[0], 0.0, 0.01, 128, 64);
+    let key: Key = random.key(seed);
+    let keys = random.split(key, 2);
+    let w = random.normal(keys[0], 0.0, 0.01, 128, 64);
     w
 }
 ```
 
-- `rng_key(seed)` — create a key from an integer seed
-- `rng_split(key, n)` — split into `n` independent subkeys
-- `rng_uniform(key, low, high, d1, d2, ...)` — uniform random in [low, high)
-- `rng_normal(key, mean, std, d1, d2, ...)` — normal (Gaussian) random
+- `random.key(seed)` — create a key from an integer seed
+- `random.split(key, n)` — split into `n` independent subkeys
+- `random.uniform(key, low, high, d1, d2, ...)` — uniform random in [low, high)
+- `random.normal(key, mean, std, d1, d2, ...)` — normal (Gaussian) random
 
 Same seed always produces the same output. Different seeds produce different output.
 

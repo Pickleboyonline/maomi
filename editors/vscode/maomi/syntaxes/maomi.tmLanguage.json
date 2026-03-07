@@ -63,7 +63,7 @@
       }
     },
     "builtin-functions": {
-      "match": "\\b(exp|log|tanh|sqrt|abs|mean|sum|max|min|argmax|argmin|callback|transpose|reshape|concat|iota|stop_gradient|where|conv2d|max_pool|avg_pool|rng_key|rng_split|rng_uniform|rng_normal)\\b(?=\\s*\\()",
+      "match": "\\b(exp|log|tanh|sqrt|abs|mean|sum|max|min|argmax|argmin|callback|transpose|reshape|concat|iota|stop_gradient|where|conv2d|max_pool|avg_pool|random\\.key|random\\.split|random\\.uniform|random\\.normal)\\b(?=\\s*\\()",
       "name": "support.function.builtin.maomi"
     },
     "keywords-import": {

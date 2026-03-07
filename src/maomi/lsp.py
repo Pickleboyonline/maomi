@@ -313,12 +313,16 @@ _BUILTINS = [
     "mean", "sum", "max", "min", "argmax", "argmin",
     "exp", "log", "tanh", "sqrt", "abs",
     "reshape", "concat", "iota", "transpose", "callback",
-    "rng_key", "rng_split", "rng_uniform", "rng_normal",
+    "random.key", "random.split", "random.uniform", "random.normal",
     "conv2d", "max_pool", "avg_pool",
     "stop_gradient", "where",
 ]
 
 _BUILTIN_SET = set(_BUILTINS)
+
+_BUILTIN_NAMESPACES: dict[str, list[str]] = {
+    "random": ["key", "split", "uniform", "normal"],
+}
 
 
 @server.feature(
@@ -348,6 +352,22 @@ def completions(ls: LanguageServer, params: types.CompletionParams):
         module_result = _complete_module(result, prefix)
         if module_result is not None:
             return module_result
+
+        # Check if prefix is a builtin namespace (e.g., "random.")
+        if prefix in _BUILTIN_NAMESPACES:
+            items = []
+            for short_name in _BUILTIN_NAMESPACES[prefix]:
+                full_name = f"{prefix}.{short_name}"
+                doc = _BUILTIN_DOCS.get(full_name)
+                items.append(types.CompletionItem(
+                    label=short_name,
+                    kind=types.CompletionItemKind.Function,
+                    detail="builtin",
+                    documentation=types.MarkupContent(
+                        kind=types.MarkupKind.Markdown, value=doc,
+                    ) if doc else None,
+                ))
+            return types.CompletionList(is_incomplete=False, items=items)
 
         return _complete_dot(result, params.position)
 
@@ -424,12 +444,19 @@ def _complete_general(result: AnalysisResult | None, position: types.Position):
         ))
 
     for b in _BUILTINS:
+        if "." in b:
+            continue  # namespaced builtins offered via dot-completion
         doc = _BUILTIN_DOCS.get(b)
         items.append(types.CompletionItem(
             label=b, kind=types.CompletionItemKind.Function, detail="builtin",
             documentation=types.MarkupContent(
                 kind=types.MarkupKind.Markdown, value=doc,
             ) if doc else None,
+        ))
+
+    for ns in _BUILTIN_NAMESPACES:
+        items.append(types.CompletionItem(
+            label=ns, kind=types.CompletionItemKind.Module, detail="builtin namespace",
         ))
 
     if result and result.program:
@@ -1105,10 +1132,10 @@ _BUILTIN_SIGNATURES: dict[str, tuple[list[str], list[str], str]] = {
     "reshape": (["x", "dims..."], ["f32[...]", "int..."], "f32[...]"),
     "concat": (["arrays...", "axis"], ["f32[...]...", "int"], "f32[...]"),
     "iota": (["n"], ["int"], "i32[n]"),
-    "rng_key": (["seed"], ["i32"], "Key"),
-    "rng_split": (["key", "n"], ["Key", "int"], "Key[n]"),
-    "rng_uniform": (["key", "low", "high", "dims..."], ["Key", "f32", "f32", "int..."], "f32[...]"),
-    "rng_normal": (["key", "mean", "std", "dims..."], ["Key", "f32", "f32", "int..."], "f32[...]"),
+    "random.key": (["seed"], ["i32"], "Key"),
+    "random.split": (["key", "n"], ["Key", "int"], "Key[n]"),
+    "random.uniform": (["key", "low", "high", "dims..."], ["Key", "f32", "f32", "int..."], "f32[...]"),
+    "random.normal": (["key", "mean", "std", "dims..."], ["Key", "f32", "f32", "int..."], "f32[...]"),
     "conv2d": (["input", "kernel", "strides", "padding"], ["f32[N,C,H,W]", "f32[O,C,kH,kW]", "(sH,sW)", "str"], "f32[...]"),
     "max_pool": (["input", "window", "strides", "padding"], ["f32[N,C,H,W]", "(wH,wW)", "(sH,sW)", "str"], "f32[...]"),
     "avg_pool": (["input", "window", "strides", "padding"], ["f32[N,C,H,W]", "(wH,wW)", "(sH,sW)", "str"], "f32[...]"),
@@ -1133,10 +1160,10 @@ _BUILTIN_DOCS: dict[str, str] = {
     "iota": "Generate an integer sequence `[0, 1, ..., n-1]` as `i32[n]`.",
     "transpose": "Transpose a 2D matrix (swap rows and columns).",
     "callback": "Host callback (no-op in compiled code). Useful for debugging.",
-    "rng_key": "Create a PRNG key from an integer seed.",
-    "rng_split": "Split a PRNG key into `n` independent subkeys.",
-    "rng_uniform": "Sample uniform random values in `[low, high)`.",
-    "rng_normal": "Sample normal random values with given mean and std (Box-Muller).",
+    "random.key": "Create a PRNG key from an integer seed.",
+    "random.split": "Split a PRNG key into `n` independent subkeys.",
+    "random.uniform": "Sample uniform random values in `[low, high)`.",
+    "random.normal": "Sample normal random values with given mean and std (Box-Muller).",
     "conv2d": "2D convolution.\n\nInput: `[N, C, H, W]`, Kernel: `[O, C, kH, kW]`.\nPadding: `\"valid\"` or `\"same\"`.",
     "max_pool": "2D max pooling.\n\nInput: `[N, C, H, W]`. Reduces spatial dims by window size.",
     "avg_pool": "2D average pooling.\n\nInput: `[N, C, H, W]`. Reduces spatial dims by window size.",
@@ -1168,7 +1195,7 @@ def _sig_parse_call_context(source: str, position: types.Position) -> tuple[str 
                     while j >= 0 and line_text[j] == ' ':
                         j -= 1
                     end = j + 1
-                    while j >= 0 and (line_text[j].isalnum() or line_text[j] == '_'):
+                    while j >= 0 and (line_text[j].isalnum() or line_text[j] in ('_', '.')):
                         j -= 1
                     name = line_text[j + 1:end]
                     if name:

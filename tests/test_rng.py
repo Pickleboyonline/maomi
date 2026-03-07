@@ -1,4 +1,4 @@
-"""Tests for RNG builtins: rng_key, rng_split, rng_uniform, rng_normal."""
+"""Tests for RNG builtins: random.key, random.split, random.uniform, random.normal."""
 
 import pytest
 import sys
@@ -76,10 +76,10 @@ class TestKeyTypeAlias:
         check_ok("fn f(k: Key) -> i32[4] { k }")
 
     def test_key_as_return(self):
-        check_ok("fn f(seed: i32) -> Key { rng_key(seed) }")
+        check_ok("fn f(seed: i32) -> Key { random.key(seed) }")
 
     def test_key_in_let(self):
-        check_ok("fn f(seed: i32) -> i32[4] { let k: Key = rng_key(seed); k }")
+        check_ok("fn f(seed: i32) -> i32[4] { let k: Key = random.key(seed); k }")
 
     def test_key_resolves_to_i32_4(self):
         ret = infer_type("fn f(k: Key) -> Key { k }")
@@ -95,93 +95,93 @@ class TestKeyTypeAlias:
 
 class TestRngKeyTypeCheck:
     def test_basic(self):
-        check_ok("fn f(s: i32) -> i32[4] { rng_key(s) }")
+        check_ok("fn f(s: i32) -> i32[4] { random.key(s) }")
 
     def test_return_type(self):
-        ret = infer_type("fn f(s: i32) -> i32[4] { rng_key(s) }")
+        ret = infer_type("fn f(s: i32) -> i32[4] { random.key(s) }")
         assert ret == ArrayType("i32", (4,))
 
     def test_literal_seed(self):
-        check_ok("fn f() -> i32[4] { rng_key(42) }")
+        check_ok("fn f() -> i32[4] { random.key(42) }")
 
     def test_wrong_seed_type(self):
-        check_err("fn f(s: f32) -> i32[4] { rng_key(s) }", "i32")
+        check_err("fn f(s: f32) -> i32[4] { random.key(s) }", "i32")
 
     def test_too_many_args(self):
-        check_err("fn f(s: i32) -> i32[4] { rng_key(s, s) }", "1 argument")
+        check_err("fn f(s: i32) -> i32[4] { random.key(s, s) }", "1 argument")
 
 
 class TestRngSplitTypeCheck:
     def test_basic(self):
-        check_ok("fn f(k: i32[4]) -> i32[3, 4] { rng_split(k, 3) }")
+        check_ok("fn f(k: i32[4]) -> i32[3, 4] { random.split(k, 3) }")
 
     def test_return_type(self):
-        ret = infer_type("fn f(k: i32[4]) -> i32[3, 4] { rng_split(k, 3) }")
+        ret = infer_type("fn f(k: i32[4]) -> i32[3, 4] { random.split(k, 3) }")
         assert ret == ArrayType("i32", (3, 4))
 
     def test_split_2(self):
-        ret = infer_type("fn f(k: i32[4]) -> i32[2, 4] { rng_split(k, 2) }")
+        ret = infer_type("fn f(k: i32[4]) -> i32[2, 4] { random.split(k, 2) }")
         assert ret == ArrayType("i32", (2, 4))
 
     def test_wrong_key_type(self):
-        check_err("fn f(k: f32[4]) -> i32[3, 4] { rng_split(k, 3) }", "Key")
+        check_err("fn f(k: f32[4]) -> i32[3, 4] { random.split(k, 3) }", "Key")
 
     def test_non_literal_count(self):
-        check_err("fn f(k: i32[4], n: i32) -> i32[3, 4] { rng_split(k, n) }", "integer literal")
+        check_err("fn f(k: i32[4], n: i32) -> i32[3, 4] { random.split(k, n) }", "integer literal")
 
     def test_wrong_arg_count(self):
-        check_err("fn f(k: i32[4]) -> i32[3, 4] { rng_split(k) }", "2 arguments")
+        check_err("fn f(k: i32[4]) -> i32[3, 4] { random.split(k) }", "2 arguments")
 
 
 class TestRngUniformTypeCheck:
     def test_basic(self):
-        check_ok("fn f(k: i32[4]) -> f32[4, 4] { rng_uniform(k, 0.0, 1.0, 4, 4) }")
+        check_ok("fn f(k: i32[4]) -> f32[4, 4] { random.uniform(k, 0.0, 1.0, 4, 4) }")
 
     def test_return_type_2d(self):
-        ret = infer_type("fn f(k: i32[4]) -> f32[4, 4] { rng_uniform(k, 0.0, 1.0, 4, 4) }")
+        ret = infer_type("fn f(k: i32[4]) -> f32[4, 4] { random.uniform(k, 0.0, 1.0, 4, 4) }")
         assert ret == ArrayType("f32", (4, 4))
 
     def test_return_type_1d(self):
-        ret = infer_type("fn f(k: i32[4]) -> f32[8] { rng_uniform(k, 0.0, 1.0, 8) }")
+        ret = infer_type("fn f(k: i32[4]) -> f32[8] { random.uniform(k, 0.0, 1.0, 8) }")
         assert ret == ArrayType("f32", (8,))
 
     def test_return_type_3d(self):
-        ret = infer_type("fn f(k: i32[4]) -> f32[2, 3, 4] { rng_uniform(k, 0.0, 1.0, 2, 3, 4) }")
+        ret = infer_type("fn f(k: i32[4]) -> f32[2, 3, 4] { random.uniform(k, 0.0, 1.0, 2, 3, 4) }")
         assert ret == ArrayType("f32", (2, 3, 4))
 
     def test_wrong_key_type(self):
-        check_err("fn f(k: f32[4]) -> f32[4] { rng_uniform(k, 0.0, 1.0, 4) }", "Key")
+        check_err("fn f(k: f32[4]) -> f32[4] { random.uniform(k, 0.0, 1.0, 4) }", "Key")
 
     def test_wrong_param_type(self):
-        check_err("fn f(k: i32[4]) -> f32[4] { rng_uniform(k, 0, 1.0, 4) }", "f32")
+        check_err("fn f(k: i32[4]) -> f32[4] { random.uniform(k, 0, 1.0, 4) }", "f32")
 
     def test_missing_dims(self):
-        check_err("fn f(k: i32[4]) -> f32[4] { rng_uniform(k, 0.0, 1.0) }", "at least 4")
+        check_err("fn f(k: i32[4]) -> f32[4] { random.uniform(k, 0.0, 1.0) }", "at least 4")
 
     def test_non_literal_dim(self):
-        check_err("fn f(k: i32[4], n: i32) -> f32[4] { rng_uniform(k, 0.0, 1.0, n) }", "integer literal")
+        check_err("fn f(k: i32[4], n: i32) -> f32[4] { random.uniform(k, 0.0, 1.0, n) }", "integer literal")
 
     def test_expression_params(self):
         """low/high can be any f32 expression, not just literals."""
         check_ok("""
             fn f(k: i32[4], lo: f32, hi: f32) -> f32[4] {
-                rng_uniform(k, lo, hi, 4)
+                random.uniform(k, lo, hi, 4)
             }
         """)
 
 
 class TestRngNormalTypeCheck:
     def test_basic(self):
-        check_ok("fn f(k: i32[4]) -> f32[8] { rng_normal(k, 0.0, 1.0, 8) }")
+        check_ok("fn f(k: i32[4]) -> f32[8] { random.normal(k, 0.0, 1.0, 8) }")
 
     def test_return_type(self):
-        ret = infer_type("fn f(k: i32[4]) -> f32[4, 4] { rng_normal(k, 0.0, 1.0, 4, 4) }")
+        ret = infer_type("fn f(k: i32[4]) -> f32[4, 4] { random.normal(k, 0.0, 1.0, 4, 4) }")
         assert ret == ArrayType("f32", (4, 4))
 
     def test_expression_params(self):
         check_ok("""
             fn f(k: i32[4], mu: f32, sigma: f32) -> f32[4] {
-                rng_normal(k, mu, sigma, 4)
+                random.normal(k, mu, sigma, 4)
             }
         """)
 
@@ -193,33 +193,33 @@ class TestRngNormalTypeCheck:
 
 class TestRngKeyCodegen:
     def test_emits_concatenate(self):
-        out = codegen("fn f(s: i32) -> i32[4] { rng_key(s) }")
+        out = codegen("fn f(s: i32) -> i32[4] { random.key(s) }")
         assert "stablehlo.concatenate" in out
         assert "tensor<4xi32>" in out
 
     def test_emits_zeros(self):
-        out = codegen("fn f(s: i32) -> i32[4] { rng_key(s) }")
+        out = codegen("fn f(s: i32) -> i32[4] { random.key(s) }")
         assert "dense<0> : tensor<3xi32>" in out
 
 
 class TestRngSplitCodegen:
     def test_emits_rng_bit_generator(self):
-        out = codegen("fn f(k: i32[4]) -> i32[3, 4] { rng_split(k, 3) }")
+        out = codegen("fn f(k: i32[4]) -> i32[3, 4] { random.split(k, 3) }")
         assert "stablehlo.rng_bit_generator" in out
         assert "algorithm = DEFAULT" in out
 
     def test_emits_bitcast(self):
-        out = codegen("fn f(k: i32[4]) -> i32[3, 4] { rng_split(k, 3) }")
+        out = codegen("fn f(k: i32[4]) -> i32[3, 4] { random.split(k, 3) }")
         assert "stablehlo.bitcast_convert" in out
 
 
 class TestRngUniformCodegen:
     def test_emits_rng_bit_generator(self):
-        out = codegen("fn f(k: i32[4]) -> f32[4, 4] { rng_uniform(k, 0.0, 1.0, 4, 4) }")
+        out = codegen("fn f(k: i32[4]) -> f32[4, 4] { random.uniform(k, 0.0, 1.0, 4, 4) }")
         assert "stablehlo.rng_bit_generator" in out
 
     def test_emits_bits_to_float(self):
-        out = codegen("fn f(k: i32[4]) -> f32[4, 4] { rng_uniform(k, 0.0, 1.0, 4, 4) }")
+        out = codegen("fn f(k: i32[4]) -> f32[4, 4] { random.uniform(k, 0.0, 1.0, 4, 4) }")
         assert "shift_right_logical" in out
         assert "1065353216" in out  # 0x3F800000 = 1.0f bit pattern
         assert "stablehlo.bitcast_convert" in out
@@ -227,17 +227,17 @@ class TestRngUniformCodegen:
 
 class TestRngNormalCodegen:
     def test_emits_rng_bit_generator(self):
-        out = codegen("fn f(k: i32[4]) -> f32[8] { rng_normal(k, 0.0, 1.0, 8) }")
+        out = codegen("fn f(k: i32[4]) -> f32[8] { random.normal(k, 0.0, 1.0, 8) }")
         assert "stablehlo.rng_bit_generator" in out
 
     def test_emits_box_muller(self):
-        out = codegen("fn f(k: i32[4]) -> f32[8] { rng_normal(k, 0.0, 1.0, 8) }")
+        out = codegen("fn f(k: i32[4]) -> f32[8] { random.normal(k, 0.0, 1.0, 8) }")
         assert "stablehlo.cosine" in out
         assert "stablehlo.log" in out
         assert "stablehlo.sqrt" in out
 
     def test_2d_emits_reshape(self):
-        out = codegen("fn f(k: i32[4]) -> f32[4, 4] { rng_normal(k, 0.0, 1.0, 4, 4) }")
+        out = codegen("fn f(k: i32[4]) -> f32[4, 4] { random.normal(k, 0.0, 1.0, 4, 4) }")
         assert "tensor<4x4xf32>" in out
 
 
@@ -251,7 +251,7 @@ class TestRngAD:
         """rng_uniform inside grad: values used but zero gradient through RNG."""
         out = ad_codegen("""
             fn f(k: i32[4], x: f32[4]) -> f32[4] {
-                let mask = rng_uniform(k, 0.0, 1.0, 4);
+                let mask = random.uniform(k, 0.0, 1.0, 4);
                 grad(sum(mask * x), x)
             }
         """)
@@ -262,7 +262,7 @@ class TestRngAD:
         """rng_normal inside grad compiles fine."""
         out = ad_codegen("""
             fn f(k: i32[4], x: f32[4]) -> f32[4] {
-                let noise = rng_normal(k, 0.0, 0.01, 4);
+                let noise = random.normal(k, 0.0, 0.01, 4);
                 grad(sum(x + noise), x)
             }
         """)
@@ -282,21 +282,21 @@ from maomi.jax_runner import run_stablehlo
 
 class TestRngRunner:
     def test_rng_key_deterministic(self):
-        src = "fn f(seed: i32) -> i32[4] { rng_key(seed) }"
+        src = "fn f(seed: i32) -> i32[4] { random.key(seed) }"
         result = compile_source(src)
         _, out1 = run_stablehlo(result.mlir_text, "f", result.fn_table["f"], seed=42)
         _, out2 = run_stablehlo(result.mlir_text, "f", result.fn_table["f"], seed=42)
         np.testing.assert_array_equal(out1, out2)
 
     def test_rng_split_shape(self):
-        src = "fn f(k: i32[4]) -> i32[3, 4] { rng_split(k, 3) }"
+        src = "fn f(k: i32[4]) -> i32[3, 4] { random.split(k, 3) }"
         result = compile_source(src)
         _, out = run_stablehlo(result.mlir_text, "f", result.fn_table["f"], seed=42)
         assert out.shape == (3, 4)
         assert out.dtype == np.int32
 
     def test_rng_uniform_range(self):
-        src = "fn f(k: i32[4]) -> f32[1000] { rng_uniform(k, 0.0, 1.0, 1000) }"
+        src = "fn f(k: i32[4]) -> f32[1000] { random.uniform(k, 0.0, 1.0, 1000) }"
         result = compile_source(src)
         _, out = run_stablehlo(result.mlir_text, "f", result.fn_table["f"], seed=42)
         assert out.shape == (1000,)
@@ -305,28 +305,28 @@ class TestRngRunner:
         assert out.max() < 1.0
 
     def test_rng_uniform_custom_range(self):
-        src = "fn f(k: i32[4]) -> f32[1000] { rng_uniform(k, -1.0, 1.0, 1000) }"
+        src = "fn f(k: i32[4]) -> f32[1000] { random.uniform(k, -1.0, 1.0, 1000) }"
         result = compile_source(src)
         _, out = run_stablehlo(result.mlir_text, "f", result.fn_table["f"], seed=42)
         assert out.min() >= -1.0
         assert out.max() < 1.0
 
     def test_rng_uniform_deterministic(self):
-        src = "fn f(k: i32[4]) -> f32[4, 4] { rng_uniform(k, 0.0, 1.0, 4, 4) }"
+        src = "fn f(k: i32[4]) -> f32[4, 4] { random.uniform(k, 0.0, 1.0, 4, 4) }"
         result = compile_source(src)
         _, out1 = run_stablehlo(result.mlir_text, "f", result.fn_table["f"], seed=42)
         _, out2 = run_stablehlo(result.mlir_text, "f", result.fn_table["f"], seed=42)
         np.testing.assert_array_equal(out1, out2)
 
     def test_rng_uniform_different_seed(self):
-        src = "fn f(k: i32[4]) -> f32[4, 4] { rng_uniform(k, 0.0, 1.0, 4, 4) }"
+        src = "fn f(k: i32[4]) -> f32[4, 4] { random.uniform(k, 0.0, 1.0, 4, 4) }"
         result = compile_source(src)
         _, out1 = run_stablehlo(result.mlir_text, "f", result.fn_table["f"], seed=42)
         _, out2 = run_stablehlo(result.mlir_text, "f", result.fn_table["f"], seed=99)
         assert not np.array_equal(out1, out2)
 
     def test_rng_normal_stats(self):
-        src = "fn f(k: i32[4]) -> f32[10000] { rng_normal(k, 0.0, 1.0, 10000) }"
+        src = "fn f(k: i32[4]) -> f32[10000] { random.normal(k, 0.0, 1.0, 10000) }"
         result = compile_source(src)
         _, out = run_stablehlo(result.mlir_text, "f", result.fn_table["f"], seed=42)
         assert out.shape == (10000,)
@@ -334,14 +334,14 @@ class TestRngRunner:
         assert abs(np.std(out) - 1.0) < 0.15  # std ~1
 
     def test_rng_normal_custom_params(self):
-        src = "fn f(k: i32[4]) -> f32[10000] { rng_normal(k, 5.0, 0.1, 10000) }"
+        src = "fn f(k: i32[4]) -> f32[10000] { random.normal(k, 5.0, 0.1, 10000) }"
         result = compile_source(src)
         _, out = run_stablehlo(result.mlir_text, "f", result.fn_table["f"], seed=42)
         assert abs(out.mean() - 5.0) < 0.05
         assert abs(np.std(out) - 0.1) < 0.02
 
     def test_rng_normal_2d(self):
-        src = "fn f(k: i32[4]) -> f32[4, 4] { rng_normal(k, 0.0, 1.0, 4, 4) }"
+        src = "fn f(k: i32[4]) -> f32[4, 4] { random.normal(k, 0.0, 1.0, 4, 4) }"
         result = compile_source(src)
         _, out = run_stablehlo(result.mlir_text, "f", result.fn_table["f"], seed=42)
         assert out.shape == (4, 4)
@@ -349,9 +349,9 @@ class TestRngRunner:
     def test_full_pipeline_split_and_index(self):
         src = """
             fn f(seed: i32) -> f32[4, 4] {
-                let key = rng_key(seed);
-                let keys = rng_split(key, 2);
-                rng_uniform(keys[0], 0.0, 1.0, 4, 4)
+                let key = random.key(seed);
+                let keys = random.split(key, 2);
+                random.uniform(keys[0], 0.0, 1.0, 4, 4)
             }
         """
         result = compile_source(src)
@@ -363,7 +363,7 @@ class TestRngRunner:
     def test_key_type_alias_runs(self):
         src = """
             fn f(key: Key) -> f32[4, 4] {
-                rng_normal(key, 0.0, 1.0, 4, 4)
+                random.normal(key, 0.0, 1.0, 4, 4)
             }
         """
         result = compile_source(src)

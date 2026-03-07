@@ -36,9 +36,9 @@ fn cumsum(xs: f32[10], init: f32) -> f32[10] {
 }
 
 fn init_weights(seed: i32) -> f32[4, 4] {
-    let key: Key = rng_key(seed);
-    let keys = rng_split(key, 2);
-    rng_normal(keys[0], 0.0, 1.0, 4, 4)
+    let key: Key = random.key(seed);
+    let keys = random.split(key, 2);
+    random.normal(keys[0], 0.0, 1.0, 4, 4)
 }
 
 fn conv_block(x: f32[1, 3, 8, 8], w: f32[16, 3, 3, 3]) -> f32[1, 16, 2, 2] {
@@ -82,10 +82,10 @@ fn hessian_diag(x: f32[4]) -> f32[4] {
 | `conv2d(x, w)` `conv2d(x, w, stride, pad)` | 2D convolution (NCHW layout) |
 | `max_pool(x, wh, ww, sh, sw)` | Max pooling |
 | `avg_pool(x, wh, ww, sh, sw)` | Average pooling |
-| `rng_key(seed)` | Create RNG key from integer seed |
-| `rng_split(key, n)` | Split key into n subkeys |
-| `rng_uniform(key, lo, hi, d1, d2, ...)` | Uniform random in [lo, hi) |
-| `rng_normal(key, mu, std, d1, d2, ...)` | Normal random (Box-Muller) |
+| `random.key(seed)` | Create RNG key from integer seed |
+| `random.split(key, n)` | Split key into n subkeys |
+| `random.uniform(key, lo, hi, d1, d2, ...)` | Uniform random in [lo, hi) |
+| `random.normal(key, mu, std, d1, d2, ...)` | Normal random (Box-Muller) |
 | `x[i]` `x[1:3]` `x[:, 0]` `x[-1]` `x[1:]` `x[:-1]` | Array indexing and slicing |
 | `table[ids]` | Gather indexing (ids is an integer array) |
 | `import math;` | Qualified module import (`math.relu(x)`) |
@@ -95,7 +95,7 @@ fn hessian_diag(x: f32[4]) -> f32[4] {
 
 **Types:** `f32` `f64` `i32` `i64` `bool` `Key` — arrays as `f32[B, 128]` with symbolic or concrete dims. Named structs for grouping data. `Key` is `i32[4]` (RNG key alias).
 
-**Builtins:** `exp` `log` `tanh` `sqrt` `abs` `mean` `sum` `reshape` `concat` `iota` `where` `stop_gradient` `conv2d` `max_pool` `avg_pool` `rng_key` `rng_split` `rng_uniform` `rng_normal` `callback`
+**Builtins:** `exp` `log` `tanh` `sqrt` `abs` `mean` `sum` `reshape` `concat` `iota` `where` `stop_gradient` `conv2d` `max_pool` `avg_pool` `random.key` `random.split` `random.uniform` `random.normal` `callback`
 
 **Broadcasting:** Numpy-style broadcasting including size-1 dimensions: `f32[3, 1] * f32[3, 4]` → `f32[3, 4]`
 
@@ -138,7 +138,7 @@ uv run maomi run examples/cnn.mao --fn conv_forward --seed 7
 
 **v0.8** — 400 tests across lexer, parser, type checker, codegen, AD, modules, indexing, array manipulation, conv/pooling, RNG, and broadcasting. Full pipeline from source to StableHLO.
 
-**Works:** shape-typed arrays, array indexing/slicing (including negative indices, open-ended ranges, gather), `reshape`/`concat`/`transpose`/`iota` builtins, axis-specific reductions (`sum(x, 1)`, `mean(x, 0)`), size-1 broadcasting (`f32[N,1] * f32[N,M]`), `where(cond, x, y)` array conditional, `stop_gradient` for RL/detached targets, named structs (nested, with functional updates), `scan`/`map`/`grad`, grad-of-grad (higher-order differentiation), scan gradients, struct-shaped gradients, `conv2d`/`max_pool`/`avg_pool` with AD support, deterministic RNG (`rng_key`/`rng_split`/`rng_uniform`/`rng_normal`), import/module system, StableHLO codegen, JAX/XLA execution.
+**Works:** shape-typed arrays, array indexing/slicing (including negative indices, open-ended ranges, gather), `reshape`/`concat`/`transpose`/`iota` builtins, axis-specific reductions (`sum(x, 1)`, `mean(x, 0)`), size-1 broadcasting (`f32[N,1] * f32[N,M]`), `where(cond, x, y)` array conditional, `stop_gradient` for RL/detached targets, named structs (nested, with functional updates), `scan`/`map`/`grad`, grad-of-grad (higher-order differentiation), scan gradients, struct-shaped gradients, `conv2d`/`max_pool`/`avg_pool` with AD support, deterministic RNG (`random.key`/`random.split`/`random.uniform`/`random.normal`), import/module system, StableHLO codegen, JAX/XLA execution.
 
 **Limitations:**
 - Codegen requires concrete dimensions (symbolic dims type-check but don't compile)

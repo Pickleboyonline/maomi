@@ -211,10 +211,29 @@ class StableHLOCodegen:
         self._emit("module {")
         self._indent += 1
         for fn in self.program.functions:
+            # Skip generic functions (wildcard or symbolic dims) — only monomorphized copies are generated
+            if self._is_generic_fn(fn):
+                continue
             self._gen_function(fn)
         self._indent -= 1
         self._emit("}")
         return "\n".join(self._lines)
+
+    @staticmethod
+    def _is_generic_fn(fn) -> bool:
+        """True if function has wildcard or symbolic-dim type annotations."""
+        for p in fn.params:
+            ta = p.type_annotation
+            if getattr(ta, 'wildcard', False):
+                return True
+            if ta.dims is not None and any(isinstance(d.value, str) for d in ta.dims):
+                return True
+        rta = fn.return_type
+        if getattr(rta, 'wildcard', False):
+            return True
+        if rta.dims is not None and any(isinstance(d.value, str) for d in rta.dims):
+            return True
+        return False
 
     # -- Helpers --
 
@@ -268,6 +287,8 @@ class StableHLOCodegen:
         return self._resolve_annotation_type(p.type_annotation)
 
     def _resolve_annotation_type(self, ta) -> MaomiType:
+        if getattr(ta, 'wildcard', False):
+            raise RuntimeError(f"unresolved wildcard type {ta.base}[..] reached codegen — monomorphization bug")
         if ta.base in ("f32", "f64", "i32", "i64", "bool"):
             if ta.dims is None:
                 return ScalarType(ta.base)
@@ -569,7 +590,7 @@ class StableHLOCodegen:
         return var
 
     _CALLBACK_BUILTINS = {"callback"}
-    _RNG_BUILTINS = {"rng_key", "rng_split", "rng_uniform", "rng_normal"}
+    _RNG_BUILTINS = {"random.key", "random.split", "random.uniform", "random.normal"}
 
     def _gen_callback(self, expr: CallExpr, env: dict[str, str]) -> str:
         """Emit stablehlo.custom_call targeting JAX's FFI callback handler."""
@@ -1481,13 +1502,13 @@ class StableHLOCodegen:
 
     def _gen_rng(self, expr: CallExpr, env: dict[str, str]) -> str:
         callee = expr.callee
-        if callee == "rng_key":
+        if callee == "random.key":
             return self._gen_rng_key(expr, env)
-        elif callee == "rng_split":
+        elif callee == "random.split":
             return self._gen_rng_split(expr, env)
-        elif callee == "rng_uniform":
+        elif callee == "random.uniform":
             return self._gen_rng_uniform(expr, env)
-        elif callee == "rng_normal":
+        elif callee == "random.normal":
             return self._gen_rng_normal(expr, env)
         raise MaomiError(f"codegen: unknown RNG builtin '{callee}'", "<codegen>", 0, 0)
 
