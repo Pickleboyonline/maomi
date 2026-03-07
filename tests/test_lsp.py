@@ -20,6 +20,7 @@ from maomi.lsp import (
     _ca_edit_distance, _ca_find_similar, code_actions, _cache,
     _build_folding_ranges,
     _sel_collect_ancestors, _sel_build_chain,
+    _on_type_format, _compute_brace_depth,
 )
 from maomi.ast_nodes import (
     Identifier, IntLiteral, FloatLiteral, BinOp, CallExpr,
@@ -1567,3 +1568,80 @@ class TestDocComments:
     def test_signature_help_no_doc(self):
         sh = _build_signature_help("myfn", ["x"], ["f32"], "f32", 0)
         assert sh.signatures[0].documentation is None
+
+
+class TestOnTypeFormatting:
+    def test_closing_brace_reindent(self):
+        """} trigger: closing brace with wrong indent is corrected."""
+        source = "fn f() {\n    x;\n        }"
+        edits = _on_type_format(source, 2, 9, "}")
+        assert len(edits) == 1
+        e = edits[0]
+        # Should replace the 8-space indent with 0-space indent
+        assert e.range.start.line == 2
+        assert e.range.start.character == 0
+        assert e.range.end.character == 8
+        assert e.new_text == ""
+
+    def test_semicolon_removes_trailing_whitespace(self):
+        """; trigger: trailing whitespace after semicolon is removed."""
+        source = "    let a = 1;   "
+        edits = _on_type_format(source, 0, 14, ";")
+        assert len(edits) == 1
+        e = edits[0]
+        assert e.range.start.character == 14  # end of "    let a = 1;"
+        assert e.range.end.character == 17  # end of trailing spaces
+        assert e.new_text == ""
+
+    def test_newline_after_open_brace(self):
+        """\\n trigger after {: new line gets 4-space indent."""
+        # After pressing Enter, the editor creates a new empty line.
+        source = "fn f() {\nx"
+        edits = _on_type_format(source, 1, 0, "\n")
+        assert len(edits) == 1
+        assert edits[0].new_text == "    "
+
+    def test_newline_at_top_level(self):
+        """\\n trigger at top level: new line gets 0-space indent."""
+        source = "fn f() {}\nx"
+        edits = _on_type_format(source, 1, 0, "\n")
+        # depth is 0 (braces balance), current line "x" has no indent
+        # expected indent is "" which matches ""; no edit
+        assert len(edits) == 0
+
+    def test_newline_nested_braces(self):
+        """\\n trigger with nested braces: depth 2 gets 8-space indent."""
+        source = "fn f() {\n    if true {\nx"
+        edits = _on_type_format(source, 2, 0, "\n")
+        assert len(edits) == 1
+        assert edits[0].new_text == "        "
+
+    def test_compute_brace_depth_simple(self):
+        lines = ["fn f() {", "    x;", "}"]
+        assert _compute_brace_depth(lines, 0) == 0
+        assert _compute_brace_depth(lines, 1) == 1
+        assert _compute_brace_depth(lines, 2) == 1
+
+    def test_compute_brace_depth_nested(self):
+        lines = ["fn f() {", "    if true {", "        x;", "    }", "}"]
+        assert _compute_brace_depth(lines, 2) == 2
+        assert _compute_brace_depth(lines, 3) == 2
+        assert _compute_brace_depth(lines, 4) == 1
+
+    def test_closing_brace_correct_indent_no_edit(self):
+        """} trigger: correctly indented brace produces no edits."""
+        source = "fn f() {\n    x;\n}"
+        edits = _on_type_format(source, 2, 1, "}")
+        assert len(edits) == 0
+
+    def test_semicolon_no_trailing_ws_no_edit(self):
+        """; trigger: no trailing whitespace produces no edits."""
+        source = "    let a = 1;"
+        edits = _on_type_format(source, 0, 14, ";")
+        assert len(edits) == 0
+
+    def test_newline_line0_no_edit(self):
+        """\\n trigger on line 0: no auto-indent (no previous context)."""
+        source = ""
+        edits = _on_type_format(source, 0, 0, "\n")
+        assert len(edits) == 0
