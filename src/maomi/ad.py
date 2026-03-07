@@ -9,6 +9,7 @@ Supported operations inside grad:
   matmul (@)
   elementwise builtins (exp, log, tanh, sqrt, abs)
   reductions (mean, sum)
+  shape builtins (reshape, concat)
   if/else (condition not differentiated; both branches differentiated)
   user function calls (inlined then differentiated)
   map (adjoint distributes over map body)
@@ -55,6 +56,7 @@ _DUMMY_SPAN = Span(0, 0, 0, 0)
 
 _ELEMENTWISE_BUILTINS = {"exp", "log", "tanh", "sqrt", "abs"}
 _REDUCTION_BUILTINS = {"mean", "sum"}
+_SHAPE_BUILTINS = {"reshape", "concat"}
 _CALLBACK_BUILTINS = {"callback"}
 
 
@@ -334,7 +336,7 @@ class ADTransform:
                 if callee in _CALLBACK_BUILTINS:
                     # Callback: no value, no gradient. Skip entirely.
                     return
-                elif callee in _ELEMENTWISE_BUILTINS | _REDUCTION_BUILTINS:
+                elif callee in _ELEMENTWISE_BUILTINS | _REDUCTION_BUILTINS | _SHAPE_BUILTINS:
                     # Built-in: put on tape as-is
                     for a in args:
                         self._linearize(a, tape, var_map, let_env)
@@ -617,6 +619,10 @@ class ADTransform:
                     self._backprop_elementwise(callee, args, adj, adjoints, var_map, node)
                 elif callee in _REDUCTION_BUILTINS:
                     self._backprop_reduction(callee, args, adj, adjoints, var_map, node)
+                elif callee == "reshape":
+                    self._backprop_reshape(args, adj, adjoints, var_map)
+                elif callee == "concat":
+                    self._backprop_concat(args, adj, adjoints, var_map)
                 else:
                     raise MaomiError(
                         f"grad: unsupported function call '{callee}' inside grad",
@@ -730,6 +736,82 @@ class ADTransform:
         elif callee == "sum":
             # d/dx sum(x) = broadcast(dz)
             self._accumulate(adjoints, arg_name, adj)
+
+    def _backprop_reshape(self, args: list[Expr], adj: Expr,
+                           adjoints: dict[str, Expr], var_map: dict[int, str]):
+        """Backprop through reshape: reshape adjoint back to original shape."""
+        arg = args[0]
+        if id(arg) not in var_map:
+            return
+        arg_name = var_map[id(arg)]
+        arg_type = self._type_of(arg)
+        if not isinstance(arg_type, ArrayType):
+            self._accumulate(adjoints, arg_name, adj)
+            return
+
+        # Build reshape(adj, *original_dims)
+        dim_literals = []
+        for d in arg_type.dims:
+            lit = IntLiteral(d, _DUMMY_SPAN)
+            self.type_map[id(lit)] = ScalarType("i32")
+            dim_literals.append(lit)
+        reshape_call = CallExpr("reshape", [adj] + dim_literals, _DUMMY_SPAN)
+        self.type_map[id(reshape_call)] = arg_type
+        self._accumulate(adjoints, arg_name, reshape_call)
+
+    def _backprop_concat(self, args: list[Expr], adj: Expr,
+                          adjoints: dict[str, Expr], var_map: dict[int, str]):
+        """Backprop through concat: slice adjoint into pieces for each input."""
+        # Detect axis
+        if (isinstance(args[-1], IntLiteral)
+                and isinstance(self.type_map.get(id(args[-1])), ScalarType)):
+            axis = args[-1].value
+            array_args = args[:-1]
+        else:
+            axis = 0
+            array_args = args
+
+        adj_type = self._type_of(adj)
+
+        # If adj is scalar (e.g. from sum backprop), broadcast handles it —
+        # just accumulate the scalar adj to each input (codegen broadcasts).
+        if not isinstance(adj_type, ArrayType):
+            for arg in array_args:
+                if id(arg) in var_map:
+                    self._accumulate(adjoints, var_map[id(arg)], adj)
+            return
+
+        rank = len(adj_type.dims)
+
+        offset = 0
+        for arg in array_args:
+            arg_type = self._type_of(arg)
+            if not isinstance(arg_type, ArrayType):
+                continue
+            size = arg_type.dims[axis]
+            if not isinstance(size, int):
+                continue
+
+            if id(arg) in var_map:
+                arg_name = var_map[id(arg)]
+
+                # Build IndexExpr: adj sliced along concat axis
+                components = []
+                for d in range(rank):
+                    if d == axis:
+                        start = IntLiteral(offset, _DUMMY_SPAN)
+                        end = IntLiteral(offset + size, _DUMMY_SPAN)
+                        self.type_map[id(start)] = ScalarType("i32")
+                        self.type_map[id(end)] = ScalarType("i32")
+                        components.append(IndexComponent("slice", None, start, end, _DUMMY_SPAN))
+                    else:
+                        components.append(IndexComponent("full", None, None, None, _DUMMY_SPAN))
+
+                slice_expr = IndexExpr(adj, components, _DUMMY_SPAN)
+                self.type_map[id(slice_expr)] = arg_type
+                self._accumulate(adjoints, arg_name, slice_expr)
+
+            offset += size
 
     def _backprop_if(self, cond: Expr, then_b: Block, else_b: Block,
                       adj: Expr, adjoints: dict[str, Expr],
@@ -1024,13 +1106,19 @@ class ADTransform:
 
     def _make_call(self, name: str, args: list[Expr]) -> Expr:
         node = CallExpr(name, args, _DUMMY_SPAN)
-        # Infer type from first arg for elementwise, or special-case transpose
+        # Infer type from first arg for elementwise, or special-case transpose/reshape
         if name == "transpose" and args:
             arg_t = self.type_map.get(id(args[0]))
             if isinstance(arg_t, ArrayType) and len(arg_t.dims) == 2:
                 self.type_map[id(node)] = ArrayType(arg_t.base, (arg_t.dims[1], arg_t.dims[0]))
             elif arg_t is not None:
                 self.type_map[id(node)] = arg_t
+        elif name == "reshape" and len(args) > 1:
+            arg_t = self.type_map.get(id(args[0]))
+            dims = tuple(a.value for a in args[1:] if isinstance(a, IntLiteral))
+            if dims and arg_t is not None:
+                base = arg_t.base if isinstance(arg_t, ArrayType) else arg_t.base
+                self.type_map[id(node)] = ArrayType(base, dims)
         elif args:
             t = self.type_map.get(id(args[0]))
             if t is not None:

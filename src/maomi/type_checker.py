@@ -691,6 +691,14 @@ class TypeChecker:
                 self._infer(arg, env)
             return None
 
+        # reshape(array, dim1, dim2, ...) — variadic shape builtin
+        if expr.callee == "reshape":
+            return self._check_reshape(expr, env)
+
+        # concat(arr1, arr2, ...) or concat(arr1, arr2, ..., axis)
+        if expr.callee == "concat":
+            return self._check_concat(expr, env)
+
         sig = self.fn_table.get(expr.callee)
         if sig is None:
             self._error(
@@ -732,6 +740,156 @@ class TypeChecker:
                     break
 
         return ret
+
+    def _check_reshape(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
+        if len(expr.args) < 2:
+            self._error(
+                "reshape requires at least 2 arguments: array and target dimensions",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        arg_type = self._infer(expr.args[0], env)
+        if arg_type is None:
+            return None
+        if not isinstance(arg_type, ArrayType):
+            self._error(
+                "reshape: first argument must be an array",
+                expr.args[0].span.line_start, expr.args[0].span.col_start,
+            )
+            return None
+
+        # Remaining args must be positive integer literals
+        target_dims: list[int] = []
+        for i, dim_arg in enumerate(expr.args[1:], 1):
+            self._infer(dim_arg, env)
+            if not isinstance(dim_arg, IntLiteral):
+                self._error(
+                    "reshape: dimension arguments must be integer literals",
+                    dim_arg.span.line_start, dim_arg.span.col_start,
+                )
+                return None
+            if dim_arg.value <= 0:
+                self._error(
+                    "reshape: dimensions must be positive",
+                    dim_arg.span.line_start, dim_arg.span.col_start,
+                )
+                return None
+            target_dims.append(dim_arg.value)
+
+        # Validate element count
+        input_numel = 1
+        for d in arg_type.dims:
+            if not isinstance(d, int):
+                self._error(
+                    f"reshape: cannot reshape with symbolic dimension '{d}'",
+                    expr.span.line_start, expr.span.col_start,
+                )
+                return None
+            input_numel *= d
+        output_numel = 1
+        for d in target_dims:
+            output_numel *= d
+        if input_numel != output_numel:
+            self._error(
+                f"reshape: input has {input_numel} elements but target shape has {output_numel}",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        return ArrayType(arg_type.base, tuple(target_dims))
+
+    def _check_concat(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
+        if len(expr.args) < 2:
+            self._error(
+                "concat requires at least 2 arguments",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        # Infer all arg types
+        arg_types: list[MaomiType | None] = []
+        for arg in expr.args:
+            arg_types.append(self._infer(arg, env))
+
+        if any(t is None for t in arg_types):
+            return None
+
+        # Detect axis: if last arg is IntLiteral, it's the axis
+        if isinstance(expr.args[-1], IntLiteral) and isinstance(arg_types[-1], ScalarType):
+            axis = expr.args[-1].value
+            array_args = expr.args[:-1]
+            array_types = arg_types[:-1]
+        else:
+            axis = 0
+            array_args = expr.args
+            array_types = arg_types
+
+        if len(array_args) < 2:
+            self._error(
+                "concat requires at least 2 array arguments",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        # All must be arrays
+        for i, (arg, t) in enumerate(zip(array_args, array_types)):
+            if not isinstance(t, ArrayType):
+                self._error(
+                    f"concat: argument {i} must be an array, got {t}",
+                    arg.span.line_start, arg.span.col_start,
+                )
+                return None
+
+        first = array_types[0]
+        assert isinstance(first, ArrayType)
+        rank = len(first.dims)
+
+        if axis < 0 or axis >= rank:
+            self._error(
+                f"concat: axis {axis} out of range for rank-{rank} arrays",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        for i, t in enumerate(array_types[1:], 1):
+            assert isinstance(t, ArrayType)
+            if t.base != first.base:
+                self._error(
+                    f"concat: base type mismatch at argument {i}: {first.base} vs {t.base}",
+                    array_args[i].span.line_start, array_args[i].span.col_start,
+                )
+                return None
+            if len(t.dims) != rank:
+                self._error(
+                    f"concat: rank mismatch at argument {i}: expected {rank}, got {len(t.dims)}",
+                    array_args[i].span.line_start, array_args[i].span.col_start,
+                )
+                return None
+            for j in range(rank):
+                if j != axis and t.dims[j] != first.dims[j]:
+                    self._error(
+                        f"concat: dimension mismatch at axis {j} for argument {i}: {first.dims[j]} vs {t.dims[j]}",
+                        array_args[i].span.line_start, array_args[i].span.col_start,
+                    )
+                    return None
+
+        # Sum concat axis dims (must be concrete)
+        axis_sum = 0
+        for i, t in enumerate(array_types):
+            assert isinstance(t, ArrayType)
+            d = t.dims[axis]
+            if not isinstance(d, int):
+                self._error(
+                    f"concat: cannot concat with symbolic dimension '{d}' on axis {axis}",
+                    array_args[i].span.line_start, array_args[i].span.col_start,
+                )
+                return None
+            axis_sum += d
+
+        result_dims = list(first.dims)
+        result_dims[axis] = axis_sum
+        return ArrayType(first.base, tuple(result_dims))
 
     def _unify_arg(
         self,

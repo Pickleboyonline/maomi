@@ -399,6 +399,10 @@ class StableHLOCodegen:
             return self._gen_sum(expr, env)
         if expr.callee == "transpose":
             return self._gen_transpose(expr, env)
+        if expr.callee == "reshape":
+            return self._gen_reshape(expr, env)
+        if expr.callee == "concat":
+            return self._gen_concat(expr, env)
 
         # User-defined function call
         args = [self._gen_expr(a, env) for a in expr.args]
@@ -501,6 +505,40 @@ class StableHLOCodegen:
         self._emit(
             f"{var} = stablehlo.transpose {arg}, dims = [1, 0] "
             f": ({_mlir_type(arg_type)}) -> {_mlir_type(result_type)}"
+        )
+        return var
+
+    def _gen_reshape(self, expr: CallExpr, env: dict[str, str]) -> str:
+        arg = self._gen_expr(expr.args[0], env)
+        arg_type = self._type_of(expr.args[0])
+        result_type = self._type_of(expr)
+        var = self._fresh()
+        self._emit(
+            f"{var} = stablehlo.reshape {arg} "
+            f": ({_mlir_type(arg_type)}) -> {_mlir_type(result_type)}"
+        )
+        return var
+
+    def _gen_concat(self, expr: CallExpr, env: dict[str, str]) -> str:
+        # Detect axis: if last arg is IntLiteral with i32 type, it's the axis
+        if (isinstance(expr.args[-1], IntLiteral)
+                and isinstance(self._type_of(expr.args[-1]), ScalarType)):
+            axis = expr.args[-1].value
+            array_args = expr.args[:-1]
+        else:
+            axis = 0
+            array_args = expr.args
+
+        arg_ssas = [self._gen_expr(a, env) for a in array_args]
+        arg_types = [self._type_of(a) for a in array_args]
+        result_type = self._type_of(expr)
+
+        args_str = ", ".join(arg_ssas)
+        types_str = ", ".join(_mlir_type(t) for t in arg_types)
+        var = self._fresh()
+        self._emit(
+            f"{var} = stablehlo.concatenate {args_str}, dim = {axis} "
+            f": ({types_str}) -> {_mlir_type(result_type)}"
         )
         return var
 

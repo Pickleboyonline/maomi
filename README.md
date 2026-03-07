@@ -40,6 +40,14 @@ fn get_row(matrix: f32[4, 8], i: i32) -> f32[8] {
 fn slice_window(x: f32[10]) -> f32[3] {
     x[2:5]
 }
+
+fn flatten(x: f32[4, 8]) -> f32[32] {
+    reshape(x, 32)
+}
+
+fn join(a: f32[4], b: f32[6]) -> f32[10] {
+    concat(a, b)
+}
 ```
 
 ## Language
@@ -55,7 +63,9 @@ fn slice_window(x: f32[10]) -> f32[3] {
 | `if c { a } else { b }` | Conditional expression (returns a value) |
 | `map x in xs { ... }` | Elementwise transform (compiles to vectorized op) |
 | `scan (acc, x) in (init, xs) { ... }` | Sequential fold with carried state |
-| `grad(expr, var)` | Reverse-mode AD (supports structs, scan, indexing) |
+| `grad(expr, var)` | Reverse-mode AD (supports structs, scan, indexing, reshape, concat) |
+| `reshape(x, 4, 8)` | Reshape array (element count must match) |
+| `concat(a, b)` `concat(a, b, 1)` | Concatenate arrays (optional axis, default 0) |
 | `x[i]` `x[1:3]` `x[:, 0]` | Array indexing and slicing |
 | `import math;` | Qualified module import (`math.relu(x)`) |
 | `from math import { relu };` | Selective import (`relu(x)`) |
@@ -64,7 +74,7 @@ fn slice_window(x: f32[10]) -> f32[3] {
 
 **Types:** `f32` `f64` `i32` `i64` `bool` — arrays as `f32[B, 128]` with symbolic or concrete dims. Named structs for grouping data.
 
-**Builtins:** `mean` `sum` `exp` `log` `tanh` `sqrt` `abs` `callback` — elementwise builtins lift to arrays automatically.
+**Builtins:** `mean` `sum` `exp` `log` `tanh` `sqrt` `abs` `reshape` `concat` `callback` — elementwise builtins lift to arrays automatically.
 
 **Operators:** `+` `-` `*` `/` `@` (matmul) `**` (power) `==` `!=` `<` `>` `<=` `>=`
 
@@ -102,9 +112,9 @@ uv run maomi run examples/grad.mao --fn grad_loss
 
 ## Status
 
-**v0.5** — 242 tests across lexer, parser, type checker, codegen, AD, modules, and indexing. Full pipeline from source to StableHLO.
+**v0.6** — 272 tests across lexer, parser, type checker, codegen, AD, modules, indexing, and array manipulation. Full pipeline from source to StableHLO.
 
-**Works:** shape-typed arrays, array indexing/slicing, named structs (nested, with functional updates), `scan`/`map`/`grad`, scan gradients, struct-shaped gradients, import/module system, StableHLO codegen, JAX/XLA execution for concrete-dimension programs.
+**Works:** shape-typed arrays, array indexing/slicing, `reshape`/`concat` builtins, named structs (nested, with functional updates), `scan`/`map`/`grad`, scan gradients, struct-shaped gradients, import/module system, StableHLO codegen, JAX/XLA execution for concrete-dimension programs.
 
 **Limitations:**
 - Codegen requires concrete dimensions (symbolic dims type-check but don't compile)
