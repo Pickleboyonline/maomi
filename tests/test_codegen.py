@@ -447,3 +447,52 @@ class TestWhereCodegen:
         out = codegen("fn f(m: bool, x: f32[4], y: f32[4]) -> f32[4] { where(m, x, y) }")
         assert "broadcast_in_dim" in out  # scalar cond broadcast to array
         assert "stablehlo.select" in out
+
+
+class TestStringCallbackCodegen:
+    def test_string_label_filtered_from_operands(self):
+        """String args should not appear as tensor operands in custom_call."""
+        out = codegen("""
+            fn f(x: f32) -> f32 {
+                callback("loss", x);
+                x
+            }
+        """)
+        assert "xla_ffi_python_cpu_callback" in out
+        # Only x should be an operand, not the string
+        assert "tensor<f32>" in out
+
+    def test_string_only_callback(self):
+        """callback with only string args should emit no-operands custom_call."""
+        out = codegen("""
+            fn f(x: f32) -> f32 {
+                callback("hello");
+                x
+            }
+        """)
+        assert "xla_ffi_python_cpu_callback" in out
+        assert "() -> ()" in out  # no operands, no results
+
+    def test_callback_labels_stored(self):
+        """Codegen should store string labels in _callback_labels."""
+        from maomi.lexer import Lexer
+        from maomi.parser import Parser
+        from maomi.type_checker import TypeChecker
+        from maomi.codegen_stablehlo import StableHLOCodegen
+
+        source = 'fn f(x: f32) -> f32 { callback("loss", x); x }'
+        tokens = Lexer(source).tokenize()
+        program = Parser(tokens).parse()
+        checker = TypeChecker()
+        errors = checker.check(program)
+        assert errors == []
+        cg = StableHLOCodegen(program, checker.type_map)
+        cg.generate()
+        assert cg._callback_labels == {0: ["loss"]}
+
+    def test_callback_labels_in_compile_result(self):
+        """CompileResult should include callback_labels."""
+        from maomi.cli import compile_source
+        result = compile_source('fn f(x: f32) -> f32 { callback("loss", x); x }')
+        assert result.callback_labels == {0: ["loss"]}
+        assert result.callback_count == 1

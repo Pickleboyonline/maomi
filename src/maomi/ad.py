@@ -35,6 +35,7 @@ from .ast_nodes import (
     IntLiteral,
     FloatLiteral,
     BoolLiteral,
+    StringLiteral,
     Identifier,
     UnaryOp,
     BinOp,
@@ -439,7 +440,7 @@ class ADTransform:
                     return
                 var_map[id(expr)] = name
                 return
-            case IntLiteral() | FloatLiteral() | BoolLiteral():
+            case IntLiteral() | FloatLiteral() | BoolLiteral() | StringLiteral():
                 name = self._fresh_name("const")
                 var_map[id(expr)] = name
                 tape.append((name, expr))
@@ -681,7 +682,7 @@ class ADTransform:
                 if name in subst:
                     return subst[name]
                 return expr
-            case IntLiteral() | FloatLiteral() | BoolLiteral():
+            case IntLiteral() | FloatLiteral() | BoolLiteral() | StringLiteral():
                 return expr
             case UnaryOp(op=op, operand=operand):
                 new_op = self._substitute(operand, subst)
@@ -876,7 +877,7 @@ class ADTransform:
                   adjoints: dict[str, Expr], var_map: dict[int, str]):
         """Apply adjoint rules for a single tape node."""
         match node:
-            case IntLiteral() | FloatLiteral() | BoolLiteral():
+            case IntLiteral() | FloatLiteral() | BoolLiteral() | StringLiteral():
                 pass  # constants have no inputs to propagate to
 
             case UnaryOp(op="-", operand=operand):

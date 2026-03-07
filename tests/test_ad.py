@@ -693,3 +693,16 @@ class TestWhereAD:
             }
         """)
         assert "stablehlo.select" in out
+
+
+class TestStringCallbackAD:
+    def test_callback_with_string_label_in_grad(self):
+        """callback with string label should not affect AD."""
+        mlir = ad_codegen("""
+            fn f(x: f32[4], w: f32[4]) -> f32[4] {
+                callback("weights", w);
+                let loss = mean(x * w);
+                grad(loss, w)
+            }
+        """)
+        assert "func.func @f" in mlir

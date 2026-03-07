@@ -107,6 +107,12 @@ class BoolLiteral:
 
 
 @dataclass
+class StringLiteral:
+    value: str
+    span: Span
+
+
+@dataclass
 class Identifier:
     name: str
     span: Span
@@ -346,7 +352,7 @@ class _ReduceSum:
 
 
 # Union types for convenience
-Expr = IntLiteral | FloatLiteral | BoolLiteral | Identifier | UnaryOp | BinOp | IfExpr | CallExpr | ScanExpr | WhileExpr | MapExpr | GradExpr | CastExpr | FoldExpr | StructLiteral | FieldAccess | WithExpr | IndexExpr | _ScanGrad | _WhileGrad | _IndexGrad | _GatherGrad | _Conv2dGrad | _MaxPoolGrad | _AvgPoolGrad | _FoldGrad | _BroadcastExpr
+Expr = IntLiteral | FloatLiteral | BoolLiteral | StringLiteral | Identifier | UnaryOp | BinOp | IfExpr | CallExpr | ScanExpr | WhileExpr | MapExpr | GradExpr | CastExpr | FoldExpr | StructLiteral | FieldAccess | WithExpr | IndexExpr | _ScanGrad | _WhileGrad | _IndexGrad | _GatherGrad | _Conv2dGrad | _MaxPoolGrad | _AvgPoolGrad | _FoldGrad | _BroadcastExpr
 Stmt = LetStmt | ExprStmt
 
 

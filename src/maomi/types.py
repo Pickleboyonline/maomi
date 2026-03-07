@@ -31,7 +31,13 @@ class StructType:
         return f"{self.name} {{ {fields_str} }}"
 
 
-MaomiType = ScalarType | ArrayType | StructType
+@dataclass(frozen=True)
+class StringType:
+    def __str__(self) -> str:
+        return "str"
+
+
+MaomiType = ScalarType | ArrayType | StructType | StringType
 
 # Convenience constants
 F32 = ScalarType("f32")
@@ -39,3 +45,4 @@ F64 = ScalarType("f64")
 I32 = ScalarType("i32")
 I64 = ScalarType("i64")
 BOOL = ScalarType("bool")
+STRING = StringType()
