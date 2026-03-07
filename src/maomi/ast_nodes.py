@@ -314,6 +314,21 @@ class _AvgPoolGrad:
 
 
 @dataclass
+class _FoldGrad:
+    """Internal: backward pass of fold. Created by AD, compiled by codegen."""
+    d_body_d_carry: Expr              # symbolic derivative of body w.r.t. carry
+    d_body_d_elems: list[Expr]        # symbolic derivatives w.r.t. each element var
+    carry_var: str
+    elem_vars: list[str]
+    init: Expr                        # original init expression
+    sequences: list[Expr]             # original sequence expressions
+    body: Block                       # original fold body (for augmented forward in codegen)
+    adj: Expr                         # upstream adjoint (carry-typed, not stacked)
+    wrt: str                          # "__init__" or sequence var name
+    span: Span
+
+
+@dataclass
 class _BroadcastExpr:
     """Internal: broadcast scalar/lower-rank to array shape. Created by AD for sum/mean backprop."""
     expr: Expr                    # expression to broadcast
@@ -331,7 +346,7 @@ class _ReduceSum:
 
 
 # Union types for convenience
-Expr = IntLiteral | FloatLiteral | BoolLiteral | Identifier | UnaryOp | BinOp | IfExpr | CallExpr | ScanExpr | WhileExpr | MapExpr | GradExpr | CastExpr | FoldExpr | StructLiteral | FieldAccess | WithExpr | IndexExpr | _ScanGrad | _WhileGrad | _IndexGrad | _GatherGrad | _Conv2dGrad | _MaxPoolGrad | _AvgPoolGrad | _BroadcastExpr
+Expr = IntLiteral | FloatLiteral | BoolLiteral | Identifier | UnaryOp | BinOp | IfExpr | CallExpr | ScanExpr | WhileExpr | MapExpr | GradExpr | CastExpr | FoldExpr | StructLiteral | FieldAccess | WithExpr | IndexExpr | _ScanGrad | _WhileGrad | _IndexGrad | _GatherGrad | _Conv2dGrad | _MaxPoolGrad | _AvgPoolGrad | _FoldGrad | _BroadcastExpr
 Stmt = LetStmt | ExprStmt
 
 

@@ -58,6 +58,7 @@ from .ast_nodes import (
     _Conv2dGrad,
     _MaxPoolGrad,
     _AvgPoolGrad,
+    _FoldGrad,
     _BroadcastExpr,
     _ReduceSum,
     Span,
@@ -113,7 +114,20 @@ def _collect_free_vars_inner(expr: Expr, result: set[str]):
                 _collect_free_vars_inner(body.expr, inner)
                 inner.discard(ev)  # elem_var is bound, not free
                 result.update(inner)
+        case CastExpr(expr=inner):
+            _collect_free_vars_inner(inner, result)
         case ScanExpr(carry_var=cv, elem_vars=evs, init=init, sequences=seqs, body=body):
+            _collect_free_vars_inner(init, result)
+            for s in seqs:
+                _collect_free_vars_inner(s, result)
+            if body.expr:
+                inner = set[str]()
+                _collect_free_vars_inner(body.expr, inner)
+                inner.discard(cv)
+                for ev in evs:
+                    inner.discard(ev)
+                result.update(inner)
+        case FoldExpr(carry_var=cv, elem_vars=evs, init=init, sequences=seqs, body=body):
             _collect_free_vars_inner(init, result)
             for s in seqs:
                 _collect_free_vars_inner(s, result)
@@ -190,6 +204,14 @@ def _collect_free_vars_inner(expr: Expr, result: set[str]):
             _collect_free_vars_inner(adj, result)
         case _AvgPoolGrad(input_expr=ie, adj=adj):
             _collect_free_vars_inner(ie, result)
+            _collect_free_vars_inner(adj, result)
+        case _FoldGrad(d_body_d_carry=dc, d_body_d_elems=des, init=init, sequences=seqs, adj=adj):
+            _collect_free_vars_inner(dc, result)
+            for de in des:
+                _collect_free_vars_inner(de, result)
+            _collect_free_vars_inner(init, result)
+            for s in seqs:
+                _collect_free_vars_inner(s, result)
             _collect_free_vars_inner(adj, result)
         case _BroadcastExpr(expr=e):
             _collect_free_vars_inner(e, result)
@@ -290,6 +312,21 @@ class ADTransform:
                     self._transform_block(expr.body),
                     expr.span,
                     expr.reverse,
+                )
+                self._copy_type(expr, result)
+                return result
+            case CastExpr(expr=inner, target_type=target):
+                result = CastExpr(self._transform_expr(inner), target, expr.span)
+                self._copy_type(expr, result)
+                return result
+            case FoldExpr():
+                result = FoldExpr(
+                    expr.carry_var,
+                    expr.elem_vars,
+                    self._transform_expr(expr.init),
+                    [self._transform_expr(s) for s in expr.sequences],
+                    self._transform_block(expr.body),
+                    expr.span,
                 )
                 self._copy_type(expr, result)
                 return result
@@ -677,6 +714,11 @@ class ADTransform:
                 node = MapExpr(ev, new_seq, new_body, expr.span)
                 self._copy_type(expr, node)
                 return node
+            case CastExpr(expr=inner, target_type=target):
+                new_inner = self._substitute(inner, subst)
+                node = CastExpr(new_inner, target, expr.span)
+                self._copy_type(expr, node)
+                return node
             case ScanExpr(carry_var=cv, elem_vars=evs, init=init, sequences=seqs, body=body):
                 new_init = self._substitute(init, subst)
                 new_seqs = [self._substitute(s, subst) for s in seqs]
@@ -684,6 +726,14 @@ class ADTransform:
                 inner_subst = {k: v for k, v in subst.items() if k != cv and k not in evs}
                 new_body = self._substitute_block(body, inner_subst)
                 node = ScanExpr(cv, evs, new_init, new_seqs, new_body, expr.span, expr.reverse)
+                self._copy_type(expr, node)
+                return node
+            case FoldExpr(carry_var=cv, elem_vars=evs, init=init, sequences=seqs, body=body):
+                new_init = self._substitute(init, subst)
+                new_seqs = [self._substitute(s, subst) for s in seqs]
+                inner_subst = {k: v for k, v in subst.items() if k != cv and k not in evs}
+                new_body = self._substitute_block(body, inner_subst)
+                node = FoldExpr(cv, evs, new_init, new_seqs, new_body, expr.span)
                 self._copy_type(expr, node)
                 return node
             case WhileExpr(state_var=sv, init=init, cond=cond, body=body):
@@ -738,6 +788,18 @@ class ADTransform:
                 new_input = self._substitute(expr.input_expr, subst)
                 new_adj = self._substitute(expr.adj, subst)
                 node = _AvgPoolGrad(new_input, new_adj, expr.window, expr.strides, expr.span)
+                self._copy_type(expr, node)
+                return node
+            case _FoldGrad():
+                new_dc = self._substitute(expr.d_body_d_carry, subst)
+                new_des = [self._substitute(de, subst) for de in expr.d_body_d_elems]
+                new_init = self._substitute(expr.init, subst)
+                new_seqs = [self._substitute(s, subst) for s in expr.sequences]
+                new_adj = self._substitute(expr.adj, subst)
+                inner_subst = {k: v for k, v in subst.items() if k != expr.carry_var and k not in expr.elem_vars}
+                new_body = self._substitute_block(expr.body, inner_subst)
+                node = _FoldGrad(new_dc, new_des, expr.carry_var, expr.elem_vars,
+                                 new_init, new_seqs, new_body, new_adj, expr.wrt, expr.span)
                 self._copy_type(expr, node)
                 return node
             case _BroadcastExpr():
@@ -955,12 +1017,8 @@ class ADTransform:
                     self._accumulate(adjoints, inner_name, cast_back)
                 # else: non-differentiable conversion (to int/bool), zero gradient
 
-            case FoldExpr():
-                raise MaomiError(
-                    "reverse-mode AD is not supported through fold. "
-                    "Use grad inside the fold body instead.",
-                    "<ad>", node.span.line_start, node.span.col_start,
-                )
+            case FoldExpr(carry_var=cv, elem_vars=evs, init=init, sequences=seqs, body=body):
+                self._backprop_fold(cv, evs, init, seqs, body, adj, adjoints, var_map, node)
 
             case FieldAccess(object=obj, field=field):
                 # adj of obj += struct with only 'field' set to adj
@@ -1782,6 +1840,64 @@ class ADTransform:
             span=_DUMMY_SPAN,
             reverse=True,
         )
+
+    def _backprop_fold(self, carry_var: str, elem_vars: list[str],
+                        init: Expr, sequences: list[Expr], body: Block,
+                        adj: Expr, adjoints: dict[str, Expr],
+                        var_map: dict[int, str], node: Expr):
+        """Backprop through fold: emit _FoldGrad nodes."""
+        body_expr = body.expr
+        if body_expr is None:
+            return
+
+        # Compute symbolic derivatives of body w.r.t. carry and each elem
+        d_body_d_carry = self._differentiate_branch(body_expr, carry_var)
+        d_body_d_elems = [self._differentiate_branch(body_expr, ev) for ev in elem_vars]
+
+        # Propagate to init
+        if id(init) in var_map:
+            init_name = var_map[id(init)]
+            grad_init = _FoldGrad(
+                d_body_d_carry=d_body_d_carry,
+                d_body_d_elems=d_body_d_elems,
+                carry_var=carry_var,
+                elem_vars=elem_vars,
+                init=init,
+                sequences=sequences,
+                body=body,
+                adj=adj,
+                wrt="__init__",
+                span=_DUMMY_SPAN,
+            )
+            init_type = self._type_of(init)
+            if init_type is not None:
+                self.type_map[id(grad_init)] = init_type
+            self._accumulate(adjoints, init_name, grad_init)
+
+        # Propagate to each sequence
+        for i, seq in enumerate(sequences):
+            if id(seq) not in var_map:
+                continue
+            seq_name = var_map[id(seq)]
+
+            wrt_name = seq.name if isinstance(seq, Identifier) else f"__seq_{i}__"
+            grad_seq = _FoldGrad(
+                d_body_d_carry=d_body_d_carry,
+                d_body_d_elems=d_body_d_elems,
+                carry_var=carry_var,
+                elem_vars=elem_vars,
+                init=init,
+                sequences=sequences,
+                body=body,
+                adj=adj,
+                wrt=wrt_name,
+                span=_DUMMY_SPAN,
+            )
+
+            seq_type = self._type_of(seq)
+            if seq_type is not None:
+                self.type_map[id(grad_seq)] = seq_type
+            self._accumulate(adjoints, seq_name, grad_seq)
 
     # -- AST construction helpers --
 

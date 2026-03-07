@@ -199,15 +199,47 @@ class TestFoldCodegen:
 
 
 class TestFoldAD:
-    def test_fold_grad_error(self):
-        """AD through fold should raise an error."""
-        with pytest.raises(MaomiError, match="fold"):
-            ad_codegen("""
-                fn f(x: f32[10]) -> f32[10] {
-                    let s = fold (acc, e) in (0.0, x) { acc + e };
-                    grad(s, x)
-                }
-            """)
+    def test_fold_grad_sum(self):
+        """grad(fold(acc + e, x), x) should compile (equivalent to grad of sum)."""
+        out = ad_codegen("""
+            fn f(x: f32[10]) -> f32[10] {
+                let s = fold (acc, e) in (0.0, x) { acc + e };
+                grad(s, x)
+            }
+        """)
+        assert "func.func @f" in out
+        assert "stablehlo.while" in out
+
+    def test_fold_grad_wrt_init(self):
+        """grad(fold(...), init) should compile."""
+        out = ad_codegen("""
+            fn f(x: f32, arr: f32[5]) -> f32 {
+                let s = fold (acc, e) in (x, arr) { acc + e };
+                grad(s, x)
+            }
+        """)
+        assert "func.func @f" in out
+
+    def test_fold_grad_product(self):
+        """grad(fold(acc * e, x), x) should compile — non-trivial derivative."""
+        out = ad_codegen("""
+            fn f(x: f32[5]) -> f32[5] {
+                let s = fold (acc, e) in (1.0, x) { acc * e };
+                grad(s, x)
+            }
+        """)
+        assert "func.func @f" in out
+        assert "stablehlo.while" in out
+
+    def test_fold_grad_multi_seq(self):
+        """grad of fold with multiple sequences."""
+        out = ad_codegen("""
+            fn f(x: f32[5], y: f32[5]) -> f32[5] {
+                let s = fold (acc, (a, b)) in (0.0, (x, y)) { acc + a * b };
+                grad(s, x)
+            }
+        """)
+        assert "func.func @f" in out
 
 
 # ============================================================

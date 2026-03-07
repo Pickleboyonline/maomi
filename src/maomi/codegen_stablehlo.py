@@ -31,6 +31,7 @@ from .ast_nodes import (
     _Conv2dGrad,
     _MaxPoolGrad,
     _AvgPoolGrad,
+    _FoldGrad,
     _BroadcastExpr,
     _ReduceSum,
     Expr,
@@ -361,6 +362,8 @@ class StableHLOCodegen:
                 return self._gen_max_pool_grad(expr, env)
             case _AvgPoolGrad():
                 return self._gen_avg_pool_grad(expr, env)
+            case _FoldGrad():
+                return self._gen_fold_grad(expr, env)
             case _BroadcastExpr():
                 return self._gen_broadcast_expr(expr, env)
             case _ReduceSum():
@@ -2853,6 +2856,282 @@ class StableHLOCodegen:
 
         # Result is the final carry (index 1)
         return f"{while_result}#1"
+
+    # -- Fold gradient codegen --
+
+    def _gen_fold_grad(self, expr: _FoldGrad, env: dict[str, str]) -> str:
+        """Emit augmented forward + reverse while loop for fold backward pass.
+
+        Phase A: Run fold body forward, stacking carries into a trajectory buffer.
+        Phase B: Build padded adjoint array (zeros with adj at last position).
+        Phase C: Reverse while loop identical to _gen_scan_grad.
+        """
+        init_val = self._gen_expr(expr.init, env)
+        seq_vals = [self._gen_expr(s, env) for s in expr.sequences]
+        adj_val = self._gen_expr(expr.adj, env)
+
+        init_type = self._type_of(expr.init)
+        seq_types = [self._type_of(s) for s in expr.sequences]
+        adj_type = self._type_of(expr.adj)
+
+        for st in seq_types:
+            if not isinstance(st, ArrayType):
+                raise MaomiError("codegen: _FoldGrad sequence must be array", "<codegen>", 0, 0)
+
+        seq_len = seq_types[0].dims[0]
+        if isinstance(seq_len, str):
+            raise MaomiError(f"codegen: _FoldGrad requires concrete length, got '{seq_len}'", "<codegen>", 0, 0)
+
+        elem_types: list[MaomiType] = []
+        for st in seq_types:
+            if len(st.dims) == 1:
+                elem_types.append(ScalarType(st.base))
+            else:
+                elem_types.append(ArrayType(st.base, st.dims[1:]))
+
+        # Trajectory type: stack init_type along a new leading dim of seq_len
+        if isinstance(init_type, ScalarType):
+            traj_type = ArrayType(init_type.base, (seq_len,))
+        elif isinstance(init_type, ArrayType):
+            traj_type = ArrayType(init_type.base, (seq_len,) + init_type.dims)
+        else:
+            raise MaomiError("codegen: _FoldGrad init must be scalar or array", "<codegen>", 0, 0)
+
+        n_seqs = len(expr.sequences)
+        mlir_i32 = "tensor<i32>"
+        mlir_init = _mlir_type(init_type)
+        mlir_traj = _mlir_type(traj_type)
+        mlir_seqs = [_mlir_type(st) for st in seq_types]
+
+        # ---- Phase A: Augmented forward (build trajectory) ----
+
+        fwd_counter = self._fresh()
+        self._emit(f"{fwd_counter} = stablehlo.constant dense<0> : {mlir_i32}")
+
+        fwd_traj_init = self._fresh()
+        self._emit(f"{fwd_traj_init} = stablehlo.constant dense<0.000000e+00> : {mlir_traj}")
+
+        uid_fwd = self._counter
+        fwd_ctr_name = f"fgFC{uid_fwd}"
+        fwd_carry_name = f"fgFK{uid_fwd}"
+        fwd_traj_name = f"fgFT{uid_fwd}"
+        fwd_seq_names = [f"fgFS{uid_fwd}_{i}" for i in range(n_seqs)]
+
+        fwd_arg_names = [fwd_ctr_name, fwd_carry_name, fwd_traj_name] + fwd_seq_names
+        fwd_init_vals = [fwd_counter, init_val, fwd_traj_init] + seq_vals
+        fwd_arg_types = [mlir_i32, mlir_init, mlir_traj] + mlir_seqs
+        fwd_n_args = len(fwd_arg_names)
+
+        fwd_while = self._fresh()
+        fwd_header = ", ".join(
+            f"%{fwd_arg_names[i]} = {fwd_init_vals[i]}" for i in range(fwd_n_args)
+        )
+        fwd_types_str = ", ".join(fwd_arg_types)
+        self._emit(f"{fwd_while}:{fwd_n_args} = stablehlo.while({fwd_header}) : {fwd_types_str}")
+
+        # Cond: counter < seq_len
+        self._emit("cond {")
+        self._indent += 1
+        fwd_limit = self._fresh()
+        self._emit(f"{fwd_limit} = stablehlo.constant dense<{seq_len}> : {mlir_i32}")
+        fwd_cmp = self._fresh()
+        self._emit(f"{fwd_cmp} = stablehlo.compare LT, %{fwd_ctr_name}, {fwd_limit}, SIGNED : ({mlir_i32}, {mlir_i32}) -> tensor<i1>")
+        self._emit(f"stablehlo.return {fwd_cmp} : tensor<i1>")
+        self._indent -= 1
+
+        # Body: compute new_carry from fold body, stack into trajectory
+        self._emit("} do {")
+        self._indent += 1
+
+        fwd_body_env = dict(env)
+        fwd_body_env[expr.carry_var] = f"%{fwd_carry_name}"
+        for i, (ev, st, et) in enumerate(zip(expr.elem_vars, seq_types, elem_types)):
+            if _block_references_var(expr.body, ev):
+                b_elem = self._slice_element(f"%{fwd_seq_names[i]}", f"%{fwd_ctr_name}", st, et)
+                fwd_body_env[ev] = b_elem
+
+        new_carry = self._gen_block(expr.body, fwd_body_env)
+
+        # Stack new_carry into trajectory at counter position
+        new_traj = self._update_element(f"%{fwd_traj_name}", new_carry, f"%{fwd_ctr_name}", traj_type, init_type)
+
+        # Increment counter
+        fwd_one = self._fresh()
+        self._emit(f"{fwd_one} = stablehlo.constant dense<1> : {mlir_i32}")
+        fwd_new_ctr = self._fresh()
+        self._emit(f"{fwd_new_ctr} = stablehlo.add %{fwd_ctr_name}, {fwd_one} : {mlir_i32}")
+
+        fwd_new_vals = [fwd_new_ctr, new_carry, new_traj] + [f"%{sn}" for sn in fwd_seq_names]
+        fwd_vals_str = ", ".join(fwd_new_vals)
+        self._emit(f"stablehlo.return {fwd_vals_str} : {fwd_types_str}")
+        self._indent -= 1
+        self._emit("}")
+
+        # Extract trajectory from augmented forward result (index 2)
+        fwd_trajectory = f"{fwd_while}#2"
+
+        # ---- Phase B: Padded adjoint array ----
+        # Build adj_array = zeros(traj_type) with adj placed at position seq_len - 1
+
+        adj_zeros = self._fresh()
+        self._emit(f"{adj_zeros} = stablehlo.constant dense<0.000000e+00> : {mlir_traj}")
+
+        last_idx = self._fresh()
+        self._emit(f"{last_idx} = stablehlo.constant dense<{seq_len - 1}> : {mlir_i32}")
+
+        # Broadcast scalar adj to init_type if needed
+        if isinstance(adj_type, ScalarType) and isinstance(init_type, ArrayType):
+            adj_val = self._maybe_broadcast(adj_val, adj_type, init_type)
+
+        adj_array = self._update_element(adj_zeros, adj_val, last_idx, traj_type, init_type)
+
+        # ---- Phase C: Reverse while loop (same structure as _gen_scan_grad) ----
+
+        rev_counter = self._fresh()
+        self._emit(f"{rev_counter} = stablehlo.constant dense<{seq_len - 1}> : {mlir_i32}")
+
+        adj_carry_init = self._fresh()
+        self._emit(f"{adj_carry_init} = stablehlo.constant dense<0.000000e+00> : {mlir_init}")
+
+        adj_seq_inits = []
+        for ms in mlir_seqs:
+            v = self._fresh()
+            self._emit(f"{v} = stablehlo.constant dense<0.000000e+00> : {ms}")
+            adj_seq_inits.append(v)
+
+        uid_rev = self._counter
+        gc_name = f"fgRC{uid_rev}"
+        gac_name = f"fgRAC{uid_rev}"
+        gas_names = [f"fgRAS{uid_rev}_{i}" for i in range(n_seqs)]
+        gfwd_name = f"fgRFwd{uid_rev}"
+        gos_names = [f"fgROS{uid_rev}_{i}" for i in range(n_seqs)]
+        gadj_name = f"fgRAdj{uid_rev}"
+        ginit_name = f"fgRInit{uid_rev}"
+
+        arg_names = [gc_name, gac_name]
+        init_vals = [rev_counter, adj_carry_init]
+        arg_types_list = [mlir_i32, mlir_init]
+
+        for i in range(n_seqs):
+            arg_names.append(gas_names[i])
+            init_vals.append(adj_seq_inits[i])
+            arg_types_list.append(mlir_seqs[i])
+
+        arg_names.append(gfwd_name)
+        init_vals.append(fwd_trajectory)
+        arg_types_list.append(mlir_traj)
+
+        for i in range(n_seqs):
+            arg_names.append(gos_names[i])
+            init_vals.append(seq_vals[i])
+            arg_types_list.append(mlir_seqs[i])
+
+        arg_names.append(gadj_name)
+        init_vals.append(adj_array)
+        arg_types_list.append(mlir_traj)
+
+        arg_names.append(ginit_name)
+        init_vals.append(init_val)
+        arg_types_list.append(mlir_init)
+
+        n_args = len(arg_names)
+        types_str = ", ".join(arg_types_list)
+
+        while_result = self._fresh()
+        header_parts = ", ".join(
+            f"%{arg_names[i]} = {init_vals[i]}" for i in range(n_args)
+        )
+        self._emit(f"{while_result}:{n_args} = stablehlo.while({header_parts}) : {types_str}")
+
+        # Cond: counter >= 0
+        self._emit("cond {")
+        self._indent += 1
+        zero_c = self._fresh()
+        self._emit(f"{zero_c} = stablehlo.constant dense<0> : {mlir_i32}")
+        c_cmp = self._fresh()
+        self._emit(f"{c_cmp} = stablehlo.compare GE, %{gc_name}, {zero_c}, SIGNED : ({mlir_i32}, {mlir_i32}) -> tensor<i1>")
+        self._emit(f"stablehlo.return {c_cmp} : tensor<i1>")
+        self._indent -= 1
+
+        # Body
+        self._emit("} do {")
+        self._indent += 1
+
+        # Slice adj_t from adj_array
+        adj_t = self._slice_element(f"%{gadj_name}", f"%{gc_name}", traj_type, init_type)
+
+        # adj_total = adj_carry + adj_t
+        adj_total = self._fresh()
+        self._emit(f"{adj_total} = stablehlo.add %{gac_name}, {adj_t} : {mlir_init}")
+
+        # prev_carry = select(counter > 0, trajectory[counter-1], init)
+        one_b = self._fresh()
+        self._emit(f"{one_b} = stablehlo.constant dense<1> : {mlir_i32}")
+        zero_b = self._fresh()
+        self._emit(f"{zero_b} = stablehlo.constant dense<0> : {mlir_i32}")
+
+        prev_idx = self._fresh()
+        self._emit(f"{prev_idx} = stablehlo.subtract %{gc_name}, {one_b} : {mlir_i32}")
+        clamped_idx = self._fresh()
+        self._emit(f"{clamped_idx} = stablehlo.clamp {zero_b}, {prev_idx}, %{gc_name} : ({mlir_i32}, {mlir_i32}, {mlir_i32}) -> {mlir_i32}")
+
+        fwd_prev = self._slice_element(f"%{gfwd_name}", clamped_idx, traj_type, init_type)
+
+        gt_zero = self._fresh()
+        self._emit(f"{gt_zero} = stablehlo.compare GT, %{gc_name}, {zero_b}, SIGNED : ({mlir_i32}, {mlir_i32}) -> tensor<i1>")
+
+        prev_carry = self._fresh()
+        self._emit(f"{prev_carry} = stablehlo.select {gt_zero}, {fwd_prev}, %{ginit_name} : (tensor<i1>, {mlir_init}, {mlir_init}) -> {mlir_init}")
+
+        # Slice elements from original sequences
+        b_elems = []
+        for i in range(n_seqs):
+            elem = self._slice_element(f"%{gos_names[i]}", f"%{gc_name}", seq_types[i], elem_types[i])
+            b_elems.append(elem)
+
+        # Evaluate derivative expressions
+        deriv_env = dict(env)
+        deriv_env[expr.carry_var] = prev_carry
+        for ev, elem_ssa in zip(expr.elem_vars, b_elems):
+            deriv_env[ev] = elem_ssa
+
+        d_carry_val = self._gen_expr(expr.d_body_d_carry, deriv_env)
+
+        # new_adj_carry = adj_total * d_carry_val
+        new_adj_carry = self._fresh()
+        self._emit(f"{new_adj_carry} = stablehlo.multiply {adj_total}, {d_carry_val} : {mlir_init}")
+
+        # For each sequence, compute adj_elem and accumulate
+        new_adj_seqs = []
+        for i in range(n_seqs):
+            d_elem_val = self._gen_expr(expr.d_body_d_elems[i], deriv_env)
+            adj_elem = self._fresh()
+            mlir_et = _mlir_type(elem_types[i])
+            self._emit(f"{adj_elem} = stablehlo.multiply {adj_total}, {d_elem_val} : {mlir_et}")
+            new_adj_seq = self._update_element(f"%{gas_names[i]}", adj_elem, f"%{gc_name}", seq_types[i], elem_types[i])
+            new_adj_seqs.append(new_adj_seq)
+
+        # Decrement counter
+        new_counter = self._fresh()
+        self._emit(f"{new_counter} = stablehlo.subtract %{gc_name}, {one_b} : {mlir_i32}")
+
+        # Return new values
+        new_vals = [new_counter, new_adj_carry] + new_adj_seqs
+        new_vals += [f"%{gfwd_name}"] + [f"%{gos_names[i]}" for i in range(n_seqs)]
+        new_vals += [f"%{gadj_name}", f"%{ginit_name}"]
+        vals_str = ", ".join(new_vals)
+        self._emit(f"stablehlo.return {vals_str} : {types_str}")
+        self._indent -= 1
+        self._emit("}")
+
+        # Extract result based on wrt
+        if expr.wrt == "__init__":
+            return f"{while_result}#1"  # adj_carry
+        else:
+            for i, seq_expr in enumerate(expr.sequences):
+                if isinstance(seq_expr, Identifier) and seq_expr.name == expr.wrt:
+                    return f"{while_result}#{2 + i}"  # adj_seq_i
+            return f"{while_result}#2"  # fallback: first adj_seq
 
     # -- Scan gradient codegen --
 
