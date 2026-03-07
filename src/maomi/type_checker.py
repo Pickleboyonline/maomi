@@ -823,6 +823,10 @@ class TypeChecker:
         if expr.callee in ("max_pool", "avg_pool"):
             return self._check_pool(expr, env)
 
+        # transpose(matrix) — swap dims of a 2D array
+        if expr.callee == "transpose":
+            return self._check_transpose(expr, env)
+
         sig = self.fn_table.get(expr.callee)
         if sig is None:
             self._error(
@@ -864,6 +868,24 @@ class TypeChecker:
                     break
 
         return ret
+
+    def _check_transpose(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
+        if len(expr.args) != 1:
+            self._error(
+                "transpose expects exactly 1 argument",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+        arg_type = self._infer(expr.args[0], env)
+        if arg_type is None:
+            return None
+        if not isinstance(arg_type, ArrayType) or len(arg_type.dims) != 2:
+            self._error(
+                "transpose requires a 2D array",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+        return ArrayType(arg_type.base, (arg_type.dims[1], arg_type.dims[0]))
 
     def _check_reshape(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
         if len(expr.args) < 2:

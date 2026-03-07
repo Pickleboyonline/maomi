@@ -118,3 +118,123 @@ class TestIRModuleStructure:
         text = str(mod)
         assert "add" in text
         assert "mul" in text
+
+
+# ---- Phase 2 tests ----
+
+
+class TestComparisons:
+    def test_greater_than(self):
+        out = ir_text("fn f(a: f32, b: f32) -> bool { a > b }")
+        assert "greater" in out
+
+    def test_less_than(self):
+        out = ir_text("fn f(a: f32, b: f32) -> bool { a < b }")
+        assert "less" in out
+
+    def test_equal(self):
+        out = ir_text("fn f(a: f32, b: f32) -> bool { a == b }")
+        assert "equal" in out
+
+    def test_not_equal(self):
+        out = ir_text("fn f(a: f32, b: f32) -> bool { a != b }")
+        assert "not_equal" in out
+
+
+class TestIfExpr:
+    def test_select(self):
+        out = ir_text("fn f(x: f32) -> f32 { if x > 0.0 { x } else { 0.0 } }")
+        assert "where" in out
+
+    def test_relu(self):
+        mod = codegen("fn f(x: f32) -> f32 { if x > 0.0 { x } else { 0.0 } }")
+        assert mod is not None
+
+
+class TestElementwiseBuiltins:
+    def test_exp(self):
+        out = ir_text("fn f(x: f32) -> f32 { exp(x) }")
+        assert "exp" in out
+
+    def test_log(self):
+        out = ir_text("fn f(x: f32) -> f32 { log(x) }")
+        assert "log" in out
+
+    def test_tanh(self):
+        out = ir_text("fn f(x: f32) -> f32 { tanh(x) }")
+        assert "tanh" in out
+
+    def test_sqrt(self):
+        out = ir_text("fn f(x: f32) -> f32 { sqrt(x) }")
+        assert "sqrt" in out
+
+    def test_abs(self):
+        out = ir_text("fn f(x: f32) -> f32 { abs(x) }")
+        assert "abs" in out
+
+
+class TestReductions:
+    def test_sum(self):
+        out = ir_text("fn f(x: f32[10]) -> f32 { sum(x) }")
+        assert "sum" in out
+
+    def test_mean(self):
+        out = ir_text("fn f(x: f32[10]) -> f32 { mean(x) }")
+        assert "mean" in out
+
+
+class TestTransposeReshape:
+    def test_transpose(self):
+        mod = codegen("fn f(x: f32[3, 4]) -> f32[4, 3] { transpose(x) }")
+        out = str(mod)
+        assert "permute_dims" in out
+
+    def test_reshape(self):
+        mod = codegen("fn f(x: f32[3, 4]) -> f32[12] { reshape(x, 12) }")
+        out = str(mod)
+        assert "reshape" in out
+
+
+class TestConcat:
+    def test_concat_default_axis(self):
+        out = ir_text("fn f(a: f32[3, 4], b: f32[3, 4]) -> f32[6, 4] { concat(a, b) }")
+        assert "concat" in out.lower() or "concatenate" in out.lower()
+
+    def test_concat_with_axis(self):
+        out = ir_text("fn f(a: f32[3, 4], b: f32[3, 4]) -> f32[3, 8] { concat(a, b, 1) }")
+        assert "concat" in out.lower() or "concatenate" in out.lower()
+
+
+class TestStructCodegen:
+    def test_struct_literal(self):
+        mod = codegen("""
+            struct Point { x: f32, y: f32 }
+            fn f() -> Point { Point { x: 1.0, y: 2.0 } }
+        """)
+        assert mod is not None
+
+    def test_field_access(self):
+        out = ir_text("""
+            struct Point { x: f32, y: f32 }
+            fn f(p: Point) -> f32 { p.x }
+        """)
+        # TVM renders TupleGetItem as p[0] in TVMScript
+        assert "p[0]" in out
+
+    def test_with_update(self):
+        mod = codegen("""
+            struct Point { x: f32, y: f32 }
+            fn f(p: Point) -> Point { p with { x = 1.0 } }
+        """)
+        assert mod is not None
+
+
+class TestUserFnCall:
+    def test_user_fn_call(self):
+        mod = codegen("""
+            fn add(a: f32, b: f32) -> f32 { a + b }
+            fn main(x: f32, y: f32) -> f32 { add(x, y) }
+        """)
+        text = str(mod)
+        assert "add" in text
+        assert "main" in text
