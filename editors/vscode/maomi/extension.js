@@ -24,6 +24,14 @@ function activate(context) {
     clientOptions
   );
 
+  const runDisposable = vscode.commands.registerCommand('maomi.run', async (uri, fnName) => {
+    const terminal = vscode.window.createTerminal('Maomi Run');
+    terminal.show();
+    const filePath = vscode.Uri.parse(uri).fsPath;
+    terminal.sendText(`uv run maomi run "${filePath}" --fn ${fnName}`);
+  });
+  context.subscriptions.push(runDisposable);
+
   client.start();
   context.subscriptions.push(client);
 }
