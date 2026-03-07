@@ -23,7 +23,9 @@ class TokenType(StrEnum):
     IN = auto()
     WHILE = auto()
     DO = auto()
-    MAX = auto()
+    LIMIT = auto()
+    CAST = auto()
+    FOLD = auto()
     IMPORT = auto()
     FROM = auto()
     AS = auto()
@@ -107,5 +109,7 @@ KEYWORDS: dict[str, TokenType] = {
     "with": TokenType.WITH,
     "while": TokenType.WHILE,
     "do": TokenType.DO,
-    "max": TokenType.MAX,
+    "limit": TokenType.LIMIT,
+    "cast": TokenType.CAST,
+    "fold": TokenType.FOLD,
 }

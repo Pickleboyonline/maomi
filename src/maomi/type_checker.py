@@ -19,6 +19,8 @@ from .ast_nodes import (
     WhileExpr,
     MapExpr,
     GradExpr,
+    CastExpr,
+    FoldExpr,
     StructLiteral,
     FieldAccess,
     WithExpr,
@@ -283,6 +285,10 @@ class TypeChecker:
                 return self._check_map(expr, env)
             case GradExpr():
                 return self._check_grad(expr, env)
+            case CastExpr():
+                return self._check_cast(expr, env)
+            case FoldExpr():
+                return self._check_fold(expr, env)
             case StructLiteral():
                 return self._check_struct_literal(expr, env)
             case FieldAccess():
@@ -454,6 +460,79 @@ class TypeChecker:
             return None
 
         return wrt_type
+
+    _CAST_BASES = {"f32", "f64", "i32", "i64", "bool"}
+
+    def _check_cast(self, expr: CastExpr, env: TypeEnv) -> MaomiType | None:
+        inner_type = self._infer(expr.expr, env)
+        if inner_type is None:
+            return None
+        if expr.target_type not in self._CAST_BASES:
+            self._error(f"cast: unknown target type '{expr.target_type}'", expr.span.line_start, expr.span.col_start)
+            return None
+        if isinstance(inner_type, StructType):
+            self._error("cast: cannot cast struct types", expr.span.line_start, expr.span.col_start)
+            return None
+        if isinstance(inner_type, ScalarType):
+            return ScalarType(expr.target_type)
+        if isinstance(inner_type, ArrayType):
+            return ArrayType(expr.target_type, inner_type.dims)
+        return None
+
+    def _check_fold(self, expr: FoldExpr, env: TypeEnv) -> MaomiType | None:
+        carry_type = self._infer(expr.init, env)
+
+        seq_types = []
+        for seq in expr.sequences:
+            st = self._infer(seq, env)
+            if st is None:
+                return None
+            if not isinstance(st, ArrayType):
+                self._error(f"fold sequence must be an array, got {st}", seq.span.line_start, seq.span.col_start)
+                return None
+            seq_types.append(st)
+
+        if carry_type is None:
+            return None
+
+        first_dims = [st.dims[0] for st in seq_types]
+        for i, fd in enumerate(first_dims[1:], 1):
+            if not self._dims_match(fd, first_dims[0]):
+                self._error(
+                    f"fold sequences must have the same first dimension, got {first_dims[0]} and {fd}",
+                    expr.sequences[i].span.line_start, expr.sequences[i].span.col_start,
+                )
+                return None
+
+        if len(expr.elem_vars) != len(expr.sequences):
+            self._error(
+                f"fold has {len(expr.elem_vars)} element variables but {len(expr.sequences)} sequences",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        body_env = env.child()
+        body_env.define(expr.carry_var, carry_type)
+        for ev, st in zip(expr.elem_vars, seq_types):
+            if len(st.dims) == 1:
+                elem_type: MaomiType = ScalarType(st.base)
+            else:
+                elem_type = ArrayType(st.base, st.dims[1:])
+            body_env.define(ev, elem_type)
+
+        body_type = self._check_block(expr.body, body_env)
+        if body_type is None:
+            return None
+
+        if not self._types_compatible(body_type, carry_type):
+            self._error(
+                f"fold body returns {body_type}, but carry has type {carry_type}",
+                expr.body.span.line_start, expr.body.span.col_start,
+            )
+            return None
+
+        # fold returns the final carry (not stacked)
+        return carry_type
 
     def _check_struct_literal(self, expr: StructLiteral, env: TypeEnv) -> MaomiType | None:
         stype = self.struct_defs.get(expr.name)
@@ -824,9 +903,13 @@ class TypeChecker:
         if expr.callee in _RNG_BUILTINS:
             return self._check_rng_call(expr, env)
 
-        # sum/mean — reduction with optional axis
-        if expr.callee in ("sum", "mean"):
+        # sum/mean/max/min — reduction with optional axis
+        if expr.callee in ("sum", "mean", "max", "min"):
             return self._check_reduction(expr, env)
+
+        # argmax/argmin — returns i32 index
+        if expr.callee in ("argmax", "argmin"):
+            return self._check_argmax(expr, env)
 
         # reshape(array, dim1, dim2, ...) — variadic shape builtin
         if expr.callee == "reshape":
@@ -974,6 +1057,55 @@ class TypeChecker:
         if len(new_dims) == 0:
             return ScalarType(arg_type.base)
         return ArrayType(arg_type.base, new_dims)
+
+    def _check_argmax(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
+        """Check argmax(x) or argmax(x, axis) — returns i32 indices."""
+        if len(expr.args) < 1 or len(expr.args) > 2:
+            self._error(
+                f"{expr.callee} expects 1 or 2 arguments",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        arg_type = self._infer(expr.args[0], env)
+        if arg_type is None:
+            return None
+
+        if not isinstance(arg_type, ArrayType):
+            self._error(
+                f"{expr.callee} requires an array argument",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        if len(expr.args) == 1:
+            # All-dims argmax → scalar i32
+            return ScalarType("i32")
+
+        # 2 args: axis-specific
+        axis_arg = expr.args[1]
+        self._infer(axis_arg, env)
+        if not isinstance(axis_arg, IntLiteral):
+            self._error(
+                f"{expr.callee} axis must be an integer literal",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        axis = axis_arg.value
+        ndim = len(arg_type.dims)
+        if axis < 0 or axis >= ndim:
+            self._error(
+                f"{expr.callee} axis {axis} out of range for {ndim}D array",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        # Remove the reduced dimension, result is i32
+        new_dims = tuple(d for i, d in enumerate(arg_type.dims) if i != axis)
+        if len(new_dims) == 0:
+            return ScalarType("i32")
+        return ArrayType("i32", new_dims)
 
     def _check_where(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
         if len(expr.args) != 3:

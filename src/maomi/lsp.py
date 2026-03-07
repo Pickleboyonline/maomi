@@ -14,8 +14,9 @@ from .type_checker import TypeChecker
 from .errors import MaomiError, LexerError, ParseError
 from .ast_nodes import (
     Program, FnDef, Block, LetStmt, ExprStmt, Param,
-    BinOp, UnaryOp, IfExpr, CallExpr, ScanExpr, MapExpr,
-    GradExpr, Identifier, IntLiteral, FloatLiteral, BoolLiteral,
+    BinOp, UnaryOp, IfExpr, CallExpr, ScanExpr, WhileExpr, MapExpr,
+    GradExpr, CastExpr, FoldExpr,
+    Identifier, IntLiteral, FloatLiteral, BoolLiteral,
     StructLiteral, FieldAccess, WithExpr, IndexExpr, StructDef,
     TypeAnnotation,
     _ScanGrad, _IndexGrad, _GatherGrad, _Conv2dGrad,
@@ -301,17 +302,20 @@ def _get_hover_text(node, fn: FnDef, result: AnalysisResult) -> str | None:
 # ---------------------------------------------------------------------------
 
 _KEYWORDS = [
-    "fn", "let", "if", "else", "scan", "map", "grad",
+    "fn", "let", "if", "else", "scan", "map", "grad", "cast", "fold",
     "struct", "with", "import", "from", "in", "true", "false",
+    "while", "do", "limit",
 ]
 
 _TYPE_NAMES = ["f32", "f64", "i32", "i64", "bool"]
 
 _BUILTINS = [
-    "mean", "sum", "exp", "log", "tanh", "sqrt", "abs",
+    "mean", "sum", "max", "min", "argmax", "argmin",
+    "exp", "log", "tanh", "sqrt", "abs",
     "reshape", "concat", "iota", "transpose", "callback",
     "rng_key", "rng_split", "rng_uniform", "rng_normal",
     "conv2d", "max_pool", "avg_pool",
+    "stop_gradient", "where",
 ]
 
 _BUILTIN_SET = set(_BUILTINS)
@@ -1094,6 +1098,10 @@ _BUILTIN_SIGNATURES: dict[str, tuple[list[str], list[str], str]] = {
     "abs": (["x"], ["f32"], "f32"),
     "mean": (["x"], ["f32[...]"], "f32"),
     "sum": (["x"], ["f32[...]"], "f32"),
+    "max": (["x"], ["f32[...]"], "f32"),
+    "min": (["x"], ["f32[...]"], "f32"),
+    "argmax": (["x"], ["f32[...]"], "i32"),
+    "argmin": (["x"], ["f32[...]"], "i32"),
     "reshape": (["x", "dims..."], ["f32[...]", "int..."], "f32[...]"),
     "concat": (["arrays...", "axis"], ["f32[...]...", "int"], "f32[...]"),
     "iota": (["n"], ["int"], "i32[n]"),
@@ -1113,7 +1121,13 @@ _BUILTIN_DOCS: dict[str, str] = {
     "sqrt": "Compute element-wise square root.",
     "abs": "Compute element-wise absolute value.",
     "mean": "Compute the mean of all elements in an array.",
-    "sum": "Compute the sum of all elements in an array.",
+    "sum": "Compute the sum of all elements in an array. `sum(x)` over all elements, `sum(x, axis)` along an axis.",
+    "max": "Reduce-max. `max(x)` over all elements, `max(x, axis)` along an axis.",
+    "min": "Reduce-min. `min(x)` over all elements, `min(x, axis)` along an axis.",
+    "argmax": "Index of maximum element. `argmax(x)` over all elements, `argmax(x, axis)` along an axis. Returns i32.",
+    "argmin": "Index of minimum element. `argmin(x)` over all elements, `argmin(x, axis)` along an axis. Returns i32.",
+    "stop_gradient": "Identity function that blocks gradient flow backward.",
+    "where": "Element-wise conditional: `where(cond, x, y)`. Fully differentiable.",
     "reshape": "Reshape an array to the given dimensions.\n\nTotal element count must be preserved.",
     "concat": "Concatenate arrays along the given axis.",
     "iota": "Generate an integer sequence `[0, 1, ..., n-1]` as `i32[n]`.",

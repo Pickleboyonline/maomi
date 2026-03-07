@@ -42,6 +42,8 @@ from .ast_nodes import (
     WhileExpr,
     MapExpr,
     GradExpr,
+    CastExpr,
+    FoldExpr,
     StructLiteral,
     FieldAccess,
     WithExpr,
@@ -65,7 +67,7 @@ from .errors import MaomiError
 _DUMMY_SPAN = Span(0, 0, 0, 0)
 
 _ELEMENTWISE_BUILTINS = {"exp", "log", "tanh", "sqrt", "abs"}
-_REDUCTION_BUILTINS = {"mean", "sum"}
+_REDUCTION_BUILTINS = {"mean", "sum", "max", "min"}
 _SHAPE_BUILTINS = {"reshape", "concat"}
 _NONDIFF_BUILTINS = {"callback"}
 _IOTA_BUILTINS = {"iota"}
@@ -73,6 +75,7 @@ _CONV_POOL_BUILTINS = {"conv2d", "max_pool", "avg_pool"}
 _RNG_BUILTINS = {"rng_key", "rng_split", "rng_uniform", "rng_normal"}
 _STOP_GRAD_BUILTINS = {"stop_gradient"}
 _WHERE_BUILTINS = {"where"}
+_ARGMAX_BUILTINS = {"argmax", "argmin"}
 _MAX_GRAD_DEPTH = 10
 
 
@@ -393,7 +396,7 @@ class ADTransform:
                 if callee in _NONDIFF_BUILTINS:
                     # Callback: no value, no gradient. Skip entirely.
                     return
-                elif callee in _IOTA_BUILTINS | _ELEMENTWISE_BUILTINS | _REDUCTION_BUILTINS | _SHAPE_BUILTINS | _CONV_POOL_BUILTINS | _RNG_BUILTINS | _STOP_GRAD_BUILTINS | _WHERE_BUILTINS | {"transpose"}:
+                elif callee in _IOTA_BUILTINS | _ELEMENTWISE_BUILTINS | _REDUCTION_BUILTINS | _SHAPE_BUILTINS | _CONV_POOL_BUILTINS | _RNG_BUILTINS | _STOP_GRAD_BUILTINS | _WHERE_BUILTINS | _ARGMAX_BUILTINS | {"transpose"}:
                     # Built-in: put on tape as-is
                     for a in args:
                         self._linearize(a, tape, var_map, let_env)
@@ -457,6 +460,18 @@ class ADTransform:
                         self._linearize(ic.start, tape, var_map, let_env)
                     if ic.end is not None:
                         self._linearize(ic.end, tape, var_map, let_env)
+                name = self._fresh_name("v")
+                var_map[id(expr)] = name
+                tape.append((name, expr))
+            case CastExpr(expr=inner):
+                self._linearize(inner, tape, var_map, let_env)
+                name = self._fresh_name("v")
+                var_map[id(expr)] = name
+                tape.append((name, expr))
+            case FoldExpr(init=init, sequences=seqs):
+                self._linearize(init, tape, var_map, let_env)
+                for s in seqs:
+                    self._linearize(s, tape, var_map, let_env)
                 name = self._fresh_name("v")
                 var_map[id(expr)] = name
                 tape.append((name, expr))
@@ -772,6 +787,8 @@ class ADTransform:
                     pass  # gradient stops here — don't accumulate any adjoint
                 elif callee in _WHERE_BUILTINS:
                     self._backprop_where(args, adj, adjoints, var_map, node)
+                elif callee in _ARGMAX_BUILTINS:
+                    pass  # non-differentiable (returns i32 indices)
                 else:
                     raise MaomiError(
                         f"grad: unsupported function call '{callee}' inside grad",
@@ -789,6 +806,27 @@ class ADTransform:
 
             case WhileExpr(state_var=sv, init=init, max_iters=mi, cond=cond, body=body):
                 self._backprop_while(sv, init, mi, cond, body, adj, adjoints, var_map, node)
+
+            case CastExpr(expr=inner, target_type=target):
+                inner_name = var_map[id(inner)]
+                inner_type = self._type_of(inner)
+                inner_base = None
+                if isinstance(inner_type, ScalarType):
+                    inner_base = inner_type.base
+                elif isinstance(inner_type, ArrayType):
+                    inner_base = inner_type.base
+                if inner_base in ("f32", "f64") and target in ("f32", "f64"):
+                    cast_back = CastExpr(adj, inner_base, _DUMMY_SPAN)
+                    self.type_map[id(cast_back)] = inner_type
+                    self._accumulate(adjoints, inner_name, cast_back)
+                # else: non-differentiable conversion (to int/bool), zero gradient
+
+            case FoldExpr():
+                raise MaomiError(
+                    "reverse-mode AD is not supported through fold. "
+                    "Use grad inside the fold body instead.",
+                    "<ad>", node.span.line_start, node.span.col_start,
+                )
 
             case FieldAccess(object=obj, field=field):
                 # adj of obj += struct with only 'field' set to adj
@@ -932,6 +970,62 @@ class ADTransform:
                     self._accumulate(adjoints, arg_name, broadcast)
             else:
                 self._accumulate(adjoints, arg_name, adj)
+
+        elif callee in ("max", "min"):
+            if not isinstance(arg_type, ArrayType):
+                self._accumulate(adjoints, arg_name, adj)
+                return
+
+            # JAX indicator rule: grad = adj_bc * indicators / counts_bc
+            # indicators = cast(operand == broadcast(result), f32)
+            # counts = sum(indicators, axes)
+            tape_name = var_map.get(id(node))
+            node_ref = self._make_ref(tape_name, self._type_of(node)) if tape_name else node
+            arg_ref = self._make_ref(arg_name, arg_type)
+            ndim = len(arg_type.dims)
+
+            # Broadcast result back to input shape
+            if has_axis:
+                broadcast_dims = tuple(i for i in range(ndim) if i != axis)
+                result_bc = _BroadcastExpr(node_ref, tuple(arg_type.dims), _DUMMY_SPAN, broadcast_dims=broadcast_dims)
+            else:
+                result_bc = _BroadcastExpr(node_ref, tuple(arg_type.dims), _DUMMY_SPAN)
+            self.type_map[id(result_bc)] = arg_type
+
+            # indicators = cast(arg == result_bc, arg_type.base)
+            eq = BinOp("==", arg_ref, result_bc, _DUMMY_SPAN)
+            bool_type = ArrayType("bool", arg_type.dims)
+            self.type_map[id(eq)] = bool_type
+            indicators = CastExpr(eq, arg_type.base, _DUMMY_SPAN)
+            self.type_map[id(indicators)] = arg_type
+
+            # counts = sum(indicators) or sum(indicators, axis)
+            if has_axis:
+                axis_lit = IntLiteral(axis, _DUMMY_SPAN)
+                self.type_map[id(axis_lit)] = ScalarType("i32")
+                counts = CallExpr("sum", [indicators, axis_lit], _DUMMY_SPAN)
+                count_type = self._type_of(node)  # same shape as reduced result
+            else:
+                counts = CallExpr("sum", [indicators], _DUMMY_SPAN)
+                count_type = ScalarType(arg_type.base)
+            self.type_map[id(counts)] = count_type
+
+            # Broadcast adj and counts back to input shape
+            if has_axis:
+                adj_bc = _BroadcastExpr(adj, tuple(arg_type.dims), _DUMMY_SPAN, broadcast_dims=broadcast_dims)
+                counts_bc = _BroadcastExpr(counts, tuple(arg_type.dims), _DUMMY_SPAN, broadcast_dims=broadcast_dims)
+            else:
+                adj_bc = _BroadcastExpr(adj, tuple(arg_type.dims), _DUMMY_SPAN)
+                counts_bc = _BroadcastExpr(counts, tuple(arg_type.dims), _DUMMY_SPAN)
+            self.type_map[id(adj_bc)] = arg_type
+            self.type_map[id(counts_bc)] = arg_type
+
+            # grad = adj_bc * indicators / counts_bc
+            grad = BinOp("*", adj_bc, indicators, _DUMMY_SPAN)
+            self.type_map[id(grad)] = arg_type
+            grad = BinOp("/", grad, counts_bc, _DUMMY_SPAN)
+            self.type_map[id(grad)] = arg_type
+            self._accumulate(adjoints, arg_name, grad)
 
     def _backprop_where(self, args: list[Expr], adj: Expr,
                          adjoints: dict[str, Expr], var_map: dict[int, str],
@@ -1257,8 +1351,8 @@ class ADTransform:
         """Backprop through while: emit _WhileGrad for bounded, error for unbounded."""
         if max_iters is None:
             raise MaomiError(
-                "reverse-mode AD is not supported through while loops without max iterations. "
-                "Use 'while state in init max N { cond } do { body }' for differentiable while loops, "
+                "reverse-mode AD is not supported through while loops without a limit. "
+                "Use 'while state in init limit N { cond } do { body }' for differentiable while loops, "
                 "or use scan for fixed-iteration differentiable loops.",
                 "<ad>", node.span.line_start, node.span.col_start,
             )

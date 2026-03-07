@@ -193,6 +193,30 @@ fn normalize_rows(x: f32[32, 128]) -> f32[32, 128] {
 
 ---
 
+## Type Conversion
+
+`cast(expr, type)` converts between scalar types. Shape is preserved.
+
+```maomi
+fn to_float(x: i32[4]) -> f32[4] {
+    cast(x, f32)
+}
+
+fn to_int(x: f32[4]) -> i32[4] {
+    cast(x, i32)
+}
+
+fn indicator(mask: bool[4]) -> f32[4] {
+    cast(mask, f32)
+}
+```
+
+Supported target types: `f32`, `f64`, `i32`, `i64`, `bool`. Struct types cannot be cast.
+
+**AD behavior:** Gradient flows through float-to-float casts (e.g. `f32 → f64`), casting the adjoint back to the source type. Casts to non-float types (`i32`, `i64`, `bool`) are non-differentiable — gradient is zero.
+
+---
+
 ## Builtins — Elementwise
 
 These operate on scalars and lift to arrays automatically (applied elementwise).
@@ -223,6 +247,14 @@ All elementwise builtins are differentiable.
 | `sum(x, axis)` | `f32[M, N] -> f32[M]` (axis=1) | Sum along specific axis |
 | `mean(x)` | `f32[...] -> f32` | Average of all elements |
 | `mean(x, axis)` | `f32[M, N] -> f32[N]` (axis=0) | Average along specific axis |
+| `max(x)` | `f32[...] -> f32` | Maximum of all elements |
+| `max(x, axis)` | `f32[M, N] -> f32[M]` (axis=1) | Maximum along specific axis |
+| `min(x)` | `f32[...] -> f32` | Minimum of all elements |
+| `min(x, axis)` | `f32[M, N] -> f32[N]` (axis=0) | Minimum along specific axis |
+| `argmax(x)` | `f32[...] -> i32` | Index of maximum element |
+| `argmax(x, axis)` | `f32[M, N] -> i32[M]` (axis=1) | Indices of maxima along axis |
+| `argmin(x)` | `f32[...] -> i32` | Index of minimum element |
+| `argmin(x, axis)` | `f32[M, N] -> i32[N]` (axis=0) | Indices of minima along axis |
 
 ```maomi
 fn mse_loss(pred: f32[32], target: f32[32]) -> f32 {
@@ -230,14 +262,23 @@ fn mse_loss(pred: f32[32], target: f32[32]) -> f32 {
     mean(diff * diff)
 }
 
-fn softmax(x: f32[32, 128]) -> f32[32, 128] {
-    let e = exp(x);
+fn softmax(x: f32[32, 10]) -> f32[32, 10] {
+    let m = reshape(max(x, 1), 32, 1);
+    let e = exp(x - m);
     let s = reshape(sum(e, 1), 32, 1);
     e / s
 }
+
+fn predictions(logits: f32[32, 10]) -> i32[32] {
+    argmax(logits, 1)
+}
 ```
 
-Axis-specific reductions remove the specified dimension from the result shape. The axis must be an integer literal in range `[0, ndim)`. Both are fully differentiable — `grad` through `sum` distributes ones; `grad` through `mean` distributes `1/N` (or `1/axis_size` for axis-specific).
+Axis-specific reductions remove the specified dimension from the result shape. The axis must be an integer literal in range `[0, ndim)`.
+
+- `sum` / `mean`: fully differentiable — `grad` through `sum` distributes ones, `grad` through `mean` distributes `1/N`.
+- `max` / `min`: differentiable via indicator rule — gradient flows only to the element(s) that achieved the max/min. If there are ties, gradient is split equally among winners.
+- `argmax` / `argmin`: **non-differentiable** (returns i32 indices). No gradient flows through them.
 
 ---
 
@@ -661,11 +702,11 @@ fn converge(x: f32) -> f32 {
 
 The condition block must return `bool`. The body must return the same type as the initial state. The result is the final state value.
 
-**Bounded while** — adding `max N` pre-allocates a trajectory buffer of N entries, enabling reverse-mode AD. The loop still stops when the condition is false, but runs at most N iterations.
+**Bounded while** — adding `limit N` pre-allocates a trajectory buffer of N entries, enabling reverse-mode AD. The loop still stops when the condition is false, but runs at most N iterations.
 
 ```maomi
 fn converge_diff(x: f32) -> f32 {
-    let result = while s in x max 100 { s > 0.01 } do {
+    let result = while s in x limit 100 { s > 0.01 } do {
         s * 0.5
     };
     grad(result, x)
@@ -675,9 +716,41 @@ fn converge_diff(x: f32) -> f32 {
 | Variant | Differentiable? | Use case |
 |---------|----------------|----------|
 | `while s in init { cond } do { body }` | No | Inference, dynamic stopping |
-| `while s in init max N { cond } do { body }` | Yes | Training through dynamic loops |
+| `while s in init limit N { cond } do { body }` | Yes | Training through dynamic loops |
 
-Attempting `grad` through an unbounded `while` (no `max`) produces a compile error. This matches JAX's semantics — `jax.grad` through `jax.lax.while_loop` is also unsupported.
+Attempting `grad` through an unbounded `while` (no `limit`) produces a compile error. This matches JAX's semantics — `jax.grad` through `jax.lax.while_loop` is also unsupported.
+
+### fold
+
+Sequential reduction that returns only the final accumulator — like `scan` but without stacking intermediate results.
+
+```maomi
+fold (carry, elem) in (init, sequence) {
+    new_carry_expr
+}
+```
+
+```maomi
+fn manual_sum(xs: f32[10]) -> f32 {
+    fold (acc, x) in (0.0, xs) { acc + x }
+}
+```
+
+Unlike `scan` (which stacks all intermediate carries into an array), `fold` returns just the final carry value. This makes it ideal for training loops where you only want the trained parameters, not all intermediate states. Critically, `fold` supports struct carries — `scan` cannot (since it would need to stack structs).
+
+```maomi
+struct Model { w: f32[784, 10], b: f32[10] }
+
+fn train(model: Model, data: f32[60000, 784], labels: f32[60000, 10]) -> Model {
+    fold (m, (x, y)) in (model, (data, labels)) {
+        let pred = x @ m.w + m.b;
+        let g = grad(sum((pred - y) * (pred - y)), m);
+        m with { w = m.w - 0.01 * g.w, b = m.b - 0.01 * g.b }
+    }
+}
+```
+
+**AD:** `grad` through `fold` itself is not supported — use `grad` inside the fold body instead. This is the intended pattern: differentiate each step, not the entire loop.
 
 ---
 
@@ -711,8 +784,8 @@ The expression must produce a scalar (`f32`). The result has the same type as th
 | User functions | Yes | Inlined then differentiated |
 | `map` | Yes | Gradient distributes over body |
 | `scan` | Yes | Reverse scan for backward pass |
-| `while ... max N` | Yes | Pre-allocated trajectory for backward pass |
-| `while` (no max) | No | Unknown iteration count; use bounded variant for grad |
+| `while ... limit N` | Yes | Pre-allocated trajectory for backward pass |
+| `while` (no limit) | No | Unknown iteration count; use bounded variant for grad |
 | Structs / field access | Yes | Per-field gradients |
 | Array indexing / gather | Yes | `dynamic_update_slice` / scatter |
 | `conv2d` | Yes | Gradient w.r.t. input and kernel |

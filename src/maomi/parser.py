@@ -24,6 +24,8 @@ from .ast_nodes import (
     WhileExpr,
     MapExpr,
     GradExpr,
+    CastExpr,
+    FoldExpr,
     StructDef,
     StructLiteral,
     FieldAccess,
@@ -277,6 +279,10 @@ class Parser:
             return self._parse_map()
         if self._check(TokenType.GRAD):
             return self._parse_grad()
+        if self._check(TokenType.CAST):
+            return self._parse_cast()
+        if self._check(TokenType.FOLD):
+            return self._parse_fold()
         if self._check(TokenType.IF):
             return self._parse_if_expr()
         expr = self._parse_pipe()
@@ -326,11 +332,11 @@ class Parser:
         self._expect(TokenType.IN)
         init = self._parse_expr()
         max_iters: int | None = None
-        if self._match(TokenType.MAX):
+        if self._match(TokenType.LIMIT):
             tok = self._expect(TokenType.INT_LIT)
             max_iters = int(tok.value)
             if max_iters <= 0:
-                self._error(f"max iterations must be positive, got {max_iters}")
+                self._error(f"limit must be positive, got {max_iters}")
         cond = self._parse_block()
         self._expect(TokenType.DO)
         body = self._parse_block()
@@ -352,6 +358,60 @@ class Parser:
         wrt = self._expect(TokenType.IDENT).value
         self._expect(TokenType.RPAREN)
         return GradExpr(expr, wrt, self._span_from(start))
+
+    _CAST_TYPE_TOKENS = {
+        TokenType.F32: "f32", TokenType.F64: "f64",
+        TokenType.I32: "i32", TokenType.I64: "i64",
+        TokenType.BOOL_TYPE: "bool",
+    }
+
+    def _parse_cast(self) -> CastExpr:
+        start = self._expect(TokenType.CAST)
+        self._expect(TokenType.LPAREN)
+        expr = self._parse_expr()
+        self._expect(TokenType.COMMA)
+        tok = self._advance()
+        if tok.type not in self._CAST_TYPE_TOKENS:
+            self._error(f"cast: expected a type (f32, f64, i32, i64, bool), got '{tok.value}'")
+        target = self._CAST_TYPE_TOKENS[tok.type]
+        self._expect(TokenType.RPAREN)
+        return CastExpr(expr, target, self._span_from(start))
+
+    def _parse_fold(self) -> FoldExpr:
+        start = self._expect(TokenType.FOLD)
+        self._expect(TokenType.LPAREN)
+        carry_var = self._expect(TokenType.IDENT).value
+        self._expect(TokenType.COMMA)
+
+        # Multi-sequence: (acc, (x, y)) or single: (acc, x)
+        if self._check(TokenType.LPAREN):
+            self._advance()
+            elem_vars = [self._expect(TokenType.IDENT).value]
+            while self._match(TokenType.COMMA):
+                elem_vars.append(self._expect(TokenType.IDENT).value)
+            self._expect(TokenType.RPAREN)
+        else:
+            elem_vars = [self._expect(TokenType.IDENT).value]
+
+        self._expect(TokenType.RPAREN)
+        self._expect(TokenType.IN)
+        self._expect(TokenType.LPAREN)
+        init = self._parse_expr()
+        self._expect(TokenType.COMMA)
+
+        # Multi-sequence: (init, (xs, ys)) or single: (init, xs)
+        if len(elem_vars) > 1:
+            self._expect(TokenType.LPAREN)
+            sequences = [self._parse_expr()]
+            while self._match(TokenType.COMMA):
+                sequences.append(self._parse_expr())
+            self._expect(TokenType.RPAREN)
+        else:
+            sequences = [self._parse_expr()]
+
+        self._expect(TokenType.RPAREN)
+        body = self._parse_block()
+        return FoldExpr(carry_var, elem_vars, init, sequences, body, self._span_from(start))
 
     def _parse_if_expr(self) -> IfExpr:
         start = self._expect(TokenType.IF)

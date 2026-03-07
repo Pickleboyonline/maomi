@@ -17,6 +17,8 @@ from .ast_nodes import (
     ScanExpr,
     WhileExpr,
     MapExpr,
+    CastExpr,
+    FoldExpr,
     StructLiteral,
     FieldAccess,
     WithExpr,
@@ -333,6 +335,10 @@ class StableHLOCodegen:
                 return self._gen_while(expr, env)
             case MapExpr():
                 return self._gen_map(expr, env)
+            case CastExpr():
+                return self._gen_cast(expr, env)
+            case FoldExpr():
+                return self._gen_fold(expr, env)
             case StructLiteral():
                 return self._gen_struct_literal(expr, env)
             case FieldAccess():
@@ -618,6 +624,10 @@ class StableHLOCodegen:
             return self._gen_mean(expr, env)
         if expr.callee == "sum":
             return self._gen_sum(expr, env)
+        if expr.callee in ("max", "min"):
+            return self._gen_max_min(expr, env)
+        if expr.callee in ("argmax", "argmin"):
+            return self._gen_argmax(expr, env)
         if expr.callee == "transpose":
             return self._gen_transpose(expr, env)
         if expr.callee == "reshape":
@@ -982,6 +992,192 @@ class StableHLOCodegen:
         self._indent -= 1
         return var
 
+    def _gen_max_min(self, expr: CallExpr, env: dict[str, str]) -> str:
+        """Generate reduce-max or reduce-min."""
+        arg = self._gen_expr(expr.args[0], env)
+        arg_type = self._type_of(expr.args[0])
+        result_type = self._type_of(expr)
+
+        if not isinstance(arg_type, ArrayType):
+            return arg
+
+        is_max = expr.callee == "max"
+
+        if len(expr.args) == 2:
+            axis = expr.args[1].value
+            bd = self._batch_depth
+            actual_axis = bd + axis
+            return self._gen_reduce_max_min_single_axis(arg, arg_type, result_type, actual_axis, is_max)
+
+        return self._gen_reduce_max_min(arg, arg_type, result_type, is_max)
+
+    def _gen_reduce_max_min(self, arg: str, arg_type: ArrayType, result_type: MaomiType, is_max: bool) -> str:
+        """Generate a max/min reduction over all non-batch dims."""
+        bd = self._batch_depth
+        ndims = len(arg_type.dims)
+        reduce_dims = list(range(bd, ndims))
+        dims_str = ", ".join(str(i) for i in reduce_dims)
+
+        init_var = self._fresh()
+        scalar_type = ScalarType(arg_type.base)
+        mlir_scalar = _mlir_type(scalar_type)
+        init_val = self._reduce_init_value(arg_type.base, is_max)
+        self._emit(f"{init_var} = stablehlo.constant dense<{init_val}> : {mlir_scalar}")
+
+        combiner = "stablehlo.maximum" if is_max else "stablehlo.minimum"
+
+        mlir_result = _mlir_type(result_type)
+        var = self._fresh()
+        self._emit(
+            f"{var} = stablehlo.reduce({arg} init: {init_var}) "
+            f"across dimensions = [{dims_str}] "
+            f": ({_mlir_type(arg_type)}, {mlir_scalar}) -> {mlir_result}"
+        )
+        self._indent += 1
+        a_var = self._fresh()
+        b_var = self._fresh()
+        self._emit(f"reducer({a_var}: {mlir_scalar}, {b_var}: {mlir_scalar}) {{")
+        self._indent += 1
+        r_var = self._fresh()
+        self._emit(f"{r_var} = {combiner} {a_var}, {b_var} : {mlir_scalar}")
+        self._emit(f"stablehlo.return {r_var} : {mlir_scalar}")
+        self._indent -= 1
+        self._emit("}")
+        self._indent -= 1
+        return var
+
+    def _gen_reduce_max_min_single_axis(self, arg: str, arg_type: ArrayType, result_type: MaomiType, axis: int, is_max: bool) -> str:
+        """Generate a max/min reduction along a single axis."""
+        init_var = self._fresh()
+        scalar_type = ScalarType(arg_type.base)
+        mlir_scalar = _mlir_type(scalar_type)
+        init_val = self._reduce_init_value(arg_type.base, is_max)
+        self._emit(f"{init_var} = stablehlo.constant dense<{init_val}> : {mlir_scalar}")
+
+        combiner = "stablehlo.maximum" if is_max else "stablehlo.minimum"
+
+        mlir_result = _mlir_type(result_type)
+        var = self._fresh()
+        self._emit(
+            f"{var} = stablehlo.reduce({arg} init: {init_var}) "
+            f"across dimensions = [{axis}] "
+            f": ({_mlir_type(arg_type)}, {mlir_scalar}) -> {mlir_result}"
+        )
+        self._indent += 1
+        a_var = self._fresh()
+        b_var = self._fresh()
+        self._emit(f"reducer({a_var}: {mlir_scalar}, {b_var}: {mlir_scalar}) {{")
+        self._indent += 1
+        r_var = self._fresh()
+        self._emit(f"{r_var} = {combiner} {a_var}, {b_var} : {mlir_scalar}")
+        self._emit(f"stablehlo.return {r_var} : {mlir_scalar}")
+        self._indent -= 1
+        self._emit("}")
+        self._indent -= 1
+        return var
+
+    @staticmethod
+    def _reduce_init_value(base: str, is_max: bool) -> str:
+        """Return the StableHLO init value literal for reduce-max/min."""
+        if base in ("f32", "f64"):
+            return "0xFF800000" if is_max else "0x7F800000"  # -inf / +inf
+        elif base == "i32":
+            return "-2147483647" if is_max else "2147483647"
+        elif base == "i64":
+            return "-9223372036854775807" if is_max else "9223372036854775807"
+        return "0xFF800000" if is_max else "0x7F800000"
+
+    def _gen_argmax(self, expr: CallExpr, env: dict[str, str]) -> str:
+        """Generate argmax/argmin via variadic reduce with (value, index) pairs."""
+        arg = self._gen_expr(expr.args[0], env)
+        arg_type = self._type_of(expr.args[0])
+        result_type = self._type_of(expr)
+        is_max = expr.callee == "argmax"
+
+        if not isinstance(arg_type, ArrayType):
+            raise MaomiError("codegen: argmax/argmin requires array", "<codegen>", expr.span.line_start, expr.span.col_start)
+
+        bd = self._batch_depth
+
+        if len(expr.args) == 2:
+            axis = expr.args[1].value + bd
+        else:
+            # All-dims: reshape to 1D first, then reduce axis 0
+            total = 1
+            for d in arg_type.dims:
+                total *= d
+            flat_type = ArrayType(arg_type.base, (total,))
+            flat_var = self._fresh()
+            self._emit(
+                f"{flat_var} = stablehlo.reshape {arg} "
+                f": ({_mlir_type(arg_type)}) -> {_mlir_type(flat_type)}"
+            )
+            arg = flat_var
+            arg_type = flat_type
+            axis = bd  # axis 0 (or bd if batched)
+
+        # Generate iota for indices along the reduction axis
+        iota_type = ArrayType("i32", arg_type.dims)
+        iota_var = self._fresh()
+        self._emit(f"{iota_var} = stablehlo.iota dim = {axis} : {_mlir_type(iota_type)}")
+
+        # Init values
+        init_val_str = self._reduce_init_value(arg_type.base, is_max)
+        scalar_val_type = ScalarType(arg_type.base)
+        scalar_idx_type = ScalarType("i32")
+        mlir_val_scalar = _mlir_type(scalar_val_type)
+        mlir_idx_scalar = _mlir_type(scalar_idx_type)
+
+        init_val = self._fresh()
+        self._emit(f"{init_val} = stablehlo.constant dense<{init_val_str}> : {mlir_val_scalar}")
+        init_idx = self._fresh()
+        self._emit(f"{init_idx} = stablehlo.constant dense<0> : {mlir_idx_scalar}")
+
+        # Compute result types for the reduce
+        mlir_result = _mlir_type(result_type)
+        # Value result has same shape but keeps original base type
+        if isinstance(result_type, ScalarType):
+            val_result_type = ScalarType(arg_type.base)
+        else:
+            val_result_type = ArrayType(arg_type.base, result_type.dims)
+        mlir_val_result = _mlir_type(val_result_type)
+
+        # Variadic reduce
+        result_var = self._fresh()
+        cmp = "GT" if is_max else "LT"
+        cmp_kind = "FLOAT" if arg_type.base in ("f32", "f64") else "SIGNED"
+
+        self._emit(
+            f"{result_var}:2 = stablehlo.reduce({arg} init: {init_val}, {iota_var} init: {init_idx}) "
+            f"across dimensions = [{axis}] "
+            f": ({_mlir_type(arg_type)}, {_mlir_type(iota_type)}, {mlir_val_scalar}, {mlir_idx_scalar}) "
+            f"-> ({mlir_val_result}, {mlir_result})"
+        )
+        self._indent += 1
+        a_val = self._fresh()
+        b_val = self._fresh()
+        a_idx = self._fresh()
+        b_idx = self._fresh()
+        self._emit(f"reducer({a_val}: {mlir_val_scalar}, {b_val}: {mlir_val_scalar}, "
+                   f"{a_idx}: {mlir_idx_scalar}, {b_idx}: {mlir_idx_scalar}) {{")
+        self._indent += 1
+        cmp_var = self._fresh()
+        self._emit(f"{cmp_var} = stablehlo.compare {cmp}, {a_val}, {b_val}, {cmp_kind} "
+                   f": ({mlir_val_scalar}, {mlir_val_scalar}) -> tensor<i1>")
+        sel_val = self._fresh()
+        self._emit(f"{sel_val} = stablehlo.select {cmp_var}, {a_val}, {b_val} "
+                   f": (tensor<i1>, {mlir_val_scalar}, {mlir_val_scalar}) -> {mlir_val_scalar}")
+        sel_idx = self._fresh()
+        self._emit(f"{sel_idx} = stablehlo.select {cmp_var}, {a_idx}, {b_idx} "
+                   f": (tensor<i1>, {mlir_idx_scalar}, {mlir_idx_scalar}) -> {mlir_idx_scalar}")
+        self._emit(f"stablehlo.return {sel_val}, {sel_idx} : {mlir_val_scalar}, {mlir_idx_scalar}")
+        self._indent -= 1
+        self._emit("}")
+        self._indent -= 1
+
+        # Return indices only
+        return f"{result_var}#1"
+
     def _gen_transpose(self, expr: CallExpr, env: dict[str, str]) -> str:
         arg = self._gen_expr(expr.args[0], env)
         arg_type = self._type_of(expr.args[0])
@@ -1168,6 +1364,18 @@ class StableHLOCodegen:
 
         var = self._fresh()
         self._emit(f"{var} = stablehlo.divide {sum_var}, {count_var} : {mlir_result}")
+        return var
+
+    # -- Cast codegen --
+
+    def _gen_cast(self, expr: CastExpr, env: dict[str, str]) -> str:
+        val = self._gen_expr(expr.expr, env)
+        src_type = self._type_of(expr.expr)
+        dst_type = self._type_of(expr)
+        if _types_equal(src_type, dst_type):
+            return val
+        var = self._fresh()
+        self._emit(f"{var} = stablehlo.convert {val} : ({_mlir_type(src_type)}) -> {_mlir_type(dst_type)}")
         return var
 
     # -- Struct codegen --
@@ -2553,6 +2761,98 @@ class StableHLOCodegen:
 
         # Result is the output buffer (index 2 in while results)
         return f"{while_result}#2"
+
+    # -- Fold codegen --
+
+    def _gen_fold(self, expr: FoldExpr, env: dict[str, str]) -> str:
+        init_val = self._gen_expr(expr.init, env)
+        seq_vals = [self._gen_expr(s, env) for s in expr.sequences]
+
+        init_type = self._type_of(expr.init)
+        seq_types = [self._type_of(s) for s in expr.sequences]
+
+        for st in seq_types:
+            if not isinstance(st, ArrayType):
+                raise MaomiError("codegen: fold sequence must be array", "<codegen>", 0, 0)
+
+        bd = self._batch_depth
+        iter_axis = bd
+
+        seq_len = seq_types[0].dims[iter_axis]
+        if isinstance(seq_len, str):
+            raise MaomiError(f"codegen: fold requires concrete sequence length, got '{seq_len}'", "<codegen>", 0, 0)
+
+        elem_types: list[MaomiType] = []
+        for st in seq_types:
+            remaining = st.dims[:iter_axis] + st.dims[iter_axis + 1:]
+            if len(remaining) == 0:
+                elem_types.append(ScalarType(st.base))
+            else:
+                elem_types.append(ArrayType(st.base, remaining))
+
+        mlir_init = _mlir_type(init_type)
+        mlir_seqs = [_mlir_type(st) for st in seq_types]
+        mlir_i32 = "tensor<i32>"
+
+        counter_var = self._fresh()
+        self._emit(f"{counter_var} = stablehlo.constant dense<0> : {mlir_i32}")
+
+        n_seqs = len(seq_vals)
+        uid = self._counter
+        ctr_name = f"foldC{uid}"
+        carry_name = f"foldK{uid}"
+        seq_names = [f"foldS{uid}_{i}" for i in range(n_seqs)]
+
+        arg_names = [ctr_name, carry_name] + seq_names
+        init_vals_list = [counter_var, init_val] + seq_vals
+        arg_types = [mlir_i32, mlir_init] + mlir_seqs
+        n_args = len(arg_names)
+
+        while_result = self._fresh()
+        header_parts = ", ".join(
+            f"%{arg_names[i]} = {init_vals_list[i]}" for i in range(n_args)
+        )
+        types_str = ", ".join(arg_types)
+        self._emit(f"{while_result}:{n_args} = stablehlo.while({header_parts}) : {types_str}")
+
+        # Cond region
+        self._emit("cond {")
+        self._indent += 1
+        limit_v = self._fresh()
+        self._emit(f"{limit_v} = stablehlo.constant dense<{seq_len}> : {mlir_i32}")
+        c_cmp = self._fresh()
+        self._emit(f"{c_cmp} = stablehlo.compare LT, %{ctr_name}, {limit_v}, SIGNED : ({mlir_i32}, {mlir_i32}) -> tensor<i1>")
+        self._emit(f"stablehlo.return {c_cmp} : tensor<i1>")
+        self._indent -= 1
+
+        # Body region
+        self._emit("} do {")
+        self._indent += 1
+
+        body_env = dict(env)
+        body_env[expr.carry_var] = f"%{carry_name}"
+        for i, (ev, st, et) in enumerate(zip(expr.elem_vars, seq_types, elem_types)):
+            if _block_references_var(expr.body, ev):
+                b_elem = self._slice_element(f"%{seq_names[i]}", f"%{ctr_name}", st, et, iter_axis=iter_axis)
+                body_env[ev] = b_elem
+
+        new_carry = self._gen_block(expr.body, body_env)
+
+        # Update counter
+        one_v = self._fresh()
+        self._emit(f"{one_v} = stablehlo.constant dense<1> : {mlir_i32}")
+        new_counter = self._fresh()
+        self._emit(f"{new_counter} = stablehlo.add %{ctr_name}, {one_v} : {mlir_i32}")
+
+        # Return new values
+        new_vals = [new_counter, new_carry] + [f"%{sn}" for sn in seq_names]
+        vals_str = ", ".join(new_vals)
+        self._emit(f"stablehlo.return {vals_str} : {types_str}")
+        self._indent -= 1
+        self._emit("}")
+
+        # Result is the final carry (index 1)
+        return f"{while_result}#1"
 
     # -- Scan gradient codegen --
 

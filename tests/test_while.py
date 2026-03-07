@@ -59,7 +59,7 @@ class TestWhileParsing:
     def test_bounded_while(self):
         prog = parse("""
             fn f(x: f32) -> f32 {
-                while s in x max 100 { s > 0.0 } do { s - 1.0 }
+                while s in x limit 100{ s > 0.0 } do { s - 1.0 }
             }
         """)
         fn = prog.functions[0]
@@ -119,7 +119,7 @@ class TestWhileTypeCheck:
     def test_bounded_while(self):
         errors = typecheck("""
             fn f(x: f32) -> f32 {
-                while s in x max 50 { s > 0.01 } do { s * 0.5 }
+                while s in x limit 50{ s > 0.01 } do { s * 0.5 }
             }
         """)
         assert errors == []
@@ -194,7 +194,7 @@ class TestWhileCodegen:
 class TestWhileAD:
     def test_unbounded_while_grad_errors(self):
         """grad through unbounded while should produce a clear error."""
-        with pytest.raises(MaomiError, match="max iterations"):
+        with pytest.raises(MaomiError, match="without a limit"):
             ad_codegen("""
                 fn f(x: f32) -> f32 {
                     let result = while s in x { s > 0.01 } do { s * 0.5 };
@@ -206,7 +206,7 @@ class TestWhileAD:
         """grad through bounded while should compile (emits two while loops)."""
         out = ad_codegen("""
             fn f(x: f32) -> f32 {
-                let result = while s in x max 100 { s > 0.01 } do { s * 0.5 };
+                let result = while s in x limit 100{ s > 0.01 } do { s * 0.5 };
                 grad(result, x)
             }
         """)
@@ -218,7 +218,7 @@ class TestWhileAD:
         """Bounded while grad should use dynamic_update_slice for trajectory."""
         out = ad_codegen("""
             fn f(x: f32) -> f32 {
-                let result = while s in x max 50 { s > 0.01 } do { s * 0.5 };
+                let result = while s in x limit 50{ s > 0.01 } do { s * 0.5 };
                 grad(result, x)
             }
         """)

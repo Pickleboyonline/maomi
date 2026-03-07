@@ -63,7 +63,7 @@
       }
     },
     "builtin-functions": {
-      "match": "\\b(exp|log|tanh|sqrt|abs|mean|sum|callback|transpose)\\b(?=\\s*\\()",
+      "match": "\\b(exp|log|tanh|sqrt|abs|mean|sum|max|min|argmax|argmin|callback|transpose|reshape|concat|iota|stop_gradient|where|conv2d|max_pool|avg_pool|rng_key|rng_split|rng_uniform|rng_normal)\\b(?=\\s*\\()",
       "name": "support.function.builtin.maomi"
     },
     "keywords-import": {
@@ -71,11 +71,11 @@
       "name": "keyword.control.import.maomi"
     },
     "keywords-control": {
-      "match": "\\b(if|else|scan|map|in|with)\\b",
+      "match": "\\b(if|else|scan|map|in|with|while|do|limit|fold)\\b",
       "name": "keyword.control.maomi"
     },
     "keyword-grad": {
-      "match": "\\b(grad)\\b",
+      "match": "\\b(grad|cast)\\b",
       "name": "keyword.other.grad.maomi"
     },
     "keyword-let": {

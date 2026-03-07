@@ -179,6 +179,23 @@ class GradExpr:
 
 
 @dataclass
+class CastExpr:
+    expr: Expr
+    target_type: str  # "f32", "f64", "i32", "i64", "bool"
+    span: Span
+
+
+@dataclass
+class FoldExpr:
+    carry_var: str
+    elem_vars: list[str]
+    init: Expr
+    sequences: list[Expr]
+    body: Block
+    span: Span
+
+
+@dataclass
 class StructLiteral:
     name: str
     fields: list[tuple[str, Expr]]
@@ -314,7 +331,7 @@ class _ReduceSum:
 
 
 # Union types for convenience
-Expr = IntLiteral | FloatLiteral | BoolLiteral | Identifier | UnaryOp | BinOp | IfExpr | CallExpr | ScanExpr | WhileExpr | MapExpr | GradExpr | StructLiteral | FieldAccess | WithExpr | IndexExpr | _ScanGrad | _WhileGrad | _IndexGrad | _GatherGrad | _Conv2dGrad | _MaxPoolGrad | _AvgPoolGrad | _BroadcastExpr
+Expr = IntLiteral | FloatLiteral | BoolLiteral | Identifier | UnaryOp | BinOp | IfExpr | CallExpr | ScanExpr | WhileExpr | MapExpr | GradExpr | CastExpr | FoldExpr | StructLiteral | FieldAccess | WithExpr | IndexExpr | _ScanGrad | _WhileGrad | _IndexGrad | _GatherGrad | _Conv2dGrad | _MaxPoolGrad | _AvgPoolGrad | _BroadcastExpr
 Stmt = LetStmt | ExprStmt
 
 
