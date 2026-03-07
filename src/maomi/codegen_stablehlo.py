@@ -96,7 +96,10 @@ def _mlir_type(t: MaomiType) -> str:
         for d in t.dims:
             if isinstance(d, str):
                 raise MaomiError(
-                    f"codegen: unresolved symbolic dimension '{d}' — all dimensions must be concrete",
+                    f"codegen: unresolved symbolic dimension '{d}' in type '{t}'. "
+                    f"XLA requires concrete shapes to compile — symbolic dimensions are checked "
+                    f"during type checking but must be resolved to integers before code generation. "
+                    f"Ensure all function parameters have concrete dimensions at the entry point.",
                     "<codegen>", 0, 0,
                 )
         shape = "x".join(str(d) for d in t.dims)

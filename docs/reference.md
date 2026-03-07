@@ -48,7 +48,7 @@ f32[B, 128]     // symbolic batch dimension B, concrete feature dimension 128
 bool[H, W, C]   // 3D boolean array with symbolic dims
 ```
 
-Symbolic dimensions are valid in type annotations for type checking, but codegen requires all dimensions to be concrete.
+Symbolic dimensions are valid in type annotations for type checking, but codegen requires all dimensions to be concrete. This is by design — XLA (the compilation backend) requires concrete shapes to generate optimized machine code. Symbolic dims let you express shape relationships (e.g. that two parameters share a batch dimension) that the type checker verifies, but they must resolve to concrete integers by the time code is generated. This matches how JAX works: `jax.jit` recompiles for each new input shape.
 
 ### Key Type
 
@@ -719,7 +719,7 @@ The compiler is written in Python. Source lives in `src/maomi/`. Key files:
 
 ## Known Limitations
 
-- **Concrete dimensions required for codegen.** Symbolic dimensions (`f32[B, 128]`) are valid in type annotations but produce an error during code generation. All dimensions must be concrete integers to compile.
+- **Concrete dimensions required for codegen.** Symbolic dimensions (`f32[B, 128]`) are valid in type annotations for expressing shape relationships, but produce an error during code generation. All dimensions must be concrete integers to compile. This is inherent to XLA — it needs static shapes to make tiling, fusion, layout, and memory allocation decisions. JAX works the same way (`jax.jit` recompiles per input shape). Symbolic dims are a type-checking convenience for verifying shape consistency, not a runtime feature.
 - **`map` bodies must be elementwise.** No cross-element dependencies allowed in `map` bodies.
 - **Slice bounds must be literals.** `x[1:3]` works, but `x[a:b]` where `a` and `b` are variables does not.
 - **`callback` is a no-op.** The `callback` builtin compiles but does not execute host callbacks at runtime.
