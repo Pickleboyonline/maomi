@@ -8,14 +8,15 @@ fn sigmoid(x: f32[..]) -> f32[..] {
     1.0 / (1.0 + exp(0.0 - x))
 }
 
-/// Softmax for 1D vectors. Use with map for batched input.
-fn softmax(x: f32[N]) -> f32[N] {
-    let e = exp(x - max(x));
-    e / sum(e)
+/// Softmax along a specific axis (numerically stable).
+fn softmax(x: f32[..], comptime axis: i32) -> f32[..] {
+    let m = max(x, axis=axis, keepdims=true);
+    let e = exp(x - m);
+    e / sum(e, axis=axis, keepdims=true)
 }
 
-/// Log-softmax for 1D vectors (numerically stable).
-fn log_softmax(x: f32[N]) -> f32[N] {
-    let m = max(x);
-    x - m - log(sum(exp(x - m)))
+/// Log-softmax along a specific axis (numerically stable).
+fn log_softmax(x: f32[..], comptime axis: i32) -> f32[..] {
+    let m = max(x, axis=axis, keepdims=true);
+    x - m - log(sum(exp(x - m), axis=axis, keepdims=true))
 }

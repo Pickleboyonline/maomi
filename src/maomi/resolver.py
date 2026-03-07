@@ -184,7 +184,8 @@ def _rewrite_expr(expr: Expr, rename_map: dict[str, str]) -> Expr:
         case CallExpr(callee=callee, args=args, span=span):
             new_callee = rename_map.get(callee, callee)
             new_args = [_rewrite_expr(a, rename_map) for a in args]
-            return CallExpr(new_callee, new_args, span)
+            new_named = [(n, _rewrite_expr(v, rename_map)) for n, v in expr.named_args]
+            return CallExpr(new_callee, new_args, span, named_args=new_named)
         case BinOp(op=op, left=left, right=right, span=span):
             return BinOp(op, _rewrite_expr(left, rename_map),
                          _rewrite_expr(right, rename_map), span)

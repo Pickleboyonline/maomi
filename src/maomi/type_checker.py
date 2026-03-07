@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from .ast_nodes import (
     Program,
     FnDef,
@@ -35,6 +35,73 @@ from .types import MaomiType, ScalarType, ArrayType, StructType, WildcardArrayTy
 from .errors import MaomiTypeError
 
 
+def _substitute_comptime(block: Block, subst: dict[str, IntLiteral]) -> None:
+    """Replace Identifier nodes matching comptime param names with IntLiteral values in-place."""
+    def walk_expr(expr):
+        if expr is None:
+            return expr
+        if isinstance(expr, Identifier) and expr.name in subst:
+            return subst[expr.name]
+        if isinstance(expr, BinOp):
+            expr.left = walk_expr(expr.left)
+            expr.right = walk_expr(expr.right)
+        elif isinstance(expr, UnaryOp):
+            expr.operand = walk_expr(expr.operand)
+        elif isinstance(expr, CallExpr):
+            expr.args = [walk_expr(a) for a in expr.args]
+            expr.named_args = [(n, walk_expr(v)) for n, v in expr.named_args]
+        elif isinstance(expr, IfExpr):
+            expr.condition = walk_expr(expr.condition)
+            walk_block(expr.then_block)
+            walk_block(expr.else_block)
+        elif isinstance(expr, GradExpr):
+            expr.expr = walk_expr(expr.expr)
+        elif isinstance(expr, CastExpr):
+            expr.expr = walk_expr(expr.expr)
+        elif isinstance(expr, IndexExpr):
+            expr.base = walk_expr(expr.base)
+            for ic in expr.indices:
+                ic.value = walk_expr(ic.value)
+                if ic.end is not None:
+                    ic.end = walk_expr(ic.end)
+        elif isinstance(expr, StructLiteral):
+            expr.fields = [(n, walk_expr(v)) for n, v in expr.fields]
+        elif isinstance(expr, FieldAccess):
+            expr.expr = walk_expr(expr.expr)
+        elif isinstance(expr, WithExpr):
+            expr.base = walk_expr(expr.base)
+            expr.updates = [(path, walk_expr(v)) for path, v in expr.updates]
+        elif isinstance(expr, ScanExpr):
+            expr.init = walk_expr(expr.init)
+            expr.sequence = walk_expr(expr.sequence)
+            walk_block(expr.body)
+        elif isinstance(expr, FoldExpr):
+            expr.init = walk_expr(expr.init)
+            expr.sequence = walk_expr(expr.sequence)
+            walk_block(expr.body)
+        elif isinstance(expr, MapExpr):
+            expr.sequence = walk_expr(expr.sequence)
+            walk_block(expr.body)
+        elif isinstance(expr, WhileExpr):
+            expr.init = walk_expr(expr.init)
+            walk_block(expr.condition_block)
+            walk_block(expr.body)
+        elif isinstance(expr, ArrayLiteral):
+            expr.elements = [walk_expr(e) for e in expr.elements]
+        return expr
+
+    def walk_block(block):
+        for stmt in block.stmts:
+            if isinstance(stmt, LetStmt):
+                stmt.value = walk_expr(stmt.value)
+            elif isinstance(stmt, ExprStmt):
+                stmt.expr = walk_expr(stmt.expr)
+        if block.expr is not None:
+            block.expr = walk_expr(block.expr)
+
+    walk_block(block)
+
+
 # -- Function signatures --
 
 
@@ -43,6 +110,7 @@ class FnSignature:
     param_names: list[str]
     param_types: list[MaomiType]
     return_type: MaomiType
+    comptime: list[bool] = field(default_factory=list)
 
 
 NUMERIC_BASES = {"f32", "f64", "i32", "i64"}
@@ -199,7 +267,9 @@ class TypeChecker:
 
     @staticmethod
     def _is_generic_sig(sig: FnSignature) -> bool:
-        """True if function has wildcard or symbolic types needing monomorphization."""
+        """True if function has wildcard, symbolic types, or comptime params needing monomorphization."""
+        if sig.comptime and any(sig.comptime):
+            return True
         for pt in sig.param_types:
             if isinstance(pt, WildcardArrayType):
                 return True
@@ -211,6 +281,33 @@ class TypeChecker:
         if isinstance(rt, ArrayType) and any(isinstance(d, str) for d in rt.dims):
             return True
         return False
+
+    def _resolve_named_args(self, expr, param_names: list[str]) -> None:
+        """Resolve named arguments to positional, mutating expr.args in place."""
+        if not expr.named_args:
+            return
+        for name, value in expr.named_args:
+            if name not in param_names:
+                self._error(
+                    f"unknown parameter name '{name}'",
+                    value.span.line_start, value.span.col_start,
+                )
+                continue
+            idx = param_names.index(name)
+            if idx < len(expr.args):
+                self._error(
+                    f"'{name}' already provided as positional argument",
+                    value.span.line_start, value.span.col_start,
+                )
+                continue
+            # Extend args list to fit, then place at correct index
+            while len(expr.args) <= idx:
+                expr.args.append(None)
+            expr.args[idx] = value
+        expr.named_args = []
+        # Remove trailing Nones (optional args not provided)
+        while expr.args and expr.args[-1] is None:
+            expr.args.pop()
 
     def _error(self, msg: str, line: int, col: int):
         self.errors.append(MaomiTypeError(msg, self.filename, line, col))
@@ -229,7 +326,8 @@ class TypeChecker:
         ret = self._resolve_type_annotation(fn.return_type)
         if ret is None:
             return None
-        return FnSignature(param_names, param_types, ret)
+        comptime_flags = [p.comptime for p in fn.params]
+        return FnSignature(param_names, param_types, ret, comptime=comptime_flags)
 
     _BASE_TYPES = {"f32", "f64", "i32", "i64", "bool"}
 
@@ -1076,6 +1174,9 @@ class TypeChecker:
             )
             return None
 
+        # Resolve named arguments to positional
+        self._resolve_named_args(expr, sig.param_names)
+
         if len(expr.args) != len(sig.param_types):
             self._error(
                 f"function '{expr.callee}' expects {len(sig.param_types)} arguments, got {len(expr.args)}",
@@ -1118,10 +1219,12 @@ class TypeChecker:
         return ret
 
     def _check_reduction(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
-        """Check sum(x) or sum(x, axis) / mean(x) or mean(x, axis)."""
-        if len(expr.args) < 1 or len(expr.args) > 2:
+        """Check sum(x) / sum(x, axis) / sum(x, axis=1, keepdims=true) etc."""
+        self._resolve_named_args(expr, ["x", "axis", "keepdims"])
+
+        if len(expr.args) < 1 or len(expr.args) > 3:
             self._error(
-                f"{expr.callee} expects 1 or 2 arguments",
+                f"{expr.callee} expects 1 to 3 arguments",
                 expr.span.line_start, expr.span.col_start,
             )
             return None
@@ -1132,7 +1235,7 @@ class TypeChecker:
 
         # Lift scalar arg: sum/mean of scalar is itself
         if isinstance(arg_type, ScalarType):
-            if len(expr.args) == 2:
+            if len(expr.args) >= 2:
                 self._error(
                     f"{expr.callee} with axis requires an array argument",
                     expr.span.line_start, expr.span.col_start,
@@ -1147,11 +1250,24 @@ class TypeChecker:
             )
             return None
 
+        # Check keepdims (3rd arg)
+        keepdims = False
+        if len(expr.args) == 3:
+            kd_arg = expr.args[2]
+            self._infer(kd_arg, env)
+            if not isinstance(kd_arg, BoolLiteral):
+                self._error(
+                    f"{expr.callee} keepdims must be true or false",
+                    expr.span.line_start, expr.span.col_start,
+                )
+                return None
+            keepdims = kd_arg.value
+
         if len(expr.args) == 1:
             # Reduce all dims → scalar
             return ScalarType(arg_type.base)
 
-        # 2 args: axis-specific reduction
+        # 2+ args: axis-specific reduction
         axis_arg = expr.args[1]
         self._infer(axis_arg, env)
         if not isinstance(axis_arg, IntLiteral):
@@ -1170,8 +1286,12 @@ class TypeChecker:
             )
             return None
 
-        # Remove the reduced dimension
-        new_dims = tuple(d for i, d in enumerate(arg_type.dims) if i != axis)
+        if keepdims:
+            # Keep reduced dim as size 1
+            new_dims = tuple(1 if i == axis else d for i, d in enumerate(arg_type.dims))
+        else:
+            # Remove the reduced dimension
+            new_dims = tuple(d for i, d in enumerate(arg_type.dims) if i != axis)
         if len(new_dims) == 0:
             return ScalarType(arg_type.base)
         return ArrayType(arg_type.base, new_dims)
@@ -1565,14 +1685,17 @@ class TypeChecker:
         return ArrayType(input_type.base, (N, C, OH, OW))
 
     def _check_generic_call(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
-        """Handle calls to generic (wildcard / symbolic-dim) functions via monomorphization."""
+        """Handle calls to generic (wildcard / symbolic-dim / comptime) functions via monomorphization."""
         import copy
-        from .ast_nodes import Dim, Span as ASTSpan
+        from .ast_nodes import Dim, Span as ASTSpan, IntLiteral
 
         generic_fn = self._generic_fns[expr.callee]
         generic_sig = self._resolve_signature(generic_fn)
         if generic_sig is None:
             return None
+
+        # Resolve named arguments to positional
+        self._resolve_named_args(expr, generic_sig.param_names)
 
         # Check arg count
         if len(expr.args) != len(generic_sig.param_types):
@@ -1582,6 +1705,19 @@ class TypeChecker:
             )
             return None
 
+        # Validate comptime args are integer literals
+        comptime_values: dict[str, IntLiteral] = {}
+        if generic_sig.comptime:
+            for i, is_ct in enumerate(generic_sig.comptime):
+                if is_ct:
+                    if not isinstance(expr.args[i], IntLiteral):
+                        self._error(
+                            f"comptime parameter '{generic_sig.param_names[i]}' requires an integer literal",
+                            expr.args[i].span.line_start, expr.args[i].span.col_start,
+                        )
+                        return None
+                    comptime_values[generic_sig.param_names[i]] = expr.args[i]
+
         # Infer arg types, unify symbolic dims, resolve wildcard shapes
         substitution: dict[str, int | str] = {}
         wildcard_shape: tuple[int | str, ...] | None = None
@@ -1589,6 +1725,12 @@ class TypeChecker:
         arg_types: list[MaomiType | None] = []
 
         for i, (arg, param_type) in enumerate(zip(expr.args, generic_sig.param_types)):
+            # Skip comptime params for type unification — they're literals, not arrays
+            if generic_sig.comptime and i < len(generic_sig.comptime) and generic_sig.comptime[i]:
+                arg_type = self._infer(arg, env)
+                arg_types.append(arg_type)
+                continue
+
             arg_type = self._infer(arg, env)
             arg_types.append(arg_type)
             if arg_type is None:
@@ -1643,8 +1785,10 @@ class TypeChecker:
 
         # Build monomorphized name from all resolved shapes/dims
         shape_parts: list[str] = []
-        for at in arg_types:
-            if at is None:
+        for i, at in enumerate(arg_types):
+            if generic_sig.comptime and i < len(generic_sig.comptime) and generic_sig.comptime[i]:
+                shape_parts.append(f"ct{expr.args[i].value}")
+            elif at is None:
                 shape_parts.append("?")
             elif isinstance(at, ArrayType):
                 shape_parts.append("x".join(str(d) for d in at.dims))
@@ -1652,7 +1796,7 @@ class TypeChecker:
                 shape_parts.append(at.base)
             else:
                 shape_parts.append(str(at))
-        mono_name = f"{expr.callee}${','.join(shape_parts)}"
+        mono_name = f"{expr.callee}${'_'.join(shape_parts)}"
 
         # Create monomorphized copy if needed
         if mono_name not in self.fn_table:
@@ -1695,6 +1839,11 @@ class TypeChecker:
                         new_dims.append(d)
                 mono_fn.return_type = TypeAnnotation(rta.base, new_dims, rta.span)
 
+            # Substitute comptime params with literals in the body, then remove from param list
+            if comptime_values:
+                _substitute_comptime(mono_fn.body, comptime_values)
+                mono_fn.params = [p for p in mono_fn.params if not p.comptime]
+
             # Register and type-check the monomorphized function
             sig = self._resolve_signature(mono_fn)
             if sig is None:
@@ -1708,6 +1857,10 @@ class TypeChecker:
 
         # Rewrite the call to target the monomorphized function
         expr.callee = mono_name
+        # Remove comptime args from call site — they're baked into the mono function body
+        if comptime_values:
+            expr.args = [a for i, a in enumerate(expr.args)
+                         if not (generic_sig.comptime and i < len(generic_sig.comptime) and generic_sig.comptime[i])]
         return concrete_ret
 
     def _check_rng_call(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:

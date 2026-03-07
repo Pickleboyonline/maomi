@@ -714,7 +714,8 @@ class ADTransform:
                 return node
             case CallExpr(callee=callee, args=args):
                 new_args = [self._substitute(a, subst) for a in args]
-                node = CallExpr(callee, new_args, expr.span)
+                new_named = [(n, self._substitute(v, subst)) for n, v in expr.named_args]
+                node = CallExpr(callee, new_args, expr.span, named_args=new_named)
                 self._copy_type(expr, node)
                 return node
             case IfExpr(condition=cond, then_block=then_b, else_block=else_b):
@@ -1266,20 +1267,27 @@ class ADTransform:
         arg_name = var_map[id(arg)]
         arg_type = self._type_of(arg)
 
-        has_axis = len(args) == 2
+        has_axis = len(args) >= 2
         axis = args[1].value if has_axis else None
+        keepdims = (len(args) == 3
+                    and isinstance(args[2], BoolLiteral)
+                    and args[2].value)
 
         if callee == "mean":
             if isinstance(arg_type, ArrayType):
                 if has_axis:
-                    # Axis-specific mean: adj / axis_size, broadcast back with explicit dims
+                    # Axis-specific mean: adj / axis_size, broadcast back
                     axis_size = arg_type.dims[axis]
                     if isinstance(axis_size, str):
                         raise MaomiError(f"grad: cannot differentiate mean with symbolic dim '{axis_size}'", "<ad>", 0, 0)
                     scaled = self._make_binop("/", adj, self._make_float(float(axis_size)))
-                    ndim = len(arg_type.dims)
-                    broadcast_dims = tuple(i for i in range(ndim) if i != axis)
-                    broadcast = _BroadcastExpr(scaled, tuple(arg_type.dims), _DUMMY_SPAN, broadcast_dims=broadcast_dims)
+                    if keepdims:
+                        # adj already has same rank with size-1 dim; size-1 broadcasting handles it
+                        broadcast = _BroadcastExpr(scaled, tuple(arg_type.dims), _DUMMY_SPAN)
+                    else:
+                        ndim = len(arg_type.dims)
+                        broadcast_dims = tuple(i for i in range(ndim) if i != axis)
+                        broadcast = _BroadcastExpr(scaled, tuple(arg_type.dims), _DUMMY_SPAN, broadcast_dims=broadcast_dims)
                     self.type_map[id(broadcast)] = arg_type
                     self._accumulate(adjoints, arg_name, broadcast)
                 else:
@@ -1300,10 +1308,14 @@ class ADTransform:
         elif callee == "sum":
             if isinstance(arg_type, ArrayType):
                 if has_axis:
-                    # Axis-specific sum: broadcast adj back by inserting reduced dim
-                    ndim = len(arg_type.dims)
-                    broadcast_dims = tuple(i for i in range(ndim) if i != axis)
-                    broadcast = _BroadcastExpr(adj, tuple(arg_type.dims), _DUMMY_SPAN, broadcast_dims=broadcast_dims)
+                    if keepdims:
+                        # adj already has same rank with size-1 dim; size-1 broadcasting handles it
+                        broadcast = _BroadcastExpr(adj, tuple(arg_type.dims), _DUMMY_SPAN)
+                    else:
+                        # Axis-specific sum: broadcast adj back by inserting reduced dim
+                        ndim = len(arg_type.dims)
+                        broadcast_dims = tuple(i for i in range(ndim) if i != axis)
+                        broadcast = _BroadcastExpr(adj, tuple(arg_type.dims), _DUMMY_SPAN, broadcast_dims=broadcast_dims)
                     self.type_map[id(broadcast)] = arg_type
                     self._accumulate(adjoints, arg_name, broadcast)
                 else:
@@ -1329,8 +1341,11 @@ class ADTransform:
 
             # Broadcast result back to input shape
             if has_axis:
-                broadcast_dims = tuple(i for i in range(ndim) if i != axis)
-                result_bc = _BroadcastExpr(node_ref, tuple(arg_type.dims), _DUMMY_SPAN, broadcast_dims=broadcast_dims)
+                if keepdims:
+                    result_bc = _BroadcastExpr(node_ref, tuple(arg_type.dims), _DUMMY_SPAN)
+                else:
+                    broadcast_dims = tuple(i for i in range(ndim) if i != axis)
+                    result_bc = _BroadcastExpr(node_ref, tuple(arg_type.dims), _DUMMY_SPAN, broadcast_dims=broadcast_dims)
             else:
                 result_bc = _BroadcastExpr(node_ref, tuple(arg_type.dims), _DUMMY_SPAN)
             self.type_map[id(result_bc)] = arg_type
@@ -1347,7 +1362,9 @@ class ADTransform:
                 axis_lit = IntLiteral(axis, _DUMMY_SPAN)
                 self.type_map[id(axis_lit)] = ScalarType("i32")
                 counts = CallExpr("sum", [indicators, axis_lit], _DUMMY_SPAN)
-                count_type = self._type_of(node)  # same shape as reduced result
+                # count_type: without keepdims, same as reduced result
+                reduced_dims = tuple(d for i, d in enumerate(arg_type.dims) if i != axis)
+                count_type = ArrayType(arg_type.base, reduced_dims) if reduced_dims else ScalarType(arg_type.base)
             else:
                 counts = CallExpr("sum", [indicators], _DUMMY_SPAN)
                 count_type = ScalarType(arg_type.base)
@@ -1355,8 +1372,14 @@ class ADTransform:
 
             # Broadcast adj and counts back to input shape
             if has_axis:
-                adj_bc = _BroadcastExpr(adj, tuple(arg_type.dims), _DUMMY_SPAN, broadcast_dims=broadcast_dims)
-                counts_bc = _BroadcastExpr(counts, tuple(arg_type.dims), _DUMMY_SPAN, broadcast_dims=broadcast_dims)
+                if keepdims:
+                    adj_bc = _BroadcastExpr(adj, tuple(arg_type.dims), _DUMMY_SPAN)
+                    counts_bc = _BroadcastExpr(counts, tuple(arg_type.dims), _DUMMY_SPAN,
+                                               broadcast_dims=tuple(i for i in range(ndim) if i != axis))
+                else:
+                    broadcast_dims = tuple(i for i in range(ndim) if i != axis)
+                    adj_bc = _BroadcastExpr(adj, tuple(arg_type.dims), _DUMMY_SPAN, broadcast_dims=broadcast_dims)
+                    counts_bc = _BroadcastExpr(counts, tuple(arg_type.dims), _DUMMY_SPAN, broadcast_dims=broadcast_dims)
             else:
                 adj_bc = _BroadcastExpr(adj, tuple(arg_type.dims), _DUMMY_SPAN)
                 counts_bc = _BroadcastExpr(counts, tuple(arg_type.dims), _DUMMY_SPAN)
@@ -2085,7 +2108,38 @@ class ADTransform:
                     result_type = ArrayType(result_type.base, new_dims)
                 self.type_map[id(node)] = result_type
                 result = node
-            return result
+            # After removing extra leading dims, may still need size-1 reduction
+            adj_type = result_type
+            adj_dims = result_type.dims if isinstance(result_type, ArrayType) else ()
+            if adj_dims == op_dims:
+                return result
+            adj = result
+
+        # Size-1 broadcasting: same rank but operand has size-1 dims
+        # e.g. adj: f32[4, 8], operand: f32[4, 1] → sum(adj, axis=1, keepdims=true)
+        if len(adj_dims) == len(op_dims):
+            result = adj
+            result_type = adj_type
+            # Find axes where operand has size 1 but adj has size > 1
+            reduce_axes = []
+            for i in range(len(adj_dims)):
+                if op_dims[i] == 1 and adj_dims[i] != 1:
+                    reduce_axes.append(i)
+            if reduce_axes:
+                # Reduce each axis with keepdims=true to preserve rank
+                for ax in reduce_axes:
+                    axis_arg = IntLiteral(ax, _DUMMY_SPAN)
+                    self.type_map[id(axis_arg)] = ScalarType("i32")
+                    kd_arg = BoolLiteral(True, _DUMMY_SPAN)
+                    self.type_map[id(kd_arg)] = ScalarType("bool")
+                    node = CallExpr("sum", [result, axis_arg, kd_arg], _DUMMY_SPAN)
+                    # Update result_type: replace reduced dim with 1
+                    cur_dims = result_type.dims
+                    new_dims = tuple(1 if i == ax else d for i, d in enumerate(cur_dims))
+                    result_type = ArrayType(result_type.base, new_dims)
+                    self.type_map[id(node)] = result_type
+                    result = node
+                return result
 
         return adj
 

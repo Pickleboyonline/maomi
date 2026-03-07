@@ -107,7 +107,7 @@ class TestNnSoftmax:
     def test_softmax_1d(self):
         out = compile_ok("""
             import nn;
-            fn main(x: f32[5]) -> f32[5] { nn.softmax(x) }
+            fn main(x: f32[5]) -> f32[5] { nn.softmax(x, axis=0) }
         """)
         assert "stablehlo.exponential" in out
         assert "tensor<5xf32>" in out
@@ -115,9 +115,17 @@ class TestNnSoftmax:
     def test_softmax_different_size(self):
         out = compile_ok("""
             import nn;
-            fn main(x: f32[10]) -> f32[10] { nn.softmax(x) }
+            fn main(x: f32[10]) -> f32[10] { nn.softmax(x, axis=0) }
         """)
         assert "tensor<10xf32>" in out
+
+    def test_softmax_2d(self):
+        out = compile_ok("""
+            import nn;
+            fn main(x: f32[4, 8]) -> f32[4, 8] { nn.softmax(x, axis=1) }
+        """)
+        assert "stablehlo.exponential" in out
+        assert "tensor<4x8xf32>" in out
 
 
 # -- nn.log_softmax --
@@ -126,7 +134,7 @@ class TestNnLogSoftmax:
     def test_log_softmax_1d(self):
         out = compile_ok("""
             import nn;
-            fn main(x: f32[5]) -> f32[5] { nn.log_softmax(x) }
+            fn main(x: f32[5]) -> f32[5] { nn.log_softmax(x, axis=0) }
         """)
         assert "stablehlo.log" in out
         assert "stablehlo.exponential" in out

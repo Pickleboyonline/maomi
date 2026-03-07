@@ -952,13 +952,21 @@ class StableHLOCodegen:
         if not isinstance(arg_type, ArrayType):
             return arg  # mean of scalar is itself
 
+        keepdims = self._has_keepdims(expr)
+
         # Axis-specific or all-dims reduction
-        if len(expr.args) == 2:
+        if len(expr.args) >= 2:
             axis = expr.args[1].value
             bd = self._batch_depth
             actual_axis = bd + axis
+            # For keepdims, reduce to intermediate type first
+            if keepdims:
+                reduced_dims = tuple(d for i, d in enumerate(arg_type.dims) if i != axis)
+                reduced_type = ArrayType(arg_type.base, reduced_dims) if reduced_dims else ScalarType(arg_type.base)
+            else:
+                reduced_type = result_type
             # Sum along specific axis
-            sum_var = self._gen_reduce_sum_single_axis(arg, arg_type, result_type, actual_axis)
+            sum_var = self._gen_reduce_sum_single_axis(arg, arg_type, reduced_type, actual_axis)
             # Divide by axis size
             axis_size = arg_type.dims[actual_axis]
             if isinstance(axis_size, str):
@@ -966,10 +974,12 @@ class StableHLOCodegen:
             count_scalar = self._fresh()
             scalar_mlir = _mlir_type(ScalarType(arg_type.base))
             self._emit(f"{count_scalar} = stablehlo.constant dense<{float(axis_size):e}> : {scalar_mlir}")
-            count_var = self._maybe_broadcast(count_scalar, ScalarType(arg_type.base), result_type)
-            mlir_result = _mlir_type(result_type)
+            count_var = self._maybe_broadcast(count_scalar, ScalarType(arg_type.base), reduced_type)
+            mlir_reduced = _mlir_type(reduced_type)
             var = self._fresh()
-            self._emit(f"{var} = stablehlo.divide {sum_var}, {count_var} : {mlir_result}")
+            self._emit(f"{var} = stablehlo.divide {sum_var}, {count_var} : {mlir_reduced}")
+            if keepdims:
+                return self._keepdims_reshape(var, arg_type, axis, result_type)
             return var
 
         # All-dims reduction
@@ -995,6 +1005,23 @@ class StableHLOCodegen:
         self._emit(f"{var} = stablehlo.divide {sum_var}, {count_var} : {mlir_result}")
         return var
 
+    def _has_keepdims(self, expr: CallExpr) -> bool:
+        return (len(expr.args) == 3
+                and isinstance(expr.args[2], BoolLiteral)
+                and expr.args[2].value)
+
+    def _keepdims_reshape(self, reduced: str, arg_type: ArrayType, axis: int, result_type) -> str:
+        """Reshape reduced result to insert size-1 dim back for keepdims."""
+        # Build the reduced type (without keepdims)
+        reduced_dims = tuple(d for i, d in enumerate(arg_type.dims) if i != axis)
+        if len(reduced_dims) == 0:
+            reduced_type = ScalarType(arg_type.base)
+        else:
+            reduced_type = ArrayType(arg_type.base, reduced_dims)
+        var = self._fresh()
+        self._emit(f"{var} = stablehlo.reshape {reduced} : ({_mlir_type(reduced_type)}) -> {_mlir_type(result_type)}")
+        return var
+
     def _gen_sum(self, expr: CallExpr, env: dict[str, str]) -> str:
         arg = self._gen_expr(expr.args[0], env)
         arg_type = self._type_of(expr.args[0])
@@ -1003,10 +1030,18 @@ class StableHLOCodegen:
         if not isinstance(arg_type, ArrayType):
             return arg
 
-        if len(expr.args) == 2:
+        keepdims = self._has_keepdims(expr)
+
+        if len(expr.args) >= 2:
             axis = expr.args[1].value
             bd = self._batch_depth
             actual_axis = bd + axis
+            if keepdims:
+                # Compute reduced type (without the keepdims dim)
+                reduced_dims = tuple(d for i, d in enumerate(arg_type.dims) if i != axis)
+                reduced_type = ArrayType(arg_type.base, reduced_dims) if reduced_dims else ScalarType(arg_type.base)
+                reduced = self._gen_reduce_sum_single_axis(arg, arg_type, reduced_type, actual_axis)
+                return self._keepdims_reshape(reduced, arg_type, axis, result_type)
             return self._gen_reduce_sum_single_axis(arg, arg_type, result_type, actual_axis)
 
         return self._gen_reduce_sum(arg, arg_type, result_type)
@@ -1082,11 +1117,17 @@ class StableHLOCodegen:
             return arg
 
         is_max = expr.callee == "max"
+        keepdims = self._has_keepdims(expr)
 
-        if len(expr.args) == 2:
+        if len(expr.args) >= 2:
             axis = expr.args[1].value
             bd = self._batch_depth
             actual_axis = bd + axis
+            if keepdims:
+                reduced_dims = tuple(d for i, d in enumerate(arg_type.dims) if i != axis)
+                reduced_type = ArrayType(arg_type.base, reduced_dims) if reduced_dims else ScalarType(arg_type.base)
+                reduced = self._gen_reduce_max_min_single_axis(arg, arg_type, reduced_type, actual_axis, is_max)
+                return self._keepdims_reshape(reduced, arg_type, axis, result_type)
             return self._gen_reduce_max_min_single_axis(arg, arg_type, result_type, actual_axis, is_max)
 
         return self._gen_reduce_max_min(arg, arg_type, result_type, is_max)

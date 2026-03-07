@@ -75,6 +75,9 @@ class TokenType(StrEnum):
     # Comments
     DOC_COMMENT = auto()
 
+    # Compile-time
+    COMPTIME = auto()
+
     # Special
     EOF = auto()
 
@@ -113,4 +116,5 @@ KEYWORDS: dict[str, TokenType] = {
     "limit": TokenType.LIMIT,
     "cast": TokenType.CAST,
     "fold": TokenType.FOLD,
+    "comptime": TokenType.COMPTIME,
 }

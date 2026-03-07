@@ -47,6 +47,7 @@ class Param:
     name: str
     type_annotation: TypeAnnotation
     span: Span
+    comptime: bool = False
 
 
 @dataclass
@@ -147,6 +148,7 @@ class CallExpr:
     callee: str
     args: list[Expr]
     span: Span
+    named_args: list[tuple[str, Expr]] = field(default_factory=list)
 
 
 @dataclass

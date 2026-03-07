@@ -202,10 +202,11 @@ class Parser:
 
     def _parse_param(self) -> Param:
         start = self._current()
+        is_comptime = self._match(TokenType.COMPTIME)
         name = self._expect(TokenType.IDENT).value
         self._expect(TokenType.COLON)
         type_ann = self._parse_type()
-        return Param(name, type_ann, self._span_from(start))
+        return Param(name, type_ann, self._span_from(start), comptime=is_comptime)
 
     # -- Types --
 
@@ -474,7 +475,7 @@ class Parser:
             rhs = self._parse_comparison()
             span = Span(expr.span.line_start, expr.span.col_start, rhs.span.line_end, rhs.span.col_end)
             if isinstance(rhs, CallExpr):
-                expr = CallExpr(rhs.callee, [expr] + rhs.args, span)
+                expr = CallExpr(rhs.callee, [expr] + rhs.args, span, named_args=rhs.named_args)
             elif isinstance(rhs, Identifier):
                 expr = CallExpr(rhs.name, [expr], span)
             else:
@@ -535,12 +536,28 @@ class Parser:
                 # Function call (including qualified: math.relu(...))
                 self._advance()
                 args: list[Expr] = []
+                named_args: list[tuple[str, Expr]] = []
                 if not self._check(TokenType.RPAREN):
-                    args.append(self._parse_expr())
-                    while self._match(TokenType.COMMA):
+                    # First argument
+                    if (self._check(TokenType.IDENT) and self.pos + 1 < len(self.tokens)
+                            and self.tokens[self.pos + 1].type == TokenType.ASSIGN):
+                        na_name = self._advance().value
+                        self._advance()  # consume '='
+                        named_args.append((na_name, self._parse_expr()))
+                    else:
                         args.append(self._parse_expr())
+                    while self._match(TokenType.COMMA):
+                        if (self._check(TokenType.IDENT) and self.pos + 1 < len(self.tokens)
+                                and self.tokens[self.pos + 1].type == TokenType.ASSIGN):
+                            na_name = self._advance().value
+                            self._advance()  # consume '='
+                            named_args.append((na_name, self._parse_expr()))
+                        else:
+                            if named_args:
+                                raise self._error("positional argument after named argument")
+                            args.append(self._parse_expr())
                 self._expect(TokenType.RPAREN)
-                expr = CallExpr(expr.name, args, Span(expr.span.line_start, expr.span.col_start, self.tokens[self.pos - 1].line, self.tokens[self.pos - 1].col + 1))
+                expr = CallExpr(expr.name, args, Span(expr.span.line_start, expr.span.col_start, self.tokens[self.pos - 1].line, self.tokens[self.pos - 1].col + 1), named_args=named_args)
             elif self._check(TokenType.LBRACE) and isinstance(expr, Identifier) and self._is_struct_literal():
                 # Struct literal: Name { field: expr, ... }
                 expr = self._parse_struct_literal(expr)
