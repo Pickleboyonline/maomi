@@ -1927,6 +1927,42 @@ def goto_type_definition(ls: LanguageServer, params: types.TypeDefinitionParams)
             if span is not None:
                 return types.Location(uri=uri, range=_span_to_range(span))
     return None
+# Workspace Symbols
+# ---------------------------------------------------------------------------
+
+def _workspace_symbols(query: str) -> list[types.SymbolInformation]:
+    """Search for functions/structs across all cached files."""
+    result_symbols: list[types.SymbolInformation] = []
+    q = query.lower()
+
+    for uri, analysis in _cache.items():
+        if not analysis.program:
+            continue
+
+        for sd in analysis.program.struct_defs:
+            if q and q not in sd.name.lower():
+                continue
+            result_symbols.append(types.SymbolInformation(
+                name=sd.name,
+                kind=types.SymbolKind.Struct,
+                location=types.Location(uri=uri, range=_span_to_range(sd.span)),
+            ))
+
+        for fn in _local_functions(analysis.program):
+            if q and q not in fn.name.lower():
+                continue
+            result_symbols.append(types.SymbolInformation(
+                name=fn.name,
+                kind=types.SymbolKind.Function,
+                location=types.Location(uri=uri, range=_span_to_range(fn.span)),
+            ))
+
+    return result_symbols
+
+
+@server.feature(types.WORKSPACE_SYMBOL)
+def workspace_symbols(ls: LanguageServer, params: types.WorkspaceSymbolParams):
+    return _workspace_symbols(params.query)
 
 
 # ---------------------------------------------------------------------------
