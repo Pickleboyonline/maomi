@@ -426,3 +426,56 @@ class TestCallback:
         assert len(captured[0]) == 2
         assert np.isclose(captured[0][0], inputs[0])
         assert np.isclose(captured[0][1], inputs[1])
+
+
+class TestGradOfGradRunner:
+    """Numerical verification of grad-of-grad through indexing, scan, and broadcast."""
+
+    def test_grad_grad_index_numerical(self):
+        """d/dx sum(d/dx(x[0]^2)) for x=[3,0,0] should give [2,0,0]."""
+        source = """
+fn f(x: f32[3]) -> f32[3] {
+    grad(sum(grad(x[0] * x[0], x)), x)
+}
+"""
+        result = compile_source(source)
+        sig = result.fn_table["f"]
+        x = np.array([3.0, 0.0, 0.0], dtype=np.float32)
+        _, output = run_stablehlo(result.mlir_text, "f", sig, inputs=[x])
+        # d/dx(x[0]^2) = [2*x[0], 0, 0], sum = 2*x[0]
+        # d/dx(2*x[0]) = [2, 0, 0]
+        expected = np.array([2.0, 0.0, 0.0], dtype=np.float32)
+        assert np.allclose(output, expected, atol=1e-5)
+
+    def test_grad_grad_sum_x_squared(self):
+        """d/dx sum(d/dx(sum(x*x))) = [2,2,2] (constant Hessian)."""
+        source = """
+fn f(x: f32[3]) -> f32[3] {
+    grad(sum(grad(sum(x * x), x)), x)
+}
+"""
+        result = compile_source(source)
+        sig = result.fn_table["f"]
+        x = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+        _, output = run_stablehlo(result.mlir_text, "f", sig, inputs=[x])
+        # d/dx(sum(x*x)) = 2*x, sum(2*x) = 2*sum(x)
+        # d/dx(2*sum(x)) = [2, 2, 2]
+        expected = np.array([2.0, 2.0, 2.0], dtype=np.float32)
+        assert np.allclose(output, expected, atol=1e-5)
+
+    def test_grad_grad_scan_init(self):
+        """d/dinit(d/dinit(sum(cumsum(init, xs)))) for linear scan."""
+        source = """
+fn f(init: f32, x: f32[5]) -> f32 {
+    grad(grad(sum(scan (carry, elem) in (init, x) { carry + elem }), init), init)
+}
+"""
+        result = compile_source(source)
+        sig = result.fn_table["f"]
+        inputs = [np.float32(1.0), np.ones(5, dtype=np.float32)]
+        _, output = run_stablehlo(result.mlir_text, "f", sig, inputs=inputs)
+        # For carry + elem (linear), d(carry_t)/d(init) = 1 for all t
+        # sum of carries: sum_t (init + sum(x[:t])) → d/dinit = 5
+        # d^2/dinit^2 = 0 (linear in init)
+        expected = np.float32(0.0)
+        assert np.allclose(output, expected, atol=1e-5)

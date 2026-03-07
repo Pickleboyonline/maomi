@@ -412,6 +412,118 @@ class TestGradOfGrad:
         assert "func.func @f" in out
 
 
+class TestGradOfGradIndexing:
+    """Tests for grad-of-grad through indexing operations."""
+
+    def test_grad_grad_index_single(self):
+        """d/dx sum(d/dx(x[0]^2)) should produce valid AST."""
+        prog = ad_transform("""
+            fn f(x: f32[3]) -> f32[3] {
+                grad(sum(grad(x[0] * x[0], x)), x)
+            }
+        """)
+        expr = get_body_expr(prog)
+        assert not isinstance(expr, GradExpr)
+
+    def test_codegen_grad_grad_index(self):
+        """d/dx sum(d/dx(x[0]^2)) should produce valid StableHLO."""
+        out = ad_codegen("""
+            fn f(x: f32[3]) -> f32[3] {
+                grad(sum(grad(x[0] * x[0], x)), x)
+            }
+        """)
+        assert "module {" in out
+        assert "func.func @f" in out
+
+    def test_grad_grad_index_sum(self):
+        """d/dx sum(d/dx(x[0] + x[1])) — mixed indices."""
+        prog = ad_transform("""
+            fn f(x: f32[3]) -> f32[3] {
+                grad(sum(grad(x[0] + x[1], x)), x)
+            }
+        """)
+        expr = get_body_expr(prog)
+        assert not isinstance(expr, GradExpr)
+
+    def test_codegen_grad_grad_index_sum(self):
+        """Should produce valid StableHLO for multi-index grad-of-grad."""
+        out = ad_codegen("""
+            fn f(x: f32[3]) -> f32[3] {
+                grad(sum(grad(x[0] + x[1], x)), x)
+            }
+        """)
+        assert "module {" in out
+        assert "func.func @f" in out
+
+    def test_grad_grad_gather(self):
+        """d/dx sum(d/dx(sum(x[ids]))) — gather grad-of-grad."""
+        out = ad_codegen("""
+            fn f(x: f32[5], ids: i32[3]) -> f32[5] {
+                grad(sum(grad(sum(x[ids]), x)), x)
+            }
+        """)
+        assert "module {" in out
+        assert "func.func @f" in out
+
+
+class TestGradOfGradScan:
+    """Tests for grad-of-grad through scan operations."""
+
+    def test_grad_grad_scan_seq_constant(self):
+        """d/dx sum(d/dx(sum(scan))) with constant derivatives should work."""
+        out = ad_codegen("""
+            fn f(x: f32[5]) -> f32[5] {
+                grad(sum(grad(sum(scan (carry, elem) in (0.0, x) { carry + elem }), x)), x)
+            }
+        """)
+        assert "module {" in out
+        assert "func.func @f" in out
+
+    def test_grad_grad_scan_init_constant(self):
+        """grad(grad(sum(scan), init), init) with constant derivatives should work."""
+        out = ad_codegen("""
+            fn f(init: f32, x: f32[5]) -> f32 {
+                grad(grad(sum(scan (carry, elem) in (init, x) { carry + elem }), init), init)
+            }
+        """)
+        assert "module {" in out
+        assert "func.func @f" in out
+
+    def test_first_order_scan_still_works(self):
+        """Verify first-order scan grad still works after refactoring."""
+        out = ad_codegen("""
+            fn f(init: f32, x: f32[5]) -> f32 {
+                grad(sum(scan (carry, elem) in (init, x) { carry + elem }), init)
+            }
+        """)
+        assert "module {" in out
+        assert "func.func @f" in out
+
+
+class TestGradOfGradBroadcastReduce:
+    """Tests for grad-of-grad through broadcast and reduce_sum."""
+
+    def test_grad_grad_through_sum(self):
+        """d/dx sum(d/dx(sum(x * x))) — inner grad goes through sum backprop (broadcast)."""
+        out = ad_codegen("""
+            fn f(x: f32[3]) -> f32[3] {
+                grad(sum(grad(sum(x * x), x)), x)
+            }
+        """)
+        assert "module {" in out
+        assert "func.func @f" in out
+
+    def test_grad_grad_through_mean(self):
+        """d/dx sum(d/dx(mean(x * x))) — mean backprop uses broadcast."""
+        out = ad_codegen("""
+            fn f(x: f32[3]) -> f32[3] {
+                grad(sum(grad(mean(x * x), x)), x)
+            }
+        """)
+        assert "module {" in out
+        assert "func.func @f" in out
+
+
 class TestConv2dGrad:
     def test_grad_wrt_input(self):
         """grad of sum(reshape(conv2d(x, w))) w.r.t. x should produce a backward convolution."""

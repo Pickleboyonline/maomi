@@ -18,8 +18,10 @@ Supported operations inside grad:
 
   grad-of-grad (nested grad expressions, e.g. grad(grad(x**3, x), x))
 
+  grad-of-grad through indexing, scan (constant derivatives), broadcast, reduce
+
 Not supported (emits compile error):
-  grad-of-grad through scan or indexing
+  grad-of-grad through scan (non-constant derivatives), conv2d, max_pool, avg_pool, while
 """
 from __future__ import annotations
 
@@ -149,10 +151,34 @@ def _collect_free_vars_inner(expr: Expr, result: set[str]):
                     _collect_free_vars_inner(ic.start, result)
                 if ic.end is not None:
                     _collect_free_vars_inner(ic.end, result)
+        case _IndexGrad(base_expr=base, adj=adj, indices=indices):
+            _collect_free_vars_inner(base, result)
+            _collect_free_vars_inner(adj, result)
+            for ic in indices:
+                if ic.value is not None:
+                    _collect_free_vars_inner(ic.value, result)
+                if ic.start is not None:
+                    _collect_free_vars_inner(ic.start, result)
+                if ic.end is not None:
+                    _collect_free_vars_inner(ic.end, result)
         case _GatherGrad(base_expr=base, adj=adj, indices=indices):
             _collect_free_vars_inner(base, result)
             _collect_free_vars_inner(adj, result)
             _collect_free_vars_inner(indices, result)
+        case _ScanGrad():
+            _collect_free_vars_inner(expr.d_body_d_carry, result)
+            for de in expr.d_body_d_elems:
+                _collect_free_vars_inner(de, result)
+            _collect_free_vars_inner(expr.init, result)
+            for s in expr.sequences:
+                _collect_free_vars_inner(s, result)
+            _collect_free_vars_inner(expr.forward_result, result)
+            _collect_free_vars_inner(expr.adj, result)
+        case _WhileGrad():
+            _collect_free_vars_inner(expr.d_body_d_state, result)
+            _collect_free_vars_inner(expr.init, result)
+            _collect_free_vars_inner(expr.forward_result, result)
+            _collect_free_vars_inner(expr.adj, result)
         case GradExpr(expr=inner_expr):
             _collect_free_vars_inner(inner_expr, result)
         case _Conv2dGrad(input_expr=ie, kernel_expr=ke, adj=adj):
@@ -475,6 +501,75 @@ class ADTransform:
                 name = self._fresh_name("v")
                 var_map[id(expr)] = name
                 tape.append((name, expr))
+            case _IndexGrad(base_expr=base, adj=adj_inner, indices=indices):
+                self._linearize(base, tape, var_map, let_env)
+                self._linearize(adj_inner, tape, var_map, let_env)
+                for ic in indices:
+                    if ic.value is not None:
+                        self._linearize(ic.value, tape, var_map, let_env)
+                    if ic.start is not None:
+                        self._linearize(ic.start, tape, var_map, let_env)
+                    if ic.end is not None:
+                        self._linearize(ic.end, tape, var_map, let_env)
+                name = self._fresh_name("v")
+                var_map[id(expr)] = name
+                tape.append((name, expr))
+            case _GatherGrad(base_expr=base, adj=adj_inner, indices=indices):
+                self._linearize(base, tape, var_map, let_env)
+                self._linearize(adj_inner, tape, var_map, let_env)
+                self._linearize(indices, tape, var_map, let_env)
+                name = self._fresh_name("v")
+                var_map[id(expr)] = name
+                tape.append((name, expr))
+            case _BroadcastExpr(expr=inner):
+                self._linearize(inner, tape, var_map, let_env)
+                name = self._fresh_name("v")
+                var_map[id(expr)] = name
+                tape.append((name, expr))
+            case _ReduceSum(expr=inner):
+                self._linearize(inner, tape, var_map, let_env)
+                name = self._fresh_name("v")
+                var_map[id(expr)] = name
+                tape.append((name, expr))
+            case _ScanGrad():
+                self._linearize(expr.init, tape, var_map, let_env)
+                for s in expr.sequences:
+                    self._linearize(s, tape, var_map, let_env)
+                self._linearize(expr.adj, tape, var_map, let_env)
+                self._linearize(expr.forward_result, tape, var_map, let_env)
+                self._linearize(expr.d_body_d_carry, tape, var_map, let_env)
+                for de in expr.d_body_d_elems:
+                    self._linearize(de, tape, var_map, let_env)
+                name = self._fresh_name("v")
+                var_map[id(expr)] = name
+                tape.append((name, expr))
+            case _WhileGrad():
+                self._linearize(expr.init, tape, var_map, let_env)
+                self._linearize(expr.adj, tape, var_map, let_env)
+                self._linearize(expr.forward_result, tape, var_map, let_env)
+                self._linearize(expr.d_body_d_state, tape, var_map, let_env)
+                name = self._fresh_name("v")
+                var_map[id(expr)] = name
+                tape.append((name, expr))
+            case _Conv2dGrad():
+                self._linearize(expr.input_expr, tape, var_map, let_env)
+                self._linearize(expr.kernel_expr, tape, var_map, let_env)
+                self._linearize(expr.adj, tape, var_map, let_env)
+                name = self._fresh_name("v")
+                var_map[id(expr)] = name
+                tape.append((name, expr))
+            case _MaxPoolGrad():
+                self._linearize(expr.input_expr, tape, var_map, let_env)
+                self._linearize(expr.adj, tape, var_map, let_env)
+                name = self._fresh_name("v")
+                var_map[id(expr)] = name
+                tape.append((name, expr))
+            case _AvgPoolGrad():
+                self._linearize(expr.input_expr, tape, var_map, let_env)
+                self._linearize(expr.adj, tape, var_map, let_env)
+                name = self._fresh_name("v")
+                var_map[id(expr)] = name
+                tape.append((name, expr))
             case GradExpr(expr=inner_expr, wrt=inner_wrt):
                 self._grad_depth += 1
                 if self._grad_depth > _MAX_GRAD_DEPTH:
@@ -647,7 +742,46 @@ class ADTransform:
                 return node
             case _BroadcastExpr():
                 new_expr = self._substitute(expr.expr, subst)
-                node = _BroadcastExpr(new_expr, expr.target_dims, expr.span)
+                node = _BroadcastExpr(new_expr, expr.target_dims, expr.span, broadcast_dims=expr.broadcast_dims)
+                self._copy_type(expr, node)
+                return node
+            case _IndexGrad():
+                new_base = self._substitute(expr.base_expr, subst)
+                new_adj = self._substitute(expr.adj, subst)
+                new_indices = [self._substitute_index_component(ic, subst) for ic in expr.indices]
+                node = _IndexGrad(new_base, new_adj, new_indices, expr.span)
+                self._copy_type(expr, node)
+                return node
+            case _GatherGrad():
+                new_base = self._substitute(expr.base_expr, subst)
+                new_adj = self._substitute(expr.adj, subst)
+                new_indices = self._substitute(expr.indices, subst)
+                node = _GatherGrad(new_base, new_adj, new_indices, expr.gather_axis, expr.span)
+                self._copy_type(expr, node)
+                return node
+            case _ScanGrad():
+                new_dbc = self._substitute(expr.d_body_d_carry, subst)
+                new_dbe = [self._substitute(de, subst) for de in expr.d_body_d_elems]
+                new_init = self._substitute(expr.init, subst)
+                new_seqs = [self._substitute(s, subst) for s in expr.sequences]
+                new_fwd = self._substitute(expr.forward_result, subst)
+                new_adj = self._substitute(expr.adj, subst)
+                node = _ScanGrad(new_dbc, new_dbe, expr.carry_var, expr.elem_vars,
+                                 new_init, new_seqs, new_fwd, new_adj, expr.wrt, expr.span)
+                self._copy_type(expr, node)
+                return node
+            case _WhileGrad():
+                new_dbs = self._substitute(expr.d_body_d_state, subst)
+                new_init = self._substitute(expr.init, subst)
+                new_fwd = self._substitute(expr.forward_result, subst)
+                new_adj = self._substitute(expr.adj, subst)
+                node = _WhileGrad(new_dbs, expr.state_var, new_init, expr.max_iters,
+                                  expr.cond, expr.body, new_fwd, new_adj, expr.span)
+                self._copy_type(expr, node)
+                return node
+            case _ReduceSum():
+                new_expr = self._substitute(expr.expr, subst)
+                node = _ReduceSum(new_expr, expr.axes, expr.span)
                 self._copy_type(expr, node)
                 return node
             case _:
@@ -874,6 +1008,110 @@ class ADTransform:
                 if base_type is not None:
                     self.type_map[id(grad_node)] = base_type
                 self._accumulate(adjoints, base_name, grad_node)
+
+            # -- Grad-of-grad: backprop through internal gradient nodes --
+
+            case _IndexGrad(base_expr=_base, adj=adj_inner, indices=indices):
+                # _IndexGrad(base, adj_inner, indices) = dynamic_update_slice(zeros, adj_inner, indices)
+                # Linear in adj_inner. d/d(adj_inner) = upstream[indices] (an IndexExpr).
+                if id(adj_inner) in var_map:
+                    adj_inner_name = var_map[id(adj_inner)]
+                    grad_adj = IndexExpr(adj, indices, _DUMMY_SPAN)
+                    adj_inner_type = self._type_of(adj_inner)
+                    if adj_inner_type is not None:
+                        self.type_map[id(grad_adj)] = adj_inner_type
+                    self._accumulate(adjoints, adj_inner_name, grad_adj)
+
+            case _GatherGrad(base_expr=_base, adj=adj_inner, indices=idx, gather_axis=axis):
+                # _GatherGrad(base, adj_inner, idx, axis) = scatter_add(zeros, idx, adj_inner)
+                # Linear in adj_inner. d/d(adj_inner) = gather(upstream, idx, axis).
+                if id(adj_inner) in var_map:
+                    adj_inner_name = var_map[id(adj_inner)]
+                    adj_type = self._type_of(adj)
+                    if isinstance(adj_type, ArrayType):
+                        ndim = len(adj_type.dims)
+                        ics = []
+                        for i in range(ndim):
+                            if i == axis:
+                                ics.append(IndexComponent("single", idx, None, None, _DUMMY_SPAN))
+                            else:
+                                ics.append(IndexComponent("full", None, None, None, _DUMMY_SPAN))
+                        grad_adj = IndexExpr(adj, ics, _DUMMY_SPAN)
+                        adj_inner_type = self._type_of(adj_inner)
+                        if adj_inner_type is not None:
+                            self.type_map[id(grad_adj)] = adj_inner_type
+                        self._accumulate(adjoints, adj_inner_name, grad_adj)
+
+            case _BroadcastExpr(expr=inner):
+                # _BroadcastExpr(inner, target_dims) broadcasts inner to target_dims.
+                # d/d(inner) = reduce_sum(upstream) over broadcast dimensions.
+                if id(inner) in var_map:
+                    inner_name = var_map[id(inner)]
+                    inner_type = self._type_of(inner)
+                    if isinstance(inner_type, ScalarType):
+                        # Scalar was broadcast — gradient is sum of all upstream elements
+                        grad_inner = self._make_call("sum", [adj])
+                        self.type_map[id(grad_inner)] = inner_type
+                        self._accumulate(adjoints, inner_name, grad_inner)
+                    elif isinstance(inner_type, ArrayType):
+                        # Lower-rank broadcast — reduce over the broadcast axes
+                        target_ndim = len(node.target_dims)
+                        inner_ndim = len(inner_type.dims)
+                        if node.broadcast_dims is not None:
+                            mapped = set(node.broadcast_dims)
+                        else:
+                            mapped = set(range(target_ndim - inner_ndim, target_ndim))
+                        reduce_axes = tuple(i for i in range(target_ndim) if i not in mapped)
+                        if reduce_axes:
+                            grad_inner = _ReduceSum(adj, reduce_axes, _DUMMY_SPAN)
+                            self.type_map[id(grad_inner)] = inner_type
+                            self._accumulate(adjoints, inner_name, grad_inner)
+                        else:
+                            self._accumulate(adjoints, inner_name, adj)
+
+            case _ReduceSum(expr=inner):
+                # _ReduceSum(inner, axes) reduces inner by summing over axes.
+                # d/d(inner) = broadcast(upstream) back to inner's shape along reduced axes.
+                if id(inner) in var_map:
+                    inner_name = var_map[id(inner)]
+                    inner_type = self._type_of(inner)
+                    if isinstance(inner_type, ArrayType):
+                        # Broadcast upstream back to inner's shape
+                        broadcast_dims = tuple(i for i in range(len(inner_type.dims)) if i not in node.axes)
+                        grad_inner = _BroadcastExpr(adj, tuple(inner_type.dims), _DUMMY_SPAN, broadcast_dims=broadcast_dims)
+                        self.type_map[id(grad_inner)] = inner_type
+                        self._accumulate(adjoints, inner_name, grad_inner)
+
+            case _ScanGrad():
+                raise MaomiError(
+                    "grad-of-grad through scan with non-constant body derivatives is not yet supported. "
+                    "Use scans with linear bodies (e.g. carry + x) for grad-of-grad.",
+                    "<ad>", node.span.line_start, node.span.col_start,
+                )
+
+            case _WhileGrad():
+                raise MaomiError(
+                    "grad-of-grad through while loops is not yet supported.",
+                    "<ad>", node.span.line_start, node.span.col_start,
+                )
+
+            case _Conv2dGrad():
+                raise MaomiError(
+                    "grad-of-grad through conv2d is not yet supported.",
+                    "<ad>", node.span.line_start, node.span.col_start,
+                )
+
+            case _MaxPoolGrad():
+                raise MaomiError(
+                    "grad-of-grad through max_pool is not yet supported.",
+                    "<ad>", node.span.line_start, node.span.col_start,
+                )
+
+            case _AvgPoolGrad():
+                raise MaomiError(
+                    "grad-of-grad through avg_pool is not yet supported.",
+                    "<ad>", node.span.line_start, node.span.col_start,
+                )
 
             case _:
                 raise MaomiError(
@@ -1399,33 +1637,58 @@ class ADTransform:
         # The forward result is the scan node itself — codegen will generate it
         fwd_ref = node
 
-        # Propagate to init (keep _ScanGrad — extracting final carry needs special handling)
-        if id(init) in var_map:
-            init_name = var_map[id(init)]
-            grad_init = _ScanGrad(
-                d_body_d_carry=d_body_d_carry,
-                d_body_d_elems=d_body_d_elems,
-                carry_var=carry_var,
-                elem_vars=elem_vars,
-                init=init,
-                sequences=sequences,
-                forward_result=fwd_ref,
-                adj=adj,
-                wrt="__init__",
-                span=_DUMMY_SPAN,
-            )
-            init_type = self._type_of(init)
-            if init_type is not None:
-                self.type_map[id(grad_init)] = init_type
-            self._accumulate(adjoints, init_name, grad_init)
-
         # Check if derivatives are constant (don't reference carry/elem vars).
-        # When constant, we can emit a simple reverse ScanExpr (JAX-style)
-        # instead of the complex _ScanGrad node.
+        # When constant, we can emit standard ScanExpr nodes (JAX-style)
+        # that support grad-of-grad. Non-constant falls back to _ScanGrad.
         all_deriv_vars = _collect_free_vars(d_body_d_carry)
         for de in d_body_d_elems:
             all_deriv_vars |= _collect_free_vars(de)
         constant_derivs = not (all_deriv_vars & {carry_var, *elem_vars})
+
+        # Propagate to init
+        if id(init) in var_map:
+            init_name = var_map[id(init)]
+            init_type = self._type_of(init)
+            if constant_derivs:
+                # Build reverse scan then extract final carry via indexing.
+                # The reverse scan accumulates: carry * d_carry + adj_elem
+                # The final carry (last stacked output) is the init gradient.
+                rev_scan = self._build_reverse_scan_grad(
+                    d_body_d_carry, self._make_float(1.0), adj, sequences[0], node)
+                # Get sequence length from type to index the last element
+                seq_type = self._type_of(sequences[0])
+                if isinstance(seq_type, ArrayType):
+                    seq_len = seq_type.dims[0]
+                    assert isinstance(seq_len, int)
+                    last_idx = IntLiteral(seq_len - 1, _DUMMY_SPAN)
+                    self.type_map[id(last_idx)] = ScalarType("i32")
+                    ic = IndexComponent("single", last_idx, None, None, _DUMMY_SPAN)
+                    grad_init = IndexExpr(rev_scan, [ic], _DUMMY_SPAN)
+                    if init_type is not None:
+                        self.type_map[id(grad_init)] = init_type
+                    rev_scan_type = seq_type  # reverse scan stacks carries
+                    self.type_map[id(rev_scan)] = rev_scan_type
+                else:
+                    grad_init = rev_scan
+                    if init_type is not None:
+                        self.type_map[id(grad_init)] = init_type
+            else:
+                # Fallback: _ScanGrad for non-constant derivatives
+                grad_init = _ScanGrad(
+                    d_body_d_carry=d_body_d_carry,
+                    d_body_d_elems=d_body_d_elems,
+                    carry_var=carry_var,
+                    elem_vars=elem_vars,
+                    init=init,
+                    sequences=sequences,
+                    forward_result=fwd_ref,
+                    adj=adj,
+                    wrt="__init__",
+                    span=_DUMMY_SPAN,
+                )
+                if init_type is not None:
+                    self.type_map[id(grad_init)] = init_type
+            self._accumulate(adjoints, init_name, grad_init)
 
         # Propagate to each sequence
         for i, seq in enumerate(sequences):
