@@ -380,7 +380,9 @@ class ADTransform:
         new_value = self._transform_expr(ic.value) if ic.value is not None else None
         new_start = self._transform_expr(ic.start) if ic.start is not None else None
         new_end = self._transform_expr(ic.end) if ic.end is not None else None
-        return IndexComponent(ic.kind, new_value, new_start, new_end, ic.span)
+        result = IndexComponent(ic.kind, new_value, new_start, new_end, ic.span)
+        result.static_size = ic.static_size
+        return result
 
     def _copy_type(self, old: Expr, new: Expr):
         t = self.type_map.get(id(old))
@@ -874,7 +876,9 @@ class ADTransform:
         new_value = self._substitute(ic.value, subst) if ic.value is not None else None
         new_start = self._substitute(ic.start, subst) if ic.start is not None else None
         new_end = self._substitute(ic.end, subst) if ic.end is not None else None
-        return IndexComponent(ic.kind, new_value, new_start, new_end, ic.span)
+        result = IndexComponent(ic.kind, new_value, new_start, new_end, ic.span)
+        result.static_size = ic.static_size
+        return result
 
     def _substitute_block(self, block: Block, subst: dict[str, Expr]) -> Block:
         """Substitute through a block, respecting let binding scopes."""
@@ -1469,7 +1473,9 @@ class ADTransform:
                         end = IntLiteral(offset + size, _DUMMY_SPAN)
                         self.type_map[id(start)] = ScalarType("i32")
                         self.type_map[id(end)] = ScalarType("i32")
-                        components.append(IndexComponent("slice", None, start, end, _DUMMY_SPAN))
+                        ic = IndexComponent("slice", None, start, end, _DUMMY_SPAN)
+                        ic.static_size = size
+                        components.append(ic)
                     else:
                         components.append(IndexComponent("full", None, None, None, _DUMMY_SPAN))
 

@@ -236,6 +236,7 @@ class IndexComponent:
     start: Expr | None     # range start (kind == "slice")
     end: Expr | None       # range end (kind == "slice")
     span: Span
+    static_size: int | None = None  # slice size, set by type checker
 
 
 @dataclass

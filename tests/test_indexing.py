@@ -484,7 +484,7 @@ class TestArrayIndexAD:
         }
         """
         mlir = _compile(src)
-        assert '"stablehlo.scatter"' in mlir
+        assert "stablehlo.scatter" in mlir
 
     def test_gather_grad_2d_uses_scatter(self):
         # Use map+sum to reduce the 2D gather result to scalar
@@ -496,4 +496,94 @@ class TestArrayIndexAD:
         }
         """
         mlir = _compile(src)
-        assert '"stablehlo.scatter"' in mlir
+        assert "stablehlo.scatter" in mlir
+
+
+# ---------- Dynamic slice bounds tests ----------
+
+
+class TestDynamicSliceTypeChecker:
+    def test_dynamic_start_static_size(self):
+        """x[i:i+3] on f32[10] -> f32[3]"""
+        prog = _parse("fn f(x: f32[10], i: i32) -> f32[3] { x[i:i+3] }")
+        tc = TypeChecker()
+        errors = tc.check(prog)
+        assert not errors, errors
+
+    def test_dynamic_start_multi_axis(self):
+        """x[i:i+3, :] on f32[10, 20] -> f32[3, 20]"""
+        prog = _parse("fn f(x: f32[10, 20], i: i32) -> f32[3, 20] { x[i:i+3, :] }")
+        tc = TypeChecker()
+        errors = tc.check(prog)
+        assert not errors, errors
+
+    def test_dynamic_start_with_single_index(self):
+        """x[i:i+3, 0] on f32[10, 20] -> f32[3]"""
+        prog = _parse("fn f(x: f32[10, 20], i: i32) -> f32[3] { x[i:i+3, 0] }")
+        tc = TypeChecker()
+        errors = tc.check(prog)
+        assert not errors, errors
+
+    def test_commutative_addition(self):
+        """x[i:3+i] should also work (N + expr)"""
+        prog = _parse("fn f(x: f32[10], i: i32) -> f32[3] { x[i:3+i] }")
+        tc = TypeChecker()
+        errors = tc.check(prog)
+        assert not errors, errors
+
+    def test_error_unrelated_bounds(self):
+        """x[i:j] should error - can't determine static size"""
+        prog = _parse("fn f(x: f32[10], i: i32, j: i32) -> f32[3] { x[i:j] }")
+        tc = TypeChecker()
+        errors = tc.check(prog)
+        assert errors
+        assert "statically determinable" in errors[0].message
+
+    def test_error_dynamic_open_end(self):
+        """x[i:] should error - size = dim - i is dynamic"""
+        prog = _parse("fn f(x: f32[10], i: i32) -> f32[3] { x[i:] }")
+        tc = TypeChecker()
+        errors = tc.check(prog)
+        assert errors
+        assert "statically determinable" in errors[0].message
+
+    def test_error_non_i32_start(self):
+        """Slice start must be i32"""
+        prog = _parse("fn f(x: f32[10], s: f32) -> f32[3] { x[s:s+3] }")
+        tc = TypeChecker()
+        errors = tc.check(prog)
+        assert errors
+        assert "i32" in errors[0].message
+
+
+class TestDynamicSliceCodegen:
+    def test_dynamic_slice_emits_dynamic_slice(self):
+        """x[i:i+5] should use stablehlo.dynamic_slice"""
+        mlir = _compile("fn f(x: f32[10], i: i32) -> f32[5] { x[i:i+5] }")
+        assert "stablehlo.dynamic_slice" in mlir
+        assert "sizes = [5]" in mlir
+
+    def test_dynamic_slice_2d(self):
+        """x[i:i+3, :] on f32[10, 20] -> f32[3, 20]"""
+        mlir = _compile("fn f(x: f32[10, 20], i: i32) -> f32[3, 20] { x[i:i+3, :] }")
+        assert "stablehlo.dynamic_slice" in mlir
+        assert "sizes = [3, 20]" in mlir
+
+    def test_dynamic_slice_with_squeeze(self):
+        """x[i:i+3, 0] on f32[10, 20] -> f32[3]"""
+        mlir = _compile("fn f(x: f32[10, 20], i: i32) -> f32[3] { x[i:i+3, 0] }")
+        assert "stablehlo.dynamic_slice" in mlir
+        assert "stablehlo.reshape" in mlir
+
+
+class TestDynamicSliceAD:
+    def test_grad_through_dynamic_slice(self):
+        """Gradient through x[i:i+3] should produce f32[10]"""
+        src = """
+        fn f(x: f32[10], i: i32) -> f32[10] {
+            let s: f32[3] = x[i:i+3];
+            grad(sum(s), x)
+        }
+        """
+        mlir = _compile(src)
+        assert "stablehlo.dynamic_update_slice" in mlir

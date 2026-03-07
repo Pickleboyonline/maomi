@@ -57,6 +57,42 @@ def _try_negative_literal(expr) -> int | None:
     return None
 
 
+def _ast_structurally_equal(a, b) -> bool:
+    """Check if two AST expressions are structurally identical (ignoring spans)."""
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, Identifier):
+        return a.name == b.name
+    if isinstance(a, IntLiteral):
+        return a.value == b.value
+    if isinstance(a, FloatLiteral):
+        return a.value == b.value
+    if isinstance(a, BinOp):
+        return a.op == b.op and _ast_structurally_equal(a.left, b.left) and _ast_structurally_equal(a.right, b.right)
+    if isinstance(a, UnaryOp):
+        return a.op == b.op and _ast_structurally_equal(a.operand, b.operand)
+    return False
+
+
+def _try_static_slice_size(start, end) -> int | None:
+    """Try to determine the static size of a slice from start and end expressions.
+
+    Returns the size if determinable, None otherwise.
+    Handles: both literals, end = start + N, start = end - N.
+    """
+    if isinstance(start, IntLiteral) and isinstance(end, IntLiteral):
+        return end.value - start.value
+    if isinstance(end, BinOp) and end.op == "+":
+        if isinstance(end.right, IntLiteral) and _ast_structurally_equal(end.left, start):
+            return end.right.value
+        if isinstance(end.left, IntLiteral) and _ast_structurally_equal(end.right, start):
+            return end.left.value
+    if isinstance(start, BinOp) and start.op == "-":
+        if isinstance(start.right, IntLiteral) and _ast_structurally_equal(start.left, end):
+            return start.right.value
+    return None
+
+
 def _is_numeric(t: MaomiType) -> bool:
     if isinstance(t, ScalarType):
         return t.base in NUMERIC_BASES
@@ -799,26 +835,34 @@ class TypeChecker:
                     self.type_map[id(ic.end)] = I32
                 start_type = self._infer(ic.start, env)
                 end_type = self._infer(ic.end, env)
-                # Slice bounds must be integer literals (static)
-                if not isinstance(ic.start, IntLiteral):
+                # Bounds must be i32
+                if start_type != I32:
                     self._error(
-                        "slice start must be an integer literal",
+                        f"slice start must be i32, got {start_type}",
                         ic.start.span.line_start, ic.start.span.col_start,
                     )
                     return None
-                if not isinstance(ic.end, IntLiteral):
+                if end_type != I32:
                     self._error(
-                        "slice end must be an integer literal",
+                        f"slice end must be i32, got {end_type}",
                         ic.end.span.line_start, ic.end.span.col_start,
                     )
                     return None
-                slice_size = ic.end.value - ic.start.value
-                if slice_size <= 0:
+                # Slice size must be statically determinable
+                slice_size = _try_static_slice_size(ic.start, ic.end)
+                if slice_size is None:
                     self._error(
-                        f"slice range is empty or negative: {ic.start.value}:{ic.end.value}",
+                        "slice size must be statically determinable (e.g., x[i:i+3])",
                         ic.span.line_start, ic.span.col_start,
                     )
                     return None
+                if slice_size <= 0:
+                    self._error(
+                        f"slice range is empty or negative (size={slice_size})",
+                        ic.span.line_start, ic.span.col_start,
+                    )
+                    return None
+                ic.static_size = slice_size
                 result_dims.append(slice_size)
             elif ic.kind == "full":
                 result_dims.append(dim)

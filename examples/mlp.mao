@@ -1,4 +1,5 @@
 // Multi-layer perceptron
+from nn import { sigmoid };
 
 /// lin mapping
 fn linear(x: f32[B, N], w: f32[N, M], b: f32[M]) -> f32[B, M] {
@@ -9,6 +10,11 @@ fn relu(x: f32[B, N]) -> f32[B, N] {
     let a = linear();
     if x > 0.0 { x } else { 0.0 }
 }
+
+fn apple(x: f32[..]) -> f32[..] {
+    
+    exp(x)
+} 
 
 fn mse_loss(pred: f32[B], target: f32[B]) -> f32 {
     let diff = pred - target;

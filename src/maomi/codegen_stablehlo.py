@@ -1851,11 +1851,14 @@ class StableHLOCodegen:
                 if not isinstance(ic.value, IntLiteral):
                     all_static = False
             elif ic.kind == "slice":
-                start_val = ic.start.value  # IntLiteral guaranteed by type checker
-                end_val = ic.end.value
-                s = self._gen_literal(start_val, ScalarType("i32"))
+                if isinstance(ic.start, IntLiteral):
+                    s = self._gen_literal(ic.start.value, ScalarType("i32"))
+                else:
+                    s = self._gen_expr(ic.start, env)
+                    s = self._normalize_index(s, dim)
+                    all_static = False
                 start_ssas.append(s)
-                slice_sizes.append(end_val - start_val)
+                slice_sizes.append(ic.static_size)
             elif ic.kind == "full":
                 s = self._gen_literal(0, ScalarType("i32"))
                 start_ssas.append(s)
@@ -1893,7 +1896,7 @@ class StableHLOCodegen:
                         limits.append(ic.value.value + 1)
                     elif ic.kind == "slice":
                         starts.append(ic.start.value)
-                        limits.append(ic.end.value)
+                        limits.append(ic.start.value + ic.static_size)
                     else:  # full
                         starts.append(0)
                         limits.append(base_type.dims[i])
@@ -1968,9 +1971,13 @@ class StableHLOCodegen:
                 slice_sizes.append(1)
                 squeezed_axes.append(i)
             elif ic.kind == "slice":
-                s = self._gen_literal(ic.start.value, ScalarType("i32"))
+                if isinstance(ic.start, IntLiteral):
+                    s = self._gen_literal(ic.start.value, ScalarType("i32"))
+                else:
+                    s = self._gen_expr(ic.start, env)
+                    s = self._normalize_index(s, dim)
                 start_ssas.append(s)
-                slice_sizes.append(ic.end.value - ic.start.value)
+                slice_sizes.append(ic.static_size)
             elif ic.kind == "full":
                 s = self._gen_literal(0, ScalarType("i32"))
                 start_ssas.append(s)
