@@ -185,7 +185,10 @@ def _do_validate(ls: LanguageServer, uri: str):
     doc = ls.workspace.get_text_document(uri)
     filepath = _uri_to_path(uri)
     diags, result = validate(doc.source, filepath)
-    _cache[uri] = result
+    # Only update cache when we have a valid program — keeps stale-but-useful
+    # results for completion/hover while the user is mid-typing
+    if result.program is not None:
+        _cache[uri] = result
     ls.text_document_publish_diagnostics(types.PublishDiagnosticsParams(
         uri=uri, diagnostics=diags,
     ))
@@ -314,7 +317,10 @@ _BUILTINS = [
 _BUILTIN_SET = set(_BUILTINS)
 
 
-@server.feature(types.TEXT_DOCUMENT_COMPLETION)
+@server.feature(
+    types.TEXT_DOCUMENT_COMPLETION,
+    types.CompletionOptions(trigger_characters=["."]),
+)
 def completions(ls: LanguageServer, params: types.CompletionParams):
     uri = params.text_document.uri
     result = _cache.get(uri)

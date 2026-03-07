@@ -2,7 +2,7 @@
 
 A pure functional ML language that compiles to XLA via StableHLO. **If it compiles, it's fast.**
 
-LLMs write JAX code that works but is slow — Python loops instead of `scan`/`vmap`, unintentional retracing, host-device transfers, numpy mixed with jnp. No errors, just silent performance loss. Maomi eliminates this: there is no Python to fall back on. The language only expresses operations XLA can optimize. The fast path is the only path.
+LLMs can write working JAX, but getting fully transform-friendly, performance-correct code still often takes review. Maomi narrows the language so the fast, compilable path is also the natural path.
 
 **[Getting Started](docs/getting-started.md)** · **[Language Reference](docs/reference.md)**
 
