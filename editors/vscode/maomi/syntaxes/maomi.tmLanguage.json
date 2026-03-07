@@ -20,6 +20,7 @@
     { "include": "#qualified-call" },
     { "include": "#function-call" },
     { "include": "#operator-arrow" },
+    { "include": "#operator-pipe" },
     { "include": "#operators-comparison" },
     { "include": "#operators-arithmetic" },
     { "include": "#operator-assignment" },
@@ -123,6 +124,10 @@
     "operator-arrow": {
       "match": "->",
       "name": "punctuation.separator.arrow.maomi"
+    },
+    "operator-pipe": {
+      "match": "\\|>",
+      "name": "keyword.operator.pipe.maomi"
     },
     "operators-comparison": {
       "match": "==|!=|<=|>=|<|>",

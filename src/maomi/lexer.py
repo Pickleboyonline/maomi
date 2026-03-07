@@ -195,6 +195,12 @@ class Lexer:
                     self._add(TokenType.GEQ, ">=", line, col)
                 else:
                     self._add(TokenType.GT, ch, line, col)
+            case "|":
+                if self.pos < len(self.source) and self.source[self.pos] == ">":
+                    self._advance()
+                    self._add(TokenType.PIPE, "|>", line, col)
+                else:
+                    self._error("unexpected character '|'")
             case _:
                 self._error(f"unexpected character: {ch!r}")
 

@@ -64,6 +64,7 @@ class TokenType(StrEnum):
     GT = auto()
     LEQ = auto()
     GEQ = auto()
+    PIPE = auto()
 
     # Special
     EOF = auto()

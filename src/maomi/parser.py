@@ -267,7 +267,7 @@ class Parser:
             return self._parse_grad()
         if self._check(TokenType.IF):
             return self._parse_if_expr()
-        expr = self._parse_comparison()
+        expr = self._parse_pipe()
         if self._check(TokenType.WITH):
             return self._parse_with(expr)
         return expr
@@ -356,6 +356,20 @@ class Parser:
         self._expect(TokenType.ASSIGN)
         value = self._parse_expr()
         return path, value
+
+    def _parse_pipe(self) -> Expr:
+        expr = self._parse_comparison()
+        while self._check(TokenType.PIPE):
+            self._advance()
+            rhs = self._parse_comparison()
+            span = Span(expr.span.line_start, expr.span.col_start, rhs.span.line_end, rhs.span.col_end)
+            if isinstance(rhs, CallExpr):
+                expr = CallExpr(rhs.callee, [expr] + rhs.args, span)
+            elif isinstance(rhs, Identifier):
+                expr = CallExpr(rhs.name, [expr], span)
+            else:
+                raise self._error("expected function name or call after '|>'")
+        return expr
 
     def _parse_comparison(self) -> Expr:
         left = self._parse_addition()

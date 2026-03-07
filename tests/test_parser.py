@@ -412,3 +412,63 @@ class TestStructParsing:
         fn = prog.functions[0]
         assert fn.params[0].type_annotation.base == "Point"
         assert fn.return_type.base == "Point"
+
+
+class TestPipe:
+    def test_pipe_bare_function(self):
+        expr = parse_expr("x |> f")
+        assert isinstance(expr, CallExpr)
+        assert expr.callee == "f"
+        assert len(expr.args) == 1
+        assert isinstance(expr.args[0], Identifier)
+        assert expr.args[0].name == "x"
+
+    def test_pipe_with_args(self):
+        expr = parse_expr("x |> f(y)")
+        assert isinstance(expr, CallExpr)
+        assert expr.callee == "f"
+        assert len(expr.args) == 2
+        assert expr.args[0].name == "x"
+        assert expr.args[1].name == "y"
+
+    def test_pipe_chain(self):
+        expr = parse_expr("x |> f |> g")
+        # g(f(x))
+        assert isinstance(expr, CallExpr)
+        assert expr.callee == "g"
+        assert len(expr.args) == 1
+        inner = expr.args[0]
+        assert isinstance(inner, CallExpr)
+        assert inner.callee == "f"
+        assert len(inner.args) == 1
+        assert inner.args[0].name == "x"
+
+    def test_pipe_chain_with_args(self):
+        expr = parse_expr("x |> f(y) |> g(z)")
+        # g(f(x, y), z)
+        assert isinstance(expr, CallExpr)
+        assert expr.callee == "g"
+        assert len(expr.args) == 2
+        inner = expr.args[0]
+        assert isinstance(inner, CallExpr)
+        assert inner.callee == "f"
+        assert len(inner.args) == 2
+
+    def test_pipe_precedence_below_arithmetic(self):
+        expr = parse_expr("a + b |> f")
+        # f(a + b)
+        assert isinstance(expr, CallExpr)
+        assert expr.callee == "f"
+        assert isinstance(expr.args[0], BinOp)
+        assert expr.args[0].op == "+"
+
+    def test_pipe_in_full_function(self):
+        prog = parse("""
+            fn pipeline(x: f32, y: f32) -> f32 {
+                x |> relu |> linear(y)
+            }
+        """)
+        fn = prog.functions[0]
+        expr = fn.body.expr
+        assert isinstance(expr, CallExpr)
+        assert expr.callee == "linear"
