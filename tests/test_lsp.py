@@ -20,6 +20,7 @@ from maomi.lsp import (
     _ca_edit_distance, _ca_find_similar, code_actions, _cache,
     _build_folding_ranges,
     _sel_collect_ancestors, _sel_build_chain,
+    _workspace_symbols,
 )
 from maomi.ast_nodes import (
     Identifier, IntLiteral, FloatLiteral, BinOp, CallExpr,
@@ -1567,3 +1568,118 @@ class TestDocComments:
     def test_signature_help_no_doc(self):
         sh = _build_signature_help("myfn", ["x"], ["f32"], "f32", 0)
         assert sh.signatures[0].documentation is None
+
+
+# ---------------------------------------------------------------------------
+# Workspace Symbols
+# ---------------------------------------------------------------------------
+
+class TestWorkspaceSymbols:
+    def test_search_function_name(self):
+        old_cache = dict(_cache)
+        _cache.clear()
+        try:
+            source1 = "fn add(a: f32, b: f32) -> f32 { a + b }"
+            _, result1 = validate(source1, "<test1>")
+            _cache["file:///test1.mao"] = result1
+
+            source2 = "struct Point { x: f32, y: f32 }\nfn distance(p: Point) -> f32 { p.x }"
+            _, result2 = validate(source2, "<test2>")
+            _cache["file:///test2.mao"] = result2
+
+            symbols = _workspace_symbols("add")
+            assert len(symbols) == 1
+            assert symbols[0].name == "add"
+            assert symbols[0].kind == types.SymbolKind.Function
+            assert symbols[0].location.uri == "file:///test1.mao"
+        finally:
+            _cache.clear()
+            _cache.update(old_cache)
+
+    def test_search_struct_name(self):
+        old_cache = dict(_cache)
+        _cache.clear()
+        try:
+            source = "struct Point { x: f32, y: f32 }\nfn f(p: Point) -> f32 { p.x }"
+            _, result = validate(source, "<test>")
+            _cache["file:///test.mao"] = result
+
+            symbols = _workspace_symbols("Point")
+            assert len(symbols) == 1
+            assert symbols[0].name == "Point"
+            assert symbols[0].kind == types.SymbolKind.Struct
+        finally:
+            _cache.clear()
+            _cache.update(old_cache)
+
+    def test_case_insensitive(self):
+        old_cache = dict(_cache)
+        _cache.clear()
+        try:
+            source = "struct Point { x: f32, y: f32 }\nfn f(p: Point) -> f32 { p.x }"
+            _, result = validate(source, "<test>")
+            _cache["file:///test.mao"] = result
+
+            symbols = _workspace_symbols("point")
+            assert len(symbols) == 1
+            assert symbols[0].name == "Point"
+        finally:
+            _cache.clear()
+            _cache.update(old_cache)
+
+    def test_empty_query_returns_all(self):
+        old_cache = dict(_cache)
+        _cache.clear()
+        try:
+            source1 = "fn add(a: f32, b: f32) -> f32 { a + b }"
+            _, result1 = validate(source1, "<test1>")
+            _cache["file:///test1.mao"] = result1
+
+            source2 = "struct Point { x: f32, y: f32 }\nfn distance(p: Point) -> f32 { p.x }"
+            _, result2 = validate(source2, "<test2>")
+            _cache["file:///test2.mao"] = result2
+
+            symbols = _workspace_symbols("")
+            names = {s.name for s in symbols}
+            assert "add" in names
+            assert "Point" in names
+            assert "distance" in names
+            assert len(symbols) == 3
+        finally:
+            _cache.clear()
+            _cache.update(old_cache)
+
+    def test_no_matches(self):
+        old_cache = dict(_cache)
+        _cache.clear()
+        try:
+            source = "fn add(a: f32, b: f32) -> f32 { a + b }"
+            _, result = validate(source, "<test>")
+            _cache["file:///test.mao"] = result
+
+            symbols = _workspace_symbols("nonexistent")
+            assert symbols == []
+        finally:
+            _cache.clear()
+            _cache.update(old_cache)
+
+    def test_multiple_files_matching(self):
+        old_cache = dict(_cache)
+        _cache.clear()
+        try:
+            source1 = "fn compute_add(a: f32, b: f32) -> f32 { a + b }"
+            _, result1 = validate(source1, "<test1>")
+            _cache["file:///test1.mao"] = result1
+
+            source2 = "fn compute_mul(a: f32, b: f32) -> f32 { a * b }"
+            _, result2 = validate(source2, "<test2>")
+            _cache["file:///test2.mao"] = result2
+
+            symbols = _workspace_symbols("compute")
+            assert len(symbols) == 2
+            names = {s.name for s in symbols}
+            assert "compute_add" in names
+            assert "compute_mul" in names
+        finally:
+            _cache.clear()
+            _cache.update(old_cache)
