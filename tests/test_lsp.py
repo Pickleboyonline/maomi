@@ -10,7 +10,8 @@ from maomi.lsp import (
     _refs_classify_node, _refs_collect_all,
     _build_document_symbols,
     prepare_rename_at, rename_at,
-    _sig_parse_call_context, _BUILTIN_SIGNATURES,
+    _sig_parse_call_context, _BUILTIN_SIGNATURES, _BUILTIN_DOCS,
+    _get_hover_text, _build_signature_help,
     _build_inlay_hints,
     _sem_collect_tokens, _sem_delta_encode,
     _ST_FUNCTION, _ST_PARAMETER, _ST_VARIABLE, _ST_STRUCT,
@@ -1478,3 +1479,92 @@ class TestSelectionRange:
         assert chain_a is not None
         assert chain_b is not None
         # Both should have the same outermost parent (FnDef)
+
+
+# ---------------------------------------------------------------------------
+# Doc comments and builtin docs
+# ---------------------------------------------------------------------------
+
+class TestDocComments:
+    def test_builtin_docs_exist_for_all_builtins(self):
+        from maomi.lsp import _BUILTINS
+        for b in _BUILTINS:
+            assert b in _BUILTIN_DOCS, f"Missing doc for builtin '{b}'"
+
+    def test_hover_builtin_call_shows_docs(self):
+        source = "fn f(x: f32) -> f32 { exp(x) }"
+        diags, result = validate(source, "<test>")
+        fn = result.program.functions[0]
+        call_node = fn.body.expr  # exp(x)
+        assert isinstance(call_node, CallExpr)
+        hover = _get_hover_text(call_node, fn, result)
+        assert hover is not None
+        assert "exp" in hover
+        assert "e^x" in hover  # from _BUILTIN_DOCS
+
+    def test_hover_user_fn_call_shows_docs(self):
+        source = "/// Double the input.\nfn double(x: f32) -> f32 { x + x }\nfn main(x: f32) -> f32 { double(x) }"
+        diags, result = validate(source, "<test>")
+        main_fn = result.program.functions[1]
+        call_node = main_fn.body.expr  # double(x)
+        assert isinstance(call_node, CallExpr)
+        hover = _get_hover_text(call_node, main_fn, result)
+        assert hover is not None
+        assert "double" in hover
+        assert "Double the input." in hover
+
+    def test_hover_fndef_shows_doc(self):
+        source = "/// Compute sum.\nfn mysum(x: f32) -> f32 { x }"
+        diags, result = validate(source, "<test>")
+        fn = result.program.functions[0]
+        hover = _get_hover_text(fn, fn, result)
+        assert hover is not None
+        assert "Compute sum." in hover
+
+    def test_hover_fndef_without_doc(self):
+        source = "fn mysum(x: f32) -> f32 { x }"
+        diags, result = validate(source, "<test>")
+        fn = result.program.functions[0]
+        hover = _get_hover_text(fn, fn, result)
+        assert hover is not None
+        assert "mysum" in hover
+        # No doc section
+        assert hover.count("\n\n") == 0 or "```" in hover
+
+    def test_completion_builtin_has_docs(self):
+        result_list = _complete_general(None, types.Position(line=0, character=0))
+        exp_item = [i for i in result_list.items if i.label == "exp"][0]
+        assert exp_item.documentation is not None
+        assert "e^x" in exp_item.documentation.value
+
+    def test_completion_user_fn_has_docs(self):
+        source = "/// My func.\nfn myfunc(x: f32) -> f32 { x }"
+        diags, result = validate(source, "<test>")
+        result_list = _complete_general(result, types.Position(line=1, character=0))
+        myfunc_item = [i for i in result_list.items if i.label == "myfunc"][0]
+        assert myfunc_item.documentation is not None
+        assert "My func." in myfunc_item.documentation.value
+
+    def test_completion_user_fn_no_doc(self):
+        source = "fn myfunc(x: f32) -> f32 { x }"
+        diags, result = validate(source, "<test>")
+        result_list = _complete_general(result, types.Position(line=0, character=0))
+        myfunc_item = [i for i in result_list.items if i.label == "myfunc"][0]
+        assert myfunc_item.documentation is None
+
+    def test_completion_struct_has_docs(self):
+        source = "/// A point.\nstruct Point { x: f32, y: f32 }\nfn f(p: Point) -> f32 { p.x }"
+        diags, result = validate(source, "<test>")
+        result_list = _complete_general(result, types.Position(line=2, character=0))
+        pt_item = [i for i in result_list.items if i.label == "Point"][0]
+        assert pt_item.documentation is not None
+        assert "A point." in pt_item.documentation.value
+
+    def test_signature_help_builtin_has_doc(self):
+        sh = _build_signature_help("exp", ["x"], ["f32"], "f32", 0, doc="Compute e^x.")
+        assert sh.signatures[0].documentation is not None
+        assert "e^x" in sh.signatures[0].documentation.value
+
+    def test_signature_help_no_doc(self):
+        sh = _build_signature_help("myfn", ["x"], ["f32"], "f32", 0)
+        assert sh.signatures[0].documentation is None

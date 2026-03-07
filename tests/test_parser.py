@@ -472,3 +472,34 @@ class TestPipe:
         expr = fn.body.expr
         assert isinstance(expr, CallExpr)
         assert expr.callee == "linear"
+
+
+class TestDocComments:
+    def test_fn_with_doc_comment(self):
+        prog = parse("/// Add two numbers.\nfn add(a: f32, b: f32) -> f32 { a + b }")
+        assert prog.functions[0].doc == "Add two numbers."
+
+    def test_fn_without_doc_comment(self):
+        prog = parse("fn add(a: f32, b: f32) -> f32 { a + b }")
+        assert prog.functions[0].doc is None
+
+    def test_multiline_doc_comment(self):
+        prog = parse("/// Line 1.\n/// Line 2.\nfn f(x: f32) -> f32 { x }")
+        assert prog.functions[0].doc == "Line 1.\nLine 2."
+
+    def test_struct_with_doc_comment(self):
+        prog = parse("/// A 2D point.\nstruct Point { x: f32, y: f32 }")
+        assert prog.struct_defs[0].doc == "A 2D point."
+
+    def test_struct_without_doc_comment(self):
+        prog = parse("struct Point { x: f32, y: f32 }")
+        assert prog.struct_defs[0].doc is None
+
+    def test_regular_comment_not_captured(self):
+        prog = parse("// Just a comment.\nfn f(x: f32) -> f32 { x }")
+        assert prog.functions[0].doc is None
+
+    def test_doc_comment_only_attaches_to_next_def(self):
+        prog = parse("/// Doc for f.\nfn f(x: f32) -> f32 { x }\nfn g(x: f32) -> f32 { x }")
+        assert prog.functions[0].doc == "Doc for f."
+        assert prog.functions[1].doc is None

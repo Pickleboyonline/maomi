@@ -70,6 +70,30 @@ Named product types defined with the `struct` keyword. See [Structs](#structs) f
 
 ## Syntax
 
+### Comments
+
+Line comments start with `//` and are ignored by the compiler.
+
+```maomi
+// This is a comment
+fn f(x: f32) -> f32 { x } // inline comment
+```
+
+### Doc Comments
+
+Doc comments start with `///` and attach to the next function or struct definition. They are preserved in the AST and surfaced by the LSP (hover, completion, signature help).
+
+```maomi
+/// Compute the ReLU activation.
+/// Returns max(0, x) element-wise.
+fn relu(x: f32) -> f32 {
+    if x > 0.0 { x } else { 0.0 }
+}
+
+/// A 2D point in space.
+struct Point { x: f32, y: f32 }
+```
+
 ### Functions
 
 Functions are the top-level unit. Parameters and return types are annotated. The last expression in the body is the return value.

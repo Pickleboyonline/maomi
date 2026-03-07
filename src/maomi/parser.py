@@ -96,10 +96,11 @@ class Parser:
         struct_defs: list[StructDef] = []
         functions: list[FnDef] = []
         while not self._at_end():
+            doc = self._collect_doc_comments()
             if self._check(TokenType.STRUCT):
-                struct_defs.append(self._parse_struct_def())
+                struct_defs.append(self._parse_struct_def(doc))
             else:
-                functions.append(self._parse_fn_def())
+                functions.append(self._parse_fn_def(doc))
         return Program(imports, struct_defs, functions, self._span_from(start))
 
     # -- Import declarations --
@@ -142,9 +143,17 @@ class Parser:
             alias = self._expect(TokenType.IDENT).value
         return (name, alias)
 
+    # -- Doc comments --
+
+    def _collect_doc_comments(self) -> str | None:
+        lines: list[str] = []
+        while self._check(TokenType.DOC_COMMENT):
+            lines.append(self._advance().value)
+        return "\n".join(lines) if lines else None
+
     # -- Struct definition --
 
-    def _parse_struct_def(self) -> StructDef:
+    def _parse_struct_def(self, doc: str | None = None) -> StructDef:
         start = self._expect(TokenType.STRUCT)
         name = self._expect(TokenType.IDENT).value
         self._expect(TokenType.LBRACE)
@@ -162,11 +171,11 @@ class Parser:
                 field_type = self._parse_type()
                 fields.append((field_name, field_type))
         self._expect(TokenType.RBRACE)
-        return StructDef(name, fields, self._span_from(start))
+        return StructDef(name, fields, self._span_from(start), doc=doc)
 
     # -- Function definition --
 
-    def _parse_fn_def(self) -> FnDef:
+    def _parse_fn_def(self, doc: str | None = None) -> FnDef:
         start = self._expect(TokenType.FN)
         name = self._expect(TokenType.IDENT).value
         self._expect(TokenType.LPAREN)
@@ -175,7 +184,7 @@ class Parser:
         self._expect(TokenType.ARROW)
         return_type = self._parse_type()
         body = self._parse_block()
-        return FnDef(name, params, return_type, body, self._span_from(start))
+        return FnDef(name, params, return_type, body, self._span_from(start), doc=doc)
 
     def _parse_param_list(self) -> list[Param]:
         params: list[Param] = []

@@ -132,6 +132,41 @@ class TestComments:
         ]
 
 
+class TestDocComments:
+    def test_doc_comment_emits_token(self):
+        assert lex("/// hello\nfn") == [
+            (TokenType.DOC_COMMENT, "hello"),
+            (TokenType.FN, "fn"),
+        ]
+
+    def test_regular_comment_still_skipped(self):
+        assert lex("// regular\nfn") == [(TokenType.FN, "fn")]
+
+    def test_doc_comment_strips_leading_space(self):
+        assert lex("/// hello world") == [(TokenType.DOC_COMMENT, "hello world")]
+
+    def test_doc_comment_no_space_after_slashes(self):
+        assert lex("///hello") == [(TokenType.DOC_COMMENT, "hello")]
+
+    def test_multiple_doc_comments(self):
+        result = lex("/// line 1\n/// line 2\nfn")
+        assert result == [
+            (TokenType.DOC_COMMENT, "line 1"),
+            (TokenType.DOC_COMMENT, "line 2"),
+            (TokenType.FN, "fn"),
+        ]
+
+    def test_empty_doc_comment(self):
+        assert lex("///\nfn") == [
+            (TokenType.DOC_COMMENT, ""),
+            (TokenType.FN, "fn"),
+        ]
+
+    def test_four_slashes_is_doc_comment(self):
+        # //// is /// followed by /, so doc comment with leading /
+        assert lex("////foo") == [(TokenType.DOC_COMMENT, "/foo")]
+
+
 class TestLineColTracking:
     def test_first_token_position(self):
         tokens = Lexer("fn").tokenize()

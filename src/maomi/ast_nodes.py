@@ -35,6 +35,7 @@ class StructDef:
     name: str
     fields: list[tuple[str, TypeAnnotation]]
     span: Span
+    doc: str | None = field(default=None, compare=False)
 
 
 # ---------- Function ----------
@@ -54,6 +55,7 @@ class FnDef:
     return_type: TypeAnnotation
     body: Block
     span: Span
+    doc: str | None = field(default=None, compare=False)
 
 
 # ---------- Blocks ----------

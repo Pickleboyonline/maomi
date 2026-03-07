@@ -13,7 +13,8 @@ class Lexer:
 
     def tokenize(self) -> list[Token]:
         while self.pos < len(self.source):
-            self._skip_whitespace_and_comments()
+            if self._skip_whitespace_and_comments():
+                continue  # doc comment emitted, re-enter skip loop
             if self.pos >= len(self.source):
                 break
             self._read_token()
@@ -48,19 +49,37 @@ class Lexer:
 
     # -- Whitespace and comments --
 
-    def _skip_whitespace_and_comments(self):
+    def _skip_whitespace_and_comments(self) -> bool:
         while self.pos < len(self.source):
             ch = self._peek()
             if ch in " \t\r\n":
                 self._advance()
             elif ch == "/" and self._peek_next() == "/":
+                if self.pos + 2 < len(self.source) and self.source[self.pos + 2] == "/":
+                    self._read_doc_comment()
+                    return True
                 self._skip_line_comment()
             else:
                 break
+        return False
 
     def _skip_line_comment(self):
         while self.pos < len(self.source) and self.source[self.pos] != "\n":
             self._advance()
+
+    def _read_doc_comment(self):
+        line, col = self.line, self.col
+        self._advance()  # /
+        self._advance()  # /
+        self._advance()  # /
+        # skip one optional leading space
+        if self.pos < len(self.source) and self.source[self.pos] == " ":
+            self._advance()
+        start = self.pos
+        while self.pos < len(self.source) and self.source[self.pos] != "\n":
+            self._advance()
+        text = self.source[start:self.pos]
+        self._add(TokenType.DOC_COMMENT, text, line, col)
 
     # -- Token dispatch --
 

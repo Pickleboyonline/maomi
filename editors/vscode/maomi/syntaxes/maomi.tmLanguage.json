@@ -3,6 +3,7 @@
   "name": "Maomi",
   "scopeName": "source.maomi",
   "patterns": [
+    { "include": "#doc-comments" },
     { "include": "#comments" },
     { "include": "#strings" },
     { "include": "#struct-definition" },
@@ -28,6 +29,10 @@
     { "include": "#punctuation" }
   ],
   "repository": {
+    "doc-comments": {
+      "match": "///.*$",
+      "name": "comment.block.documentation.maomi"
+    },
     "comments": {
       "match": "//.*$",
       "name": "comment.line.double-slash.maomi"

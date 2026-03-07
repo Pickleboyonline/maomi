@@ -241,13 +241,42 @@ def _get_hover_text(node, fn: FnDef, result: AnalysisResult) -> str | None:
             if node.type_annotation.dims else ""
         ) + "\n```"
 
-    # FnDef: show full signature
+    # FnDef: show full signature + doc
     if isinstance(node, FnDef):
         sig = result.fn_table.get(node.name)
         if sig is not None:
             params = ", ".join(f"{n}: {t}" for n, t in zip(sig.param_names, sig.param_types))
-            return f"```maomi\nfn {node.name}({params}) -> {sig.return_type}\n```"
+            text = f"```maomi\nfn {node.name}({params}) -> {sig.return_type}\n```"
+            if node.doc:
+                text += f"\n\n{node.doc}"
+            return text
         return None
+
+    # CallExpr: show signature + doc for builtins and user functions
+    if isinstance(node, CallExpr):
+        callee = node.callee
+        # Check builtins first
+        builtin = _BUILTIN_SIGNATURES.get(callee)
+        if builtin is not None:
+            pnames, ptypes, ret = builtin
+            params = ", ".join(f"{n}: {t}" for n, t in zip(pnames, ptypes))
+            text = f"```maomi\nfn {callee}({params}) -> {ret}\n```"
+            doc = _BUILTIN_DOCS.get(callee)
+            if doc:
+                text += f"\n\n{doc}"
+            return text
+        # User-defined function
+        sig = result.fn_table.get(callee)
+        if sig is not None:
+            params = ", ".join(f"{n}: {t}" for n, t in zip(sig.param_names, sig.param_types))
+            text = f"```maomi\nfn {callee}({params}) -> {sig.return_type}\n```"
+            # Find the FnDef for doc
+            if result.program:
+                for f in result.program.functions:
+                    if f.name == callee and f.doc:
+                        text += f"\n\n{f.doc}"
+                        break
+            return text
 
     # General expression: look up type_map
     typ = result.type_map.get(id(node))
@@ -341,11 +370,17 @@ def _complete_general(result: AnalysisResult | None, position: types.Position):
         ))
 
     for b in _BUILTINS:
+        doc = _BUILTIN_DOCS.get(b)
         items.append(types.CompletionItem(
             label=b, kind=types.CompletionItemKind.Function, detail="builtin",
+            documentation=types.MarkupContent(
+                kind=types.MarkupKind.Markdown, value=doc,
+            ) if doc else None,
         ))
 
     if result and result.program:
+        # Build fn doc lookup
+        fn_docs = {f.name: f.doc for f in result.program.functions if f.doc}
         # User-defined functions
         for name, sig in result.fn_table.items():
             if name in _BUILTIN_SET or "." in name:
@@ -353,16 +388,25 @@ def _complete_general(result: AnalysisResult | None, position: types.Position):
             params = ", ".join(
                 f"{n}: {t}" for n, t in zip(sig.param_names, sig.param_types)
             )
+            doc = fn_docs.get(name)
             items.append(types.CompletionItem(
                 label=name,
                 kind=types.CompletionItemKind.Function,
                 detail=f"({params}) -> {sig.return_type}",
+                documentation=types.MarkupContent(
+                    kind=types.MarkupKind.Markdown, value=doc,
+                ) if doc else None,
             ))
 
         # Struct names
+        struct_docs = {sd.name: sd.doc for sd in result.program.struct_defs if sd.doc}
         for name in result.struct_defs:
+            doc = struct_docs.get(name)
             items.append(types.CompletionItem(
                 label=name, kind=types.CompletionItemKind.Struct,
+                documentation=types.MarkupContent(
+                    kind=types.MarkupKind.Markdown, value=doc,
+                ) if doc else None,
             ))
 
         # Variables in scope
@@ -1012,6 +1056,28 @@ _BUILTIN_SIGNATURES: dict[str, tuple[list[str], list[str], str]] = {
     "avg_pool": (["input", "window", "strides", "padding"], ["f32[N,C,H,W]", "(wH,wW)", "(sH,sW)", "str"], "f32[...]"),
 }
 
+_BUILTIN_DOCS: dict[str, str] = {
+    "exp": "Compute element-wise exponential (e^x).",
+    "log": "Compute element-wise natural logarithm (ln x).",
+    "tanh": "Compute element-wise hyperbolic tangent.",
+    "sqrt": "Compute element-wise square root.",
+    "abs": "Compute element-wise absolute value.",
+    "mean": "Compute the mean of all elements in an array.",
+    "sum": "Compute the sum of all elements in an array.",
+    "reshape": "Reshape an array to the given dimensions.\n\nTotal element count must be preserved.",
+    "concat": "Concatenate arrays along the given axis.",
+    "iota": "Generate an integer sequence `[0, 1, ..., n-1]` as `i32[n]`.",
+    "transpose": "Transpose a 2D matrix (swap rows and columns).",
+    "callback": "Host callback (no-op in compiled code). Useful for debugging.",
+    "rng_key": "Create a PRNG key from an integer seed.",
+    "rng_split": "Split a PRNG key into `n` independent subkeys.",
+    "rng_uniform": "Sample uniform random values in `[low, high)`.",
+    "rng_normal": "Sample normal random values with given mean and std (Box-Muller).",
+    "conv2d": "2D convolution.\n\nInput: `[N, C, H, W]`, Kernel: `[O, C, kH, kW]`.\nPadding: `\"valid\"` or `\"same\"`.",
+    "max_pool": "2D max pooling.\n\nInput: `[N, C, H, W]`. Reduces spatial dims by window size.",
+    "avg_pool": "2D average pooling.\n\nInput: `[N, C, H, W]`. Reduces spatial dims by window size.",
+}
+
 
 def _sig_parse_call_context(source: str, position: types.Position) -> tuple[str | None, int]:
     """Parse source text backward from cursor to find function name and active param index."""
@@ -1059,14 +1125,21 @@ def _sig_parse_call_context(source: str, position: types.Position) -> tuple[str 
 
 def _build_signature_help(
     callee: str, pnames: list[str], ptypes: list, ret, active_param: int,
+    doc: str | None = None,
 ) -> types.SignatureHelp:
     params_info = [
         types.ParameterInformation(label=f"{n}: {t}")
         for n, t in zip(pnames, ptypes)
     ]
     label = f"{callee}({', '.join(f'{n}: {t}' for n, t in zip(pnames, ptypes))}) -> {ret}"
+    sig_info = types.SignatureInformation(
+        label=label, parameters=params_info,
+        documentation=types.MarkupContent(
+            kind=types.MarkupKind.Markdown, value=doc,
+        ) if doc else None,
+    )
     return types.SignatureHelp(
-        signatures=[types.SignatureInformation(label=label, parameters=params_info)],
+        signatures=[sig_info],
         active_parameter=min(active_param, len(params_info) - 1) if params_info else 0,
     )
 
@@ -1087,14 +1160,24 @@ def signature_help(ls: LanguageServer, params: types.SignatureHelpParams):
     if result and result.fn_table:
         sig = result.fn_table.get(callee)
         if sig is not None:
+            fn_doc = None
+            if result.program:
+                for f in result.program.functions:
+                    if f.name == callee:
+                        fn_doc = f.doc
+                        break
             return _build_signature_help(
                 callee, sig.param_names, sig.param_types, sig.return_type, active_param,
+                doc=fn_doc,
             )
 
     builtin = _BUILTIN_SIGNATURES.get(callee)
     if builtin is not None:
         pnames, ptypes, ret = builtin
-        return _build_signature_help(callee, pnames, ptypes, ret, active_param)
+        return _build_signature_help(
+            callee, pnames, ptypes, ret, active_param,
+            doc=_BUILTIN_DOCS.get(callee),
+        )
 
     return None
 

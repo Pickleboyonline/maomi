@@ -66,6 +66,9 @@ class TokenType(StrEnum):
     GEQ = auto()
     PIPE = auto()
 
+    # Comments
+    DOC_COMMENT = auto()
+
     # Special
     EOF = auto()
 
