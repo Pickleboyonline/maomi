@@ -41,10 +41,17 @@ from .errors import MaomiError
 
 
 def _block_references_var(block: Block, var_name: str) -> bool:
-    """Check if a block's expression references a variable name."""
-    if block.expr is None:
-        return False
-    return _expr_references_var(block.expr, var_name)
+    """Check if a block references a variable name (stmts + trailing expr)."""
+    for stmt in block.stmts:
+        if isinstance(stmt, LetStmt):
+            if _expr_references_var(stmt.value, var_name):
+                return True
+        elif isinstance(stmt, ExprStmt):
+            if _expr_references_var(stmt.expr, var_name):
+                return True
+    if block.expr is not None:
+        return _expr_references_var(block.expr, var_name)
+    return False
 
 
 def _expr_references_var(expr: Expr, var_name: str) -> bool:
@@ -62,6 +69,34 @@ def _expr_references_var(expr: Expr, var_name: str) -> bool:
             return (_expr_references_var(c, var_name)
                     or _block_references_var(tb, var_name)
                     or _block_references_var(eb, var_name))
+        case StructLiteral(fields=fields):
+            return any(_expr_references_var(v, var_name) for _, v in fields)
+        case FieldAccess(object=obj):
+            return _expr_references_var(obj, var_name)
+        case WithExpr(base=base, updates=updates):
+            return (_expr_references_var(base, var_name)
+                    or any(_expr_references_var(v, var_name) for _, v in updates))
+        case IndexExpr(base=base, indices=indices):
+            if _expr_references_var(base, var_name):
+                return True
+            for ic in indices:
+                for e in (ic.value, ic.start, ic.end):
+                    if e is not None and _expr_references_var(e, var_name):
+                        return True
+            return False
+        case CastExpr(expr=e):
+            return _expr_references_var(e, var_name)
+        case ScanExpr(init=init, sequences=seqs, body=body):
+            return (_expr_references_var(init, var_name)
+                    or any(_expr_references_var(s, var_name) for s in seqs)
+                    or _block_references_var(body, var_name))
+        case FoldExpr(init=init, sequences=seqs, body=body):
+            return (_expr_references_var(init, var_name)
+                    or any(_expr_references_var(s, var_name) for s in seqs)
+                    or _block_references_var(body, var_name))
+        case MapExpr(sequence=seq, body=body):
+            return (_expr_references_var(seq, var_name)
+                    or _block_references_var(body, var_name))
         case _:
             return False
 

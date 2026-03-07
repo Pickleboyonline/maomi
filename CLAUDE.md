@@ -27,4 +27,4 @@ A plan is understood when the user has no remaining questions. The user may reph
 
 
 # General:
-- When the user says `use worktrees` or something similar for a feature, you will make a separate worktree/feature branch for the feature you are implementing. The folder will be adjacent to the maomi folder. And has a name with the suffix being related to the feature branch.
+- When the user says `use worktrees`, OR YOU ARE MAKING A PLAN, or something similar for a medium/large feature, you will make a separate worktree/feature branch for the feature you are implementing. The folder will be adjacent to the maomi folder. And has a name with the suffix being related to the feature branch.
