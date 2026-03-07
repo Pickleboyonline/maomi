@@ -16,6 +16,7 @@ run = ["jax>=0.9"]
 tvm = [
     "mlc-ai-nightly-cpu>=0.24.dev0",
 ]
+lsp = ["pygls>=2.0,<3.0"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/maomi"]

@@ -92,6 +92,9 @@ def main():
         help="Execution target for relax backend (default: llvm)",
     )
 
+    lsp_p = subparsers.add_parser("lsp", help="Start Language Server Protocol server")
+    lsp_p.add_argument("--stdio", action="store_true", default=True, help="Use stdio transport (default)")
+
     args = parser.parse_args()
     if args.command is None:
         parser.print_help()
@@ -105,6 +108,17 @@ def main():
             _run_relax(args.file, args.fn, args.seed, args.target)
         else:
             _run(args.file, args.fn, args.seed)
+    elif args.command == "lsp":
+        try:
+            from .lsp import start_server
+        except ImportError:
+            print(
+                "error: pygls is required for the 'lsp' command.\n"
+                "Install with: uv sync --extra lsp",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        start_server()
 
 
 def _compile(path: str, emit: str, backend: str = "stablehlo"):

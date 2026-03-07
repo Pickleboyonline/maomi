@@ -20,3 +20,4 @@ build/
 
 # uv
 uv.lock
+/editors/vscode/maomi/node_modules

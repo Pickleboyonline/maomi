@@ -1,19 +1,25 @@
 {
   "name": "maomi",
   "displayName": "Maomi Language",
-  "description": "Syntax highlighting for the Maomi ML language (.mao)",
-  "version": "0.1.0",
+  "description": "Language support for the Maomi ML language (.mao)",
+  "version": "0.2.0",
   "engines": {
     "vscode": "^1.75.0"
   },
   "categories": ["Programming Languages"],
+  "main": "./extension.js",
+  "activationEvents": ["onLanguage:maomi"],
   "contributes": {
     "languages": [
       {
         "id": "maomi",
         "aliases": ["Maomi", "maomi"],
         "extensions": [".mao"],
-        "configuration": "./language-configuration.json"
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icons/maomi.svg",
+          "dark": "./icons/maomi.svg"
+        }
       }
     ],
     "grammars": [
@@ -22,6 +28,19 @@
         "scopeName": "source.maomi",
         "path": "./syntaxes/maomi.tmLanguage.json"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Maomi",
+      "properties": {
+        "maomi.serverPath": {
+          "type": "string",
+          "default": "maomi",
+          "description": "Path to the maomi executable (install LSP support with: uv sync --extra lsp)"
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.0"
   }
 }
