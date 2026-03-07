@@ -24,3 +24,7 @@ Do not mix "what does the source material say" with "what should we do" in one p
 
 ### Completion Criteria
 A plan is understood when the user has no remaining questions. The user may rephrase concepts in their own words to verify understanding — confirm or correct as needed.
+
+
+# General:
+- When the user says `use worktrees` or something similar for a feature, you will make a separate worktree/feature branch for the feature you are implementing. The folder will be adjacent to the maomi folder. And has a name with the suffix being related to the feature branch.
