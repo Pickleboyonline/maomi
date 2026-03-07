@@ -38,6 +38,11 @@ server = LanguageServer("maomi-lsp", "0.1.0")
 _cache: dict[str, AnalysisResult] = {}
 
 
+def _local_functions(program: Program) -> list[FnDef]:
+    """Return only functions defined in the current file (not imported)."""
+    return [fn for fn in program.functions if "." not in fn.name]
+
+
 # ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
@@ -212,7 +217,7 @@ def hover(ls: LanguageServer, params: types.HoverParams):
     line = params.position.line + 1
     col = params.position.character + 1
 
-    for fn in result.program.functions:
+    for fn in _local_functions(result.program):
         node = _find_node_at(fn, line, col)
         if node is not None:
             hover_text = _get_hover_text(node, fn, result)
@@ -321,8 +326,19 @@ def completions(ls: LanguageServer, params: types.CompletionParams):
     line_text = lines[params.position.line]
     col = params.position.character
 
-    # Dot context: struct field completion
+    # Dot context: struct field or module function completion
     if col > 0 and line_text[col - 1] == ".":
+        # Extract the word before the dot
+        j = col - 2
+        while j >= 0 and (line_text[j].isalnum() or line_text[j] == "_"):
+            j -= 1
+        prefix = line_text[j + 1:col - 1]
+
+        # Check if prefix is a module name (i.e., fn_table has "prefix.something")
+        module_result = _complete_module(result, prefix)
+        if module_result is not None:
+            return module_result
+
         return _complete_dot(result, params.position)
 
     return _complete_general(result, params.position)
@@ -337,7 +353,7 @@ def _complete_dot(result: AnalysisResult | None, position: types.Position):
     # ends at position.character - 1 (0-indexed) = position.character (1-indexed)
     col = position.character
 
-    for fn in result.program.functions:
+    for fn in _local_functions(result.program):
         node = _find_node_at(fn, line, col)
         if node is not None:
             typ = result.type_map.get(id(node))
@@ -354,6 +370,34 @@ def _complete_dot(result: AnalysisResult | None, position: types.Position):
                     ],
                 )
     return None
+
+
+def _complete_module(result: AnalysisResult | None, module_name: str):
+    """Complete functions from an imported module (e.g., 'cnn.' -> cnn.relu, cnn.forward)."""
+    if not result or not result.fn_table or not module_name:
+        return None
+    prefix = module_name + "."
+    items: list[types.CompletionItem] = []
+    fn_docs = {f.name: f.doc for f in result.program.functions if f.doc} if result.program else {}
+    for name, sig in result.fn_table.items():
+        if not name.startswith(prefix):
+            continue
+        short_name = name[len(prefix):]
+        params = ", ".join(
+            f"{n}: {t}" for n, t in zip(sig.param_names, sig.param_types)
+        )
+        doc = fn_docs.get(name)
+        items.append(types.CompletionItem(
+            label=short_name,
+            kind=types.CompletionItemKind.Function,
+            detail=f"({params}) -> {sig.return_type}",
+            documentation=types.MarkupContent(
+                kind=types.MarkupKind.Markdown, value=doc,
+            ) if doc else None,
+        ))
+    if not items:
+        return None
+    return types.CompletionList(is_incomplete=False, items=items)
 
 
 def _complete_general(result: AnalysisResult | None, position: types.Position):
@@ -430,7 +474,7 @@ def _vars_in_scope(
     col = position.character + 1
     variables: list[tuple[str, MaomiType | None]] = []
 
-    for fn in result.program.functions:
+    for fn in _local_functions(result.program):
         if not _span_contains(fn.span, line, col):
             continue
 
@@ -602,7 +646,7 @@ def goto_definition(ls, params: types.DefinitionParams):
         return None
     line = params.position.line + 1
     col = params.position.character + 1
-    for fn in result.program.functions:
+    for fn in _local_functions(result.program):
         node = _find_node_at(fn, line, col)
         if node is not None:
             defn_span = _goto_find_definition(node, fn, result)
@@ -673,11 +717,11 @@ def _refs_collect_all(result, name, kind, include_declaration, fn_scope=None):
 
     if kind == "function":
         if include_declaration:
-            for fn in result.program.functions:
+            for fn in _local_functions(result.program):
                 if fn.name == name:
                     spans.append(fn.span)
                     break
-        for fn in result.program.functions:
+        for fn in _local_functions(result.program):
             _refs_walk_node(fn, name, kind, spans)
 
     elif kind == "variable":
@@ -697,7 +741,7 @@ def _refs_collect_all(result, name, kind, include_declaration, fn_scope=None):
                 if sd.name == name:
                     spans.append(sd.span)
                     break
-        for fn in result.program.functions:
+        for fn in _local_functions(result.program):
             _refs_walk_node(fn, name, kind, spans)
 
     return spans
@@ -733,7 +777,7 @@ def find_references(ls, params: types.ReferenceParams):
             return [types.Location(uri=uri, range=_span_to_range(s))
                     for s in spans]
 
-    for fn in result.program.functions:
+    for fn in _local_functions(result.program):
         node = _find_node_at(fn, line, col)
         if node is not None:
             name, kind = _refs_classify_node(node, line, col)
@@ -774,7 +818,7 @@ def _build_document_symbols(result: AnalysisResult) -> list[types.DocumentSymbol
             children=children,
         ))
 
-    for fn in result.program.functions:
+    for fn in _local_functions(result.program):
         r = _span_to_range(fn.span)
         children = []
         for param in fn.params:
@@ -937,7 +981,7 @@ def prepare_rename_at(
     col = col_0 + 1
     source_lines = source.splitlines()
 
-    for fn in result.program.functions:
+    for fn in _local_functions(result.program):
         node = _find_node_at(fn, line, col)
         if node is not None:
             name, kind = _rename_classify(node)
@@ -968,7 +1012,7 @@ def rename_at(
     node = None
     fn_scope = None
 
-    for fn in result.program.functions:
+    for fn in _local_functions(result.program):
         node = _find_node_at(fn, line, col)
         if node is not None:
             fn_scope = fn
@@ -1247,7 +1291,7 @@ def _build_inlay_hints(
         return []
     source_lines = source.splitlines()
     hints: list[types.InlayHint] = []
-    for fn in result.program.functions:
+    for fn in _local_functions(result.program):
         _inlay_collect_hints(
             fn.body, result.type_map, start_line, end_line, hints, source_lines,
         )
@@ -1455,7 +1499,7 @@ def semantic_tokens_full(ls: LanguageServer, params: types.SemanticTokensParams)
     for sd in result.program.struct_defs:
         _sem_collect_tokens(sd, tokens, set())
 
-    for fn in result.program.functions:
+    for fn in _local_functions(result.program):
         _sem_collect_tokens(fn, tokens, set())
 
     data = _sem_delta_encode(tokens)
@@ -1623,7 +1667,7 @@ def _build_folding_ranges(result: AnalysisResult) -> list[types.FoldingRange]:
     for sd in result.program.struct_defs:
         _fold_collect_ranges(sd, ranges)
 
-    for fn in result.program.functions:
+    for fn in _local_functions(result.program):
         _fold_collect_ranges_fn(fn, ranges)
 
     return ranges
@@ -1699,7 +1743,7 @@ def selection_ranges(ls: LanguageServer, params: types.SelectionRangeParams):
         col = pos.character + 1
 
         ancestors: list = []
-        for fn in result.program.functions:
+        for fn in _local_functions(result.program):
             if _sel_collect_ancestors(fn, line, col, ancestors):
                 break
 
