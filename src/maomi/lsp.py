@@ -235,6 +235,16 @@ def hover(ls: LanguageServer, params: types.HoverParams):
     return None
 
 
+def _fmt_annotation(ta) -> str:
+    """Format a TypeAnnotation as a readable string like 'f32[B, N]'."""
+    if ta is None:
+        return "?"
+    if not ta.dims:
+        return ta.base
+    dims = ", ".join(str(d.value) for d in ta.dims)
+    return f"{ta.base}[{dims}]"
+
+
 def _get_hover_text(node, fn: FnDef, result: AnalysisResult) -> str | None:
     # LetStmt: show "let name: type"
     if isinstance(node, LetStmt):
@@ -256,10 +266,14 @@ def _get_hover_text(node, fn: FnDef, result: AnalysisResult) -> str | None:
         if sig is not None:
             params = ", ".join(f"{n}: {t}" for n, t in zip(sig.param_names, sig.param_types))
             text = f"```maomi\nfn {node.name}({params}) -> {sig.return_type}\n```"
-            if node.doc:
-                text += f"\n\n{node.doc}"
-            return text
-        return None
+        else:
+            # Fallback for generic functions (symbolic dims) — build from AST
+            params = ", ".join(f"{p.name}: {_fmt_annotation(p.type_annotation)}" for p in node.params)
+            ret = _fmt_annotation(node.return_type) if node.return_type else "?"
+            text = f"```maomi\nfn {node.name}({params}) -> {ret}\n```"
+        if node.doc:
+            text += f"\n\n{node.doc}"
+        return text
 
     # CallExpr: show signature + doc for builtins and user functions
     if isinstance(node, CallExpr):
@@ -279,13 +293,22 @@ def _get_hover_text(node, fn: FnDef, result: AnalysisResult) -> str | None:
         if sig is not None:
             params = ", ".join(f"{n}: {t}" for n, t in zip(sig.param_names, sig.param_types))
             text = f"```maomi\nfn {callee}({params}) -> {sig.return_type}\n```"
-            # Find the FnDef for doc
             if result.program:
                 for f in result.program.functions:
                     if f.name == callee and f.doc:
                         text += f"\n\n{f.doc}"
                         break
             return text
+        # Fallback for generic functions (symbolic dims) — build from AST
+        if result.program:
+            for f in result.program.functions:
+                if f.name == callee:
+                    params = ", ".join(f"{p.name}: {_fmt_annotation(p.type_annotation)}" for p in f.params)
+                    ret = _fmt_annotation(f.return_type) if f.return_type else "?"
+                    text = f"```maomi\nfn {callee}({params}) -> {ret}\n```"
+                    if f.doc:
+                        text += f"\n\n{f.doc}"
+                    return text
 
     # General expression: look up type_map
     typ = result.type_map.get(id(node))
