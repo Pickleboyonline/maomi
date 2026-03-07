@@ -20,11 +20,12 @@ from maomi.lsp import (
     _ca_edit_distance, _ca_find_similar, code_actions, _cache,
     _build_folding_ranges,
     _sel_collect_ancestors, _sel_build_chain,
+    _goto_type_definition,
 )
 from maomi.ast_nodes import (
     Identifier, IntLiteral, FloatLiteral, BinOp, CallExpr,
     LetStmt, FnDef, Block, Span, StructLiteral, FieldAccess,
-    ScanExpr, MapExpr,
+    ScanExpr, MapExpr, Param,
 )
 from maomi.errors import MaomiError
 
@@ -1567,3 +1568,81 @@ class TestDocComments:
     def test_signature_help_no_doc(self):
         sh = _build_signature_help("myfn", ["x"], ["f32"], "f32", 0)
         assert sh.signatures[0].documentation is None
+
+
+# ---------------------------------------------------------------------------
+# Go-to-Type-Definition tests
+# ---------------------------------------------------------------------------
+
+class TestGoToTypeDefinition:
+    def _find_node_by_type_and_attr(self, fn, node_type, attr_name, attr_value):
+        """Recursively find a node of given type with matching attribute."""
+        if isinstance(fn, node_type):
+            if getattr(fn, attr_name, None) == attr_value:
+                return fn
+        for child in _children_of(fn):
+            result = self._find_node_by_type_and_attr(child, node_type, attr_name, attr_value)
+            if result is not None:
+                return result
+        return None
+
+    def test_param_of_struct_type(self):
+        source = "struct Point { x: f32, y: f32 }\nfn f(p: Point) -> f32 { p.x }"
+        diags, result = validate(source, "<test>")
+        assert result.program is not None
+        fn = result.program.functions[0]
+        struct_def = result.program.struct_defs[0]
+        # Find the Param node 'p'
+        param_node = fn.params[0]
+        assert isinstance(param_node, Param)
+        assert param_node.name == "p"
+        span = _goto_type_definition(param_node, fn, result)
+        assert span is not None
+        assert span == struct_def.span
+
+    def test_let_binding_of_struct_type(self):
+        source = (
+            "struct Point { x: f32, y: f32 }\n"
+            "fn f() -> f32 { let p = Point { x: 1.0, y: 2.0 }; p.x }"
+        )
+        diags, result = validate(source, "<test>")
+        assert result.program is not None
+        fn = result.program.functions[0]
+        struct_def = result.program.struct_defs[0]
+        # Find the LetStmt node
+        let_node = fn.body.stmts[0]
+        assert isinstance(let_node, LetStmt)
+        span = _goto_type_definition(let_node, fn, result)
+        assert span is not None
+        assert span == struct_def.span
+
+    def test_primitive_type_returns_none(self):
+        source = "fn f(x: f32) -> f32 { x }"
+        diags, result = validate(source, "<test>")
+        assert result.program is not None
+        fn = result.program.functions[0]
+        # Param with primitive type
+        param_node = fn.params[0]
+        assert isinstance(param_node, Param)
+        span = _goto_type_definition(param_node, fn, result)
+        assert span is None
+
+    def test_identifier_of_struct_type(self):
+        source = (
+            "struct Point { x: f32, y: f32 }\n"
+            "fn f(p: Point) -> f32 { p.x }"
+        )
+        diags, result = validate(source, "<test>")
+        assert result.program is not None
+        fn = result.program.functions[0]
+        struct_def = result.program.struct_defs[0]
+        # Find the Identifier 'p' in the body (inside FieldAccess p.x)
+        field_node = self._find_node_by_type_and_attr(fn.body, FieldAccess, "field", "x")
+        assert field_node is not None
+        # The object of the FieldAccess is an Identifier 'p'
+        ident_node = field_node.object
+        assert isinstance(ident_node, Identifier)
+        assert ident_node.name == "p"
+        span = _goto_type_definition(ident_node, fn, result)
+        assert span is not None
+        assert span == struct_def.span
