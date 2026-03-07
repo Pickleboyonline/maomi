@@ -141,6 +141,132 @@ class TestMap:
         assert "stablehlo.select" in out
 
 
+class TestGeneralMap:
+    def test_matmul_in_map(self):
+        out = codegen("""
+            fn f(w: f32[64, 10], xs: f32[32, 64]) -> f32[32, 10] {
+                map x in xs { x @ w }
+            }
+        """)
+        assert "stablehlo.dot_general" in out
+        assert "batching_dims = [0] x [0]" in out
+        assert "tensor<32x10xf32>" in out
+
+    def test_sum_in_map(self):
+        out = codegen("""
+            fn f(xs: f32[32, 64]) -> f32[32] {
+                map x in xs { sum(x) }
+            }
+        """)
+        assert "stablehlo.reduce" in out
+        assert "dimensions = [1]" in out
+        assert "tensor<32xf32>" in out
+
+    def test_mean_in_map(self):
+        out = codegen("""
+            fn f(xs: f32[32, 64]) -> f32[32] {
+                map x in xs { mean(x) }
+            }
+        """)
+        assert "stablehlo.reduce" in out
+        assert "stablehlo.divide" in out
+
+    def test_transpose_in_map(self):
+        out = codegen("""
+            fn f(xs: f32[32, 4, 8]) -> f32[32, 8, 4] {
+                map x in xs { transpose(x) }
+            }
+        """)
+        assert "stablehlo.transpose" in out
+        assert "dims = [0, 2, 1]" in out
+
+    def test_matmul_sum_in_map(self):
+        out = codegen("""
+            fn f(w: f32[64, 10], xs: f32[32, 64]) -> f32[32] {
+                map x in xs { sum(x @ w) }
+            }
+        """)
+        assert "stablehlo.dot_general" in out
+        assert "batching_dims = [0] x [0]" in out
+        assert "stablehlo.reduce" in out
+
+    def test_matmul_bias_in_map(self):
+        out = codegen("""
+            fn f(w: f32[64, 10], b: f32[10], xs: f32[32, 64]) -> f32[32, 10] {
+                map x in xs { x @ w + b }
+            }
+        """)
+        assert "stablehlo.dot_general" in out
+        assert "stablehlo.add" in out
+
+    def test_index_in_map(self):
+        out = codegen("""
+            fn f(xs: f32[32, 64]) -> f32[32] {
+                map x in xs { x[0] }
+            }
+        """)
+        assert "stablehlo.slice" in out or "stablehlo.dynamic_slice" in out
+
+    def test_let_binding_in_map(self):
+        out = codegen("""
+            fn f(w: f32[64, 10], xs: f32[32, 64]) -> f32[32, 10] {
+                map x in xs {
+                    let h = x @ w;
+                    h + h
+                }
+            }
+        """)
+        assert "stablehlo.dot_general" in out
+        assert "stablehlo.add" in out
+
+    def test_nested_map(self):
+        out = codegen("""
+            fn f(xs: f32[5, 10]) -> f32[5, 10] {
+                map row in xs {
+                    map elem in row { elem * 2.0 }
+                }
+            }
+        """)
+        assert "stablehlo.multiply" in out
+
+    def test_fn_call_in_map(self):
+        out = codegen("""
+            fn predict(w: f32[64, 10], x: f32[64]) -> f32[10] {
+                x @ w
+            }
+            fn batch(w: f32[64, 10], xs: f32[32, 64]) -> f32[32, 10] {
+                map x in xs { predict(w, x) }
+            }
+        """)
+        assert "func.func @predict_vmap_32" in out
+        assert "func.call @predict_vmap_32" in out
+        assert "batching_dims" in out
+
+    def test_fn_call_with_bias_in_map(self):
+        out = codegen("""
+            fn layer(w: f32[64, 10], b: f32[10], x: f32[64]) -> f32[10] {
+                x @ w + b
+            }
+            fn batch_layer(w: f32[64, 10], b: f32[10], xs: f32[32, 64]) -> f32[32, 10] {
+                map x in xs { layer(w, b, x) }
+            }
+        """)
+        assert "func.func @layer_vmap_32" in out
+        assert "func.call @layer_vmap_32" in out
+
+    def test_scan_in_map(self):
+        out = codegen("""
+            fn f(xs: f32[32, 10]) -> f32[32, 10] {
+                map x in xs {
+                    scan (acc, e) in (0.0, x) { acc + e }
+                }
+            }
+        """)
+        assert "stablehlo.while" in out
+        assert "stablehlo.add" in out
+        assert "tensor<32x10xf32>" in out
+
+
 class TestScan:
     def test_scan_accumulate(self):
         out = codegen("""

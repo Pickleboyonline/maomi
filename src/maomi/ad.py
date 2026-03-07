@@ -53,6 +53,7 @@ from .ast_nodes import (
     _MaxPoolGrad,
     _AvgPoolGrad,
     _BroadcastExpr,
+    _ReduceSum,
     Span,
     Expr,
 )
@@ -149,6 +150,8 @@ def _collect_free_vars_inner(expr: Expr, result: set[str]):
             _collect_free_vars_inner(ie, result)
             _collect_free_vars_inner(adj, result)
         case _BroadcastExpr(expr=e):
+            _collect_free_vars_inner(e, result)
+        case _ReduceSum(expr=e):
             _collect_free_vars_inner(e, result)
 
 
@@ -681,12 +684,32 @@ class ADTransform:
                 r_name = var_map[id(right)]
                 l_ref = self._make_ref(l_name, self._type_of(left))
                 r_ref = self._make_ref(r_name, self._type_of(right))
+                lt = self._type_of(left)
+                rt = self._type_of(right)
+                l_is_1d = isinstance(lt, ArrayType) and len(lt.dims) == 1
+                r_is_1d = isinstance(rt, ArrayType) and len(rt.dims) == 1
+
                 # dL/dA = dL/dC @ B^T
-                r_transposed = self._make_call("transpose", [r_ref])
-                self._accumulate(adjoints, l_name, self._make_binop("@", adj, r_transposed))
+                if r_is_1d:
+                    # B is 1D: reshape adj and B for outer product, then extract
+                    r_col = self._make_call("reshape", [r_ref, IntLiteral(rt.dims[0], _DUMMY_SPAN), IntLiteral(1, _DUMMY_SPAN)])
+                    adj_row = self._make_call("reshape", [adj, IntLiteral(1, _DUMMY_SPAN), IntLiteral(rt.dims[0], _DUMMY_SPAN)])
+                    self._accumulate(adjoints, l_name, self._make_binop("@", adj_row, r_col))
+                else:
+                    r_transposed = self._make_call("transpose", [r_ref])
+                    self._accumulate(adjoints, l_name, self._make_binop("@", adj, r_transposed))
+
                 # dL/dB = A^T @ dL/dC
-                l_transposed = self._make_call("transpose", [l_ref])
-                self._accumulate(adjoints, r_name, self._make_binop("@", l_transposed, adj))
+                if l_is_1d:
+                    # A is 1D [D]: reshape to [D,1], adj is 1D [K] reshape to [1,K]
+                    adj_t = self._type_of(adj)
+                    adj_k = adj_t.dims[0] if isinstance(adj_t, ArrayType) else 1
+                    l_col = self._make_call("reshape", [l_ref, IntLiteral(lt.dims[0], _DUMMY_SPAN), IntLiteral(1, _DUMMY_SPAN)])
+                    adj_row = self._make_call("reshape", [adj, IntLiteral(1, _DUMMY_SPAN), IntLiteral(adj_k, _DUMMY_SPAN)])
+                    self._accumulate(adjoints, r_name, self._make_binop("@", l_col, adj_row))
+                else:
+                    l_transposed = self._make_call("transpose", [l_ref])
+                    self._accumulate(adjoints, r_name, self._make_binop("@", l_transposed, adj))
 
             case CallExpr(callee=callee, args=args):
                 if callee in _IOTA_BUILTINS:
@@ -1086,17 +1109,43 @@ class ADTransform:
         contribution = self._make_binop("*", adj, grad_map)
         self._accumulate(adjoints, seq_name, contribution)
 
-        # Also propagate to free variables in the body (other than elem_var)
+        # Propagate to free variables in the body (other than elem_var)
+        # For free var w: d(map x in xs { f(x, w) })/dw = sum_i(adj[i] * d(f(x_i, w))/dw)
         free_vars = _collect_free_vars(body_expr) - {elem_var}
-        tape_vars = set(var_map.values())
+        seq_type = self._type_of(seq)
         for v_name in free_vars:
-            if v_name not in tape_vars:
-                continue
-            # For a free variable w in the body: d(map x in xs { f(x, w) })/dw
-            # = sum over elements of d(f(x_i, w))/dw
-            # This requires a reduction, which is complex. For now, skip —
-            # free variables in map bodies are treated as constants.
-            pass
+
+            # Per-element gradient d(body)/d(w)
+            grad_w = self._differentiate_branch(body_expr, v_name)
+
+            # Wrap in map: map elem_var in seq { d(body)/d(w) }
+            seq_ref = self._make_ref(seq_name, seq_type)
+            grad_map_w = MapExpr(elem_var, seq_ref,
+                                 Block([], grad_w, _DUMMY_SPAN), _DUMMY_SPAN)
+
+            # Type the grad map: seq_len prepended to w's type
+            w_type = self._type_of(grad_w)
+            if isinstance(seq_type, ArrayType) and w_type is not None:
+                seq_len = seq_type.dims[0]
+                if isinstance(w_type, ScalarType):
+                    grad_map_type = ArrayType(w_type.base, (seq_len,))
+                elif isinstance(w_type, ArrayType):
+                    grad_map_type = ArrayType(w_type.base, (seq_len,) + w_type.dims)
+                else:
+                    grad_map_type = w_type
+                self.type_map[id(grad_map_w)] = grad_map_type
+            else:
+                grad_map_type = map_type
+
+            # Scale by adjoint: adj * grad_map_w (broadcasts adj over non-batch dims)
+            scaled = self._make_binop("*", adj, grad_map_w)
+
+            # Reduce over dimension 0 (the map/batch dimension) to get w-shaped gradient
+            reduced = _ReduceSum(expr=scaled, axes=(0,), span=_DUMMY_SPAN)
+            if w_type is not None:
+                self.type_map[id(reduced)] = w_type
+
+            self._accumulate(adjoints, v_name, reduced)
 
     def _backprop_scan(self, carry_var: str, elem_vars: list[str],
                         init: Expr, sequences: list[Expr], body: Block,
