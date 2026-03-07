@@ -16,8 +16,10 @@ Supported operations inside grad:
   let bindings
   identifiers, float/int literals
 
+  grad-of-grad (nested grad expressions, e.g. grad(grad(x**3, x), x))
+
 Not supported (emits compile error):
-  grad-of-grad
+  grad-of-grad through scan or indexing
 """
 from __future__ import annotations
 
@@ -60,6 +62,7 @@ _REDUCTION_BUILTINS = {"mean", "sum"}
 _SHAPE_BUILTINS = {"reshape", "concat"}
 _NONDIFF_BUILTINS = {"callback"}
 _IOTA_BUILTINS = {"iota"}
+_MAX_GRAD_DEPTH = 10
 
 
 def _collect_free_vars(expr: Expr) -> set[str]:
@@ -127,6 +130,8 @@ def _collect_free_vars_inner(expr: Expr, result: set[str]):
             _collect_free_vars_inner(base, result)
             _collect_free_vars_inner(adj, result)
             _collect_free_vars_inner(indices, result)
+        case GradExpr(expr=inner_expr):
+            _collect_free_vars_inner(inner_expr, result)
 
 
 def transform_grad(program: Program, type_map: dict[int, MaomiType]) -> Program:
@@ -144,6 +149,7 @@ class ADTransform:
         self._name_counter = 0
         self._inlining_stack: set[str] = set()  # cycle detection for inlining
         self._tape_exprs: dict[str, Expr] = {}  # tape name -> original AST expression
+        self._grad_depth: int = 0  # nesting depth for grad-of-grad
 
     def _fresh_name(self, prefix: str = "_ad") -> str:
         self._name_counter += 1
@@ -342,7 +348,7 @@ class ADTransform:
                 if callee in _NONDIFF_BUILTINS:
                     # Callback: no value, no gradient. Skip entirely.
                     return
-                elif callee in _IOTA_BUILTINS | _ELEMENTWISE_BUILTINS | _REDUCTION_BUILTINS | _SHAPE_BUILTINS:
+                elif callee in _IOTA_BUILTINS | _ELEMENTWISE_BUILTINS | _REDUCTION_BUILTINS | _SHAPE_BUILTINS | {"transpose"}:
                     # Built-in: put on tape as-is
                     for a in args:
                         self._linearize(a, tape, var_map, let_env)
@@ -404,6 +410,21 @@ class ADTransform:
                 name = self._fresh_name("v")
                 var_map[id(expr)] = name
                 tape.append((name, expr))
+            case GradExpr(expr=inner_expr, wrt=inner_wrt):
+                self._grad_depth += 1
+                if self._grad_depth > _MAX_GRAD_DEPTH:
+                    raise MaomiError(
+                        f"grad: maximum nesting depth exceeded (limit: {_MAX_GRAD_DEPTH})",
+                        "<ad>", expr.span.line_start, expr.span.col_start,
+                    )
+                saved_tape_exprs = self._tape_exprs
+                try:
+                    inner_result = self._differentiate(inner_expr, inner_wrt, expr, let_env)
+                finally:
+                    self._tape_exprs = saved_tape_exprs
+                    self._grad_depth -= 1
+                self._linearize(inner_result, tape, var_map, let_env)
+                var_map[id(expr)] = var_map[id(inner_result)]
             case _:
                 raise MaomiError(
                     f"grad: unsupported expression type {type(expr).__name__} inside grad",
@@ -527,6 +548,11 @@ class ADTransform:
                 node = IndexExpr(new_base, new_indices, expr.span)
                 self._copy_type(expr, node)
                 return node
+            case GradExpr(expr=inner_expr, wrt=wrt):
+                new_inner = self._substitute(inner_expr, subst)
+                node = GradExpr(new_inner, wrt, expr.span)
+                self._copy_type(expr, node)
+                return node
             case _:
                 return expr
 
@@ -631,6 +657,11 @@ class ADTransform:
                     self._backprop_reshape(args, adj, adjoints, var_map)
                 elif callee == "concat":
                     self._backprop_concat(args, adj, adjoints, var_map)
+                elif callee == "transpose":
+                    # transpose is self-adjoint: d/dx transpose(x) = transpose(adj)
+                    arg = args[0]
+                    arg_name = var_map[id(arg)]
+                    self._accumulate(adjoints, arg_name, self._make_call("transpose", [adj]))
                 else:
                     raise MaomiError(
                         f"grad: unsupported function call '{callee}' inside grad",
@@ -875,12 +906,17 @@ class ADTransform:
 
     def _differentiate_branch(self, expr: Expr, wrt: str) -> Expr:
         """Compute d(expr)/d(wrt) for a branch expression using a fresh tape."""
+        saved_tape_exprs = self._tape_exprs
+
         tape: list[tuple[str, Expr]] = []
         var_map: dict[int, str] = {}
         self._linearize(expr, tape, var_map, {})
 
         if id(expr) not in var_map:
+            self._tape_exprs = saved_tape_exprs
             return self._make_float(0.0)
+
+        self._tape_exprs = {name: node for name, node in tape}
 
         output_name = var_map[id(expr)]
         adjoints: dict[str, Expr] = {output_name: self._make_float(1.0)}
@@ -890,6 +926,8 @@ class ADTransform:
                 continue
             adj = adjoints[name]
             self._backprop(name, node, adj, adjoints, var_map)
+
+        self._tape_exprs = saved_tape_exprs
 
         if wrt in adjoints:
             return adjoints[wrt]
