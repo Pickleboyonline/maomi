@@ -71,9 +71,6 @@ def _base_of(t: MaomiType) -> str:
 
 def _make_builtins() -> dict[str, FnSignature]:
     builtins = {}
-    # Reduction: array -> scalar
-    for name in ("mean", "sum"):
-        builtins[name] = FnSignature(["x"], [ArrayType("f32", ("N",))], F32)
     # Elementwise: scalar -> scalar (also works on arrays via type matching)
     for name in ("exp", "log", "tanh", "sqrt", "abs"):
         builtins[name] = FnSignature(["x"], [ScalarType("f32")], F32)
@@ -827,6 +824,10 @@ class TypeChecker:
         if expr.callee in _RNG_BUILTINS:
             return self._check_rng_call(expr, env)
 
+        # sum/mean — reduction with optional axis
+        if expr.callee in ("sum", "mean"):
+            return self._check_reduction(expr, env)
+
         # reshape(array, dim1, dim2, ...) — variadic shape builtin
         if expr.callee == "reshape":
             return self._check_reshape(expr, env)
@@ -857,6 +858,17 @@ class TypeChecker:
         # max_pool / avg_pool(input, wh, ww, sh, sw)
         if expr.callee in ("max_pool", "avg_pool"):
             return self._check_pool(expr, env)
+
+        # stop_gradient(expr) — identity, prevents gradient flow
+        if expr.callee == "stop_gradient":
+            if len(expr.args) != 1:
+                self._error("stop_gradient expects exactly 1 argument", expr.span.line_start, expr.span.col_start)
+                return None
+            return self._infer(expr.args[0], env)
+
+        # where(cond, x, y) — element-wise conditional
+        if expr.callee == "where":
+            return self._check_where(expr, env)
 
         # transpose(matrix) — swap dims of a 2D array
         if expr.callee == "transpose":
@@ -903,6 +915,98 @@ class TypeChecker:
                     break
 
         return ret
+
+    def _check_reduction(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
+        """Check sum(x) or sum(x, axis) / mean(x) or mean(x, axis)."""
+        if len(expr.args) < 1 or len(expr.args) > 2:
+            self._error(
+                f"{expr.callee} expects 1 or 2 arguments",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        arg_type = self._infer(expr.args[0], env)
+        if arg_type is None:
+            return None
+
+        # Lift scalar arg: sum/mean of scalar is itself
+        if isinstance(arg_type, ScalarType):
+            if len(expr.args) == 2:
+                self._error(
+                    f"{expr.callee} with axis requires an array argument",
+                    expr.span.line_start, expr.span.col_start,
+                )
+                return None
+            return arg_type
+
+        if not isinstance(arg_type, ArrayType):
+            self._error(
+                f"{expr.callee} requires a numeric argument",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        if len(expr.args) == 1:
+            # Reduce all dims → scalar
+            return ScalarType(arg_type.base)
+
+        # 2 args: axis-specific reduction
+        axis_arg = expr.args[1]
+        self._infer(axis_arg, env)
+        if not isinstance(axis_arg, IntLiteral):
+            self._error(
+                f"{expr.callee} axis must be an integer literal",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        axis = axis_arg.value
+        ndim = len(arg_type.dims)
+        if axis < 0 or axis >= ndim:
+            self._error(
+                f"{expr.callee} axis {axis} out of range for {ndim}D array",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        # Remove the reduced dimension
+        new_dims = tuple(d for i, d in enumerate(arg_type.dims) if i != axis)
+        if len(new_dims) == 0:
+            return ScalarType(arg_type.base)
+        return ArrayType(arg_type.base, new_dims)
+
+    def _check_where(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
+        if len(expr.args) != 3:
+            self._error(
+                "where expects exactly 3 arguments: where(cond, x, y)",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+        cond_type = self._infer(expr.args[0], env)
+        x_type = self._infer(expr.args[1], env)
+        y_type = self._infer(expr.args[2], env)
+        if cond_type is None or x_type is None or y_type is None:
+            return None
+
+        # Condition must be bool
+        cond_base = _base_of(cond_type) if cond_type else None
+        if cond_base != "bool":
+            self._error(
+                f"where condition must be bool, got {cond_type}",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        # x and y must be broadcastable
+        result_type = self._broadcast(x_type, y_type)
+        if result_type is None:
+            self._error(
+                f"where branches must be compatible types, got {x_type} and {y_type}",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        return result_type
 
     def _check_transpose(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
         if len(expr.args) != 1:
@@ -1385,19 +1489,23 @@ class TypeChecker:
         if isinstance(a, ArrayType) and isinstance(b, ScalarType):
             return a
 
-        # Array + Array with different ranks — trailing dims must match
+        # Array + Array — numpy-style broadcasting with size-1 dims
         if isinstance(a, ArrayType) and isinstance(b, ArrayType):
-            if len(a.dims) >= len(b.dims):
-                longer, shorter = a, b
-            else:
-                longer, shorter = b, a
-            # Check that shorter dims match the trailing dims of longer
-            offset = len(longer.dims) - len(shorter.dims)
-            for i, sd in enumerate(shorter.dims):
-                ld = longer.dims[offset + i]
-                if not self._dims_match(sd, ld):
+            max_rank = max(len(a.dims), len(b.dims))
+            # Left-pad shorter dims with 1s
+            a_padded = (1,) * (max_rank - len(a.dims)) + tuple(a.dims)
+            b_padded = (1,) * (max_rank - len(b.dims)) + tuple(b.dims)
+            result_dims: list[int | str] = []
+            for ad, bd in zip(a_padded, b_padded):
+                if self._dims_match(ad, bd):
+                    result_dims.append(ad)
+                elif isinstance(ad, int) and ad == 1:
+                    result_dims.append(bd)
+                elif isinstance(bd, int) and bd == 1:
+                    result_dims.append(ad)
+                else:
                     return None
-            return longer
+            return ArrayType(a.base, tuple(result_dims))
 
         return None
 

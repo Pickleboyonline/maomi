@@ -380,3 +380,57 @@ class TestPool:
         assert "stablehlo.reduce_window" in out
         assert "stablehlo.add" in out
         assert "stablehlo.divide" in out
+
+
+class TestAxisReductionCodegen:
+    def test_sum_axis(self):
+        out = codegen("fn f(x: f32[3, 4]) -> f32[3] { sum(x, 1) }")
+        assert "across dimensions = [1]" in out
+        assert "tensor<3x4xf32>" in out
+        assert "-> tensor<3xf32>" in out
+
+    def test_sum_axis_0(self):
+        out = codegen("fn f(x: f32[3, 4]) -> f32[4] { sum(x, 0) }")
+        assert "across dimensions = [0]" in out
+
+    def test_mean_axis(self):
+        out = codegen("fn f(x: f32[3, 4]) -> f32[4] { mean(x, 0) }")
+        assert "stablehlo.reduce" in out
+        assert "stablehlo.divide" in out
+        assert "3.000000e+00" in out  # axis 0 has size 3
+
+
+class TestSizeOneBroadcastCodegen:
+    def test_broadcast_size1(self):
+        out = codegen("fn f(x: f32[3, 1], y: f32[3, 4]) -> f32[3, 4] { x * y }")
+        assert "broadcast_in_dim" in out
+        assert "tensor<3x1xf32>" in out
+        assert "tensor<3x4xf32>" in out
+
+    def test_broadcast_both_sides(self):
+        out = codegen("fn f(x: f32[3, 1], y: f32[1, 4]) -> f32[3, 4] { x + y }")
+        # Both sides need broadcasting
+        assert out.count("broadcast_in_dim") == 2
+
+
+class TestStopGradientCodegen:
+    def test_stop_gradient_identity(self):
+        out = codegen("fn f(x: f32[4]) -> f32[4] { stop_gradient(x) }")
+        # stop_gradient is identity — no extra ops, just return the arg
+        assert "return %arg0" in out
+
+    def test_stop_gradient_in_expr(self):
+        out = codegen("fn f(x: f32[4], y: f32[4]) -> f32[4] { stop_gradient(x) * y }")
+        # stop_gradient is identity in codegen — just multiplies x * y
+        assert "stablehlo.multiply" in out
+
+
+class TestWhereCodegen:
+    def test_where_basic(self):
+        out = codegen("fn f(m: bool[4], x: f32[4], y: f32[4]) -> f32[4] { where(m, x, y) }")
+        assert "stablehlo.select" in out
+
+    def test_where_scalar_cond(self):
+        out = codegen("fn f(m: bool, x: f32[4], y: f32[4]) -> f32[4] { where(m, x, y) }")
+        assert "broadcast_in_dim" in out  # scalar cond broadcast to array
+        assert "stablehlo.select" in out

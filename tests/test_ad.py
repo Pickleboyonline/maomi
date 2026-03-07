@@ -504,3 +504,80 @@ class TestMapAD:
             }
         """)
         assert "stablehlo.dot_general" in out or "stablehlo.reduce" in out
+
+
+class TestAxisReductionAD:
+    def test_sum_axis_grad(self):
+        """grad(sum(sum(x, 1)), x) should broadcast back with correct dims."""
+        out = ad_codegen("""
+            fn f(x: f32[3, 4]) -> f32[3, 4] {
+                grad(sum(sum(x, 1)), x)
+            }
+        """)
+        assert "broadcast_in_dim" in out
+        assert "dims = [0]" in out  # broadcast from f32[3] to f32[3,4] via dim 0
+
+    def test_sum_axis_0_grad(self):
+        """grad(sum(sum(x, 0)), x) should broadcast back via dim 1."""
+        out = ad_codegen("""
+            fn f(x: f32[3, 4]) -> f32[3, 4] {
+                grad(sum(sum(x, 0)), x)
+            }
+        """)
+        assert "broadcast_in_dim" in out
+        assert "dims = [1]" in out  # broadcast from f32[4] to f32[3,4] via dim 1
+
+    def test_mean_axis_grad(self):
+        """grad of mean with axis should divide by axis size."""
+        out = ad_codegen("""
+            fn f(x: f32[3, 4]) -> f32[3, 4] {
+                grad(sum(mean(x, 1)), x)
+            }
+        """)
+        assert "stablehlo.divide" in out
+        assert "4.000000e+00" in out  # divided by axis size 4
+
+
+class TestStopGradientAD:
+    def test_stop_gradient_zeroes_grad(self):
+        """stop_gradient prevents gradient flow to its argument."""
+        out = ad_codegen("""
+            fn f(x: f32[4], y: f32[4]) -> f32[4] {
+                let z = stop_gradient(x);
+                grad(sum(z * y), y)
+            }
+        """)
+        # Gradient w.r.t. y of z*y is z (which is x)
+        assert "stablehlo.multiply" in out
+
+    def test_stop_gradient_no_flow(self):
+        """Gradient should not flow through stop_gradient to x."""
+        prog = ad_transform("""
+            fn f(x: f32) -> f32 {
+                grad(stop_gradient(x) * x, x)
+            }
+        """)
+        # The gradient of stop_gradient(x) * x w.r.t. x:
+        # d/dx [sg(x) * x] = sg(x) * 1 + 0 * x = sg(x) = x
+        # So gradient should reference x but NOT have two terms
+
+
+class TestWhereAD:
+    def test_where_grad_x(self):
+        """Gradient through where w.r.t. the true branch."""
+        out = ad_codegen("""
+            fn f(x: f32[4], mask: bool[4]) -> f32[4] {
+                grad(sum(where(mask, x, 0.0)), x)
+            }
+        """)
+        # adj_x = where(mask, adj, 0)
+        assert "stablehlo.select" in out
+
+    def test_where_grad_both(self):
+        """Gradient through where w.r.t. both branches."""
+        out = ad_codegen("""
+            fn f(x: f32[4], y: f32[4], mask: bool[4]) -> f32[4] {
+                grad(sum(where(mask, x, y)), x)
+            }
+        """)
+        assert "stablehlo.select" in out

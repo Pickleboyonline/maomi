@@ -432,3 +432,77 @@ class TestPool:
             "fn f(x: f32[1, 16, 8, 8]) -> f32[1, 16, 4, 4] { max_pool(x, 2, 2) }",
             "5 arguments",
         )
+
+
+class TestAxisReduction:
+    def test_sum_axis_1(self):
+        check_ok("fn f(x: f32[3, 4]) -> f32[3] { sum(x, 1) }")
+
+    def test_sum_axis_0(self):
+        check_ok("fn f(x: f32[3, 4]) -> f32[4] { sum(x, 0) }")
+
+    def test_mean_axis(self):
+        check_ok("fn f(x: f32[3, 4]) -> f32[4] { mean(x, 0) }")
+
+    def test_sum_no_axis(self):
+        check_ok("fn f(x: f32[3, 4]) -> f32 { sum(x) }")
+
+    def test_mean_no_axis(self):
+        check_ok("fn f(x: f32[3, 4]) -> f32 { mean(x) }")
+
+    def test_sum_3d(self):
+        check_ok("fn f(x: f32[2, 3, 4]) -> f32[2, 4] { sum(x, 1) }")
+
+    def test_sum_axis_out_of_range(self):
+        check_err("fn f(x: f32[3, 4]) -> f32[3] { sum(x, 2) }", "out of range")
+
+    def test_sum_1d_axis_0_becomes_scalar(self):
+        check_ok("fn f(x: f32[4]) -> f32 { sum(x, 0) }")
+
+    def test_sum_scalar_no_axis(self):
+        check_ok("fn f(x: f32) -> f32 { sum(x) }")
+
+    def test_sum_scalar_with_axis_error(self):
+        check_err("fn f(x: f32) -> f32 { sum(x, 0) }", "array argument")
+
+
+class TestSizeOneBroadcast:
+    def test_broadcast_trailing(self):
+        check_ok("fn f(x: f32[3, 1], y: f32[3, 4]) -> f32[3, 4] { x * y }")
+
+    def test_broadcast_leading(self):
+        check_ok("fn f(x: f32[1, 4], y: f32[3, 4]) -> f32[3, 4] { x + y }")
+
+    def test_broadcast_both(self):
+        check_ok("fn f(x: f32[3, 1], y: f32[1, 4]) -> f32[3, 4] { x - y }")
+
+    def test_broadcast_no_match(self):
+        check_err("fn f(x: f32[3, 2], y: f32[3, 4]) -> f32[3, 4] { x * y }", "mismatched")
+
+
+class TestStopGradient:
+    def test_stop_gradient_scalar(self):
+        check_ok("fn f(x: f32) -> f32 { stop_gradient(x) }")
+
+    def test_stop_gradient_array(self):
+        check_ok("fn f(x: f32[4]) -> f32[4] { stop_gradient(x) }")
+
+    def test_stop_gradient_wrong_args(self):
+        check_err("fn f(x: f32) -> f32 { stop_gradient(x, x) }", "1 argument")
+
+
+class TestWhere:
+    def test_where_basic(self):
+        check_ok("fn f(m: bool[4], x: f32[4], y: f32[4]) -> f32[4] { where(m, x, y) }")
+
+    def test_where_scalar_cond(self):
+        check_ok("fn f(m: bool, x: f32[4], y: f32[4]) -> f32[4] { where(m, x, y) }")
+
+    def test_where_scalar_branch(self):
+        check_ok("fn f(m: bool[4], x: f32[4]) -> f32[4] { where(m, x, 0.0) }")
+
+    def test_where_wrong_cond_type(self):
+        check_err("fn f(m: f32[4], x: f32[4], y: f32[4]) -> f32[4] { where(m, x, y) }", "bool")
+
+    def test_where_wrong_arg_count(self):
+        check_err("fn f(m: bool[4], x: f32[4]) -> f32[4] { where(m, x) }", "3 arguments")

@@ -510,6 +510,44 @@ class StableHLOCodegen:
         )
         return var
 
+    def _gen_where(self, expr: CallExpr, env: dict[str, str]) -> str:
+        cond = self._gen_expr(expr.args[0], env)
+        x = self._gen_expr(expr.args[1], env)
+        y = self._gen_expr(expr.args[2], env)
+
+        cond_type = self._type_of(expr.args[0])
+        x_type = self._type_of(expr.args[1])
+        y_type = self._type_of(expr.args[2])
+        result_type = self._type_of(expr)
+        mlir_result = _mlir_type(result_type)
+
+        # Broadcast x and y to result type
+        x = self._maybe_broadcast(x, x_type, result_type)
+        y = self._maybe_broadcast(y, y_type, result_type)
+
+        # Broadcast cond to result shape (as bool array)
+        if isinstance(cond_type, ScalarType) and isinstance(result_type, ArrayType):
+            bool_array_type = ArrayType("bool", result_type.dims)
+            broadcast_cond = self._fresh()
+            self._emit(
+                f"{broadcast_cond} = stablehlo.broadcast_in_dim {cond}, "
+                f"dims = [] : ({_mlir_type(cond_type)}) -> {_mlir_type(bool_array_type)}"
+            )
+            cond = broadcast_cond
+            cond_type = bool_array_type
+        elif isinstance(cond_type, ArrayType) and isinstance(result_type, ArrayType) and cond_type.dims != result_type.dims:
+            bool_array_type = ArrayType("bool", result_type.dims)
+            cond = self._maybe_broadcast(cond, cond_type, bool_array_type)
+            cond_type = bool_array_type
+
+        cond_mlir = _mlir_type(cond_type)
+        var = self._fresh()
+        self._emit(
+            f"{var} = stablehlo.select {cond}, {x}, {y} "
+            f": ({cond_mlir}, {mlir_result}, {mlir_result}) -> {mlir_result}"
+        )
+        return var
+
     _CALLBACK_BUILTINS = {"callback"}
     _RNG_BUILTINS = {"rng_key", "rng_split", "rng_uniform", "rng_normal"}
 
@@ -540,6 +578,10 @@ class StableHLOCodegen:
             return self._gen_reshape(expr, env)
         if expr.callee == "concat":
             return self._gen_concat(expr, env)
+        if expr.callee == "stop_gradient":
+            return self._gen_expr(expr.args[0], env)
+        if expr.callee == "where":
+            return self._gen_where(expr, env)
         if expr.callee == "conv2d":
             return self._gen_conv2d(expr, env)
         if expr.callee == "max_pool":
@@ -774,7 +816,27 @@ class StableHLOCodegen:
         if not isinstance(arg_type, ArrayType):
             return arg  # mean of scalar is itself
 
-        # Sum over all dimensions
+        # Axis-specific or all-dims reduction
+        if len(expr.args) == 2:
+            axis = expr.args[1].value
+            bd = self._batch_depth
+            actual_axis = bd + axis
+            # Sum along specific axis
+            sum_var = self._gen_reduce_sum_single_axis(arg, arg_type, result_type, actual_axis)
+            # Divide by axis size
+            axis_size = arg_type.dims[actual_axis]
+            if isinstance(axis_size, str):
+                raise MaomiError(f"codegen: cannot compute mean with symbolic dim '{axis_size}'", "<codegen>", 0, 0)
+            count_scalar = self._fresh()
+            scalar_mlir = _mlir_type(ScalarType(arg_type.base))
+            self._emit(f"{count_scalar} = stablehlo.constant dense<{float(axis_size):e}> : {scalar_mlir}")
+            count_var = self._maybe_broadcast(count_scalar, ScalarType(arg_type.base), result_type)
+            mlir_result = _mlir_type(result_type)
+            var = self._fresh()
+            self._emit(f"{var} = stablehlo.divide {sum_var}, {count_var} : {mlir_result}")
+            return var
+
+        # All-dims reduction
         sum_var = self._gen_reduce_sum(arg, arg_type, result_type)
 
         # Compute element count (skip batch dims)
@@ -787,7 +849,6 @@ class StableHLOCodegen:
                 raise MaomiError(f"codegen: cannot compute mean with symbolic dim '{d}'", "<codegen>", 0, 0)
 
         # Divide by count — constant must match result type
-        count_var = self._fresh()
         mlir_result = _mlir_type(result_type)
         count_scalar = self._fresh()
         scalar_mlir = _mlir_type(ScalarType(arg_type.base))
@@ -805,6 +866,12 @@ class StableHLOCodegen:
 
         if not isinstance(arg_type, ArrayType):
             return arg
+
+        if len(expr.args) == 2:
+            axis = expr.args[1].value
+            bd = self._batch_depth
+            actual_axis = bd + axis
+            return self._gen_reduce_sum_single_axis(arg, arg_type, result_type, actual_axis)
 
         return self._gen_reduce_sum(arg, arg_type, result_type)
 
@@ -829,6 +896,33 @@ class StableHLOCodegen:
             f": ({_mlir_type(arg_type)}, {mlir_scalar}) -> {mlir_result}"
         )
         # Emit reducer region
+        self._indent += 1
+        a_var = self._fresh()
+        b_var = self._fresh()
+        self._emit(f"reducer({a_var}: {mlir_scalar}, {b_var}: {mlir_scalar}) {{")
+        self._indent += 1
+        sum_var = self._fresh()
+        self._emit(f"{sum_var} = stablehlo.add {a_var}, {b_var} : {mlir_scalar}")
+        self._emit(f"stablehlo.return {sum_var} : {mlir_scalar}")
+        self._indent -= 1
+        self._emit("}")
+        self._indent -= 1
+        return var
+
+    def _gen_reduce_sum_single_axis(self, arg: str, arg_type: ArrayType, result_type: MaomiType, axis: int) -> str:
+        """Generate a sum reduction along a single axis."""
+        init_var = self._fresh()
+        scalar_type = ScalarType(arg_type.base)
+        mlir_scalar = _mlir_type(scalar_type)
+        self._emit(f"{init_var} = stablehlo.constant dense<0.000000e+00> : {mlir_scalar}")
+
+        mlir_result = _mlir_type(result_type)
+        var = self._fresh()
+        self._emit(
+            f"{var} = stablehlo.reduce({arg} init: {init_var}) "
+            f"across dimensions = [{axis}] "
+            f": ({_mlir_type(arg_type)}, {mlir_scalar}) -> {mlir_result}"
+        )
         self._indent += 1
         a_var = self._fresh()
         b_var = self._fresh()
@@ -1951,10 +2045,14 @@ class StableHLOCodegen:
         else:
             # Lower-rank array → higher-rank: compute broadcast dims
             assert isinstance(inner_type, ArrayType)
-            ndim_target = len(expr.target_dims)
-            ndim_inner = len(inner_type.dims)
-            # Right-align dimensions (numpy-style broadcasting)
-            broadcast_dims = list(range(ndim_target - ndim_inner, ndim_target))
+            if expr.broadcast_dims is not None:
+                # Explicit dim mapping (e.g. from axis-specific reduction backprop)
+                broadcast_dims = list(expr.broadcast_dims)
+            else:
+                # Right-align dimensions (numpy-style broadcasting)
+                ndim_target = len(expr.target_dims)
+                ndim_inner = len(inner_type.dims)
+                broadcast_dims = list(range(ndim_target - ndim_inner, ndim_target))
             dims_str = ", ".join(str(d) for d in broadcast_dims)
             mlir_inner = _mlir_type(inner_type)
             self._emit(
@@ -2751,9 +2849,10 @@ class StableHLOCodegen:
             return var
 
         if isinstance(from_type, ArrayType) and isinstance(to_type, ArrayType):
-            if len(from_type.dims) < len(to_type.dims):
+            if from_type.dims != to_type.dims:
+                # Compute broadcast dims: right-align from_type dims to to_type dims
                 offset = len(to_type.dims) - len(from_type.dims)
-                dims = list(range(offset, len(to_type.dims)))
+                dims = list(range(offset, offset + len(from_type.dims)))
                 dims_str = ", ".join(str(d) for d in dims)
                 var = self._fresh()
                 self._emit(

@@ -71,6 +71,8 @@ _NONDIFF_BUILTINS = {"callback"}
 _IOTA_BUILTINS = {"iota"}
 _CONV_POOL_BUILTINS = {"conv2d", "max_pool", "avg_pool"}
 _RNG_BUILTINS = {"rng_key", "rng_split", "rng_uniform", "rng_normal"}
+_STOP_GRAD_BUILTINS = {"stop_gradient"}
+_WHERE_BUILTINS = {"where"}
 _MAX_GRAD_DEPTH = 10
 
 
@@ -391,7 +393,7 @@ class ADTransform:
                 if callee in _NONDIFF_BUILTINS:
                     # Callback: no value, no gradient. Skip entirely.
                     return
-                elif callee in _IOTA_BUILTINS | _ELEMENTWISE_BUILTINS | _REDUCTION_BUILTINS | _SHAPE_BUILTINS | _CONV_POOL_BUILTINS | _RNG_BUILTINS | {"transpose"}:
+                elif callee in _IOTA_BUILTINS | _ELEMENTWISE_BUILTINS | _REDUCTION_BUILTINS | _SHAPE_BUILTINS | _CONV_POOL_BUILTINS | _RNG_BUILTINS | _STOP_GRAD_BUILTINS | _WHERE_BUILTINS | {"transpose"}:
                     # Built-in: put on tape as-is
                     for a in args:
                         self._linearize(a, tape, var_map, let_env)
@@ -766,6 +768,10 @@ class ADTransform:
                     self._accumulate(adjoints, arg_name, self._make_call("transpose", [adj]))
                 elif callee in _CONV_POOL_BUILTINS:
                     self._backprop_conv_pool(callee, args, adj, adjoints, var_map, node)
+                elif callee in _STOP_GRAD_BUILTINS:
+                    pass  # gradient stops here — don't accumulate any adjoint
+                elif callee in _WHERE_BUILTINS:
+                    self._backprop_where(args, adj, adjoints, var_map, node)
                 else:
                     raise MaomiError(
                         f"grad: unsupported function call '{callee}' inside grad",
@@ -879,31 +885,90 @@ class ADTransform:
         arg_name = var_map[id(arg)]
         arg_type = self._type_of(arg)
 
+        has_axis = len(args) == 2
+        axis = args[1].value if has_axis else None
+
         if callee == "mean":
-            # d/dx mean(x) = broadcast(dz / numel) to input shape
             if isinstance(arg_type, ArrayType):
-                numel = 1
-                for d in arg_type.dims:
-                    if isinstance(d, int):
-                        numel *= d
-                    else:
-                        raise MaomiError(f"grad: cannot differentiate mean with symbolic dim '{d}'", "<ad>", 0, 0)
-                scaled = self._make_binop("/", adj, self._make_float(float(numel)))
-                # Broadcast scalar back to input shape (JAX: broadcast_in_dim)
-                broadcast = _BroadcastExpr(scaled, tuple(arg_type.dims), _DUMMY_SPAN)
-                self.type_map[id(broadcast)] = arg_type
-                self._accumulate(adjoints, arg_name, broadcast)
+                if has_axis:
+                    # Axis-specific mean: adj / axis_size, broadcast back with explicit dims
+                    axis_size = arg_type.dims[axis]
+                    if isinstance(axis_size, str):
+                        raise MaomiError(f"grad: cannot differentiate mean with symbolic dim '{axis_size}'", "<ad>", 0, 0)
+                    scaled = self._make_binop("/", adj, self._make_float(float(axis_size)))
+                    ndim = len(arg_type.dims)
+                    broadcast_dims = tuple(i for i in range(ndim) if i != axis)
+                    broadcast = _BroadcastExpr(scaled, tuple(arg_type.dims), _DUMMY_SPAN, broadcast_dims=broadcast_dims)
+                    self.type_map[id(broadcast)] = arg_type
+                    self._accumulate(adjoints, arg_name, broadcast)
+                else:
+                    # All-dims mean: broadcast(dz / numel)
+                    numel = 1
+                    for d in arg_type.dims:
+                        if isinstance(d, int):
+                            numel *= d
+                        else:
+                            raise MaomiError(f"grad: cannot differentiate mean with symbolic dim '{d}'", "<ad>", 0, 0)
+                    scaled = self._make_binop("/", adj, self._make_float(float(numel)))
+                    broadcast = _BroadcastExpr(scaled, tuple(arg_type.dims), _DUMMY_SPAN)
+                    self.type_map[id(broadcast)] = arg_type
+                    self._accumulate(adjoints, arg_name, broadcast)
             else:
                 self._accumulate(adjoints, arg_name, adj)
 
         elif callee == "sum":
-            # d/dx sum(x) = broadcast(dz) to input shape (JAX: broadcast_in_dim)
             if isinstance(arg_type, ArrayType):
-                broadcast = _BroadcastExpr(adj, tuple(arg_type.dims), _DUMMY_SPAN)
-                self.type_map[id(broadcast)] = arg_type
-                self._accumulate(adjoints, arg_name, broadcast)
+                if has_axis:
+                    # Axis-specific sum: broadcast adj back by inserting reduced dim
+                    ndim = len(arg_type.dims)
+                    broadcast_dims = tuple(i for i in range(ndim) if i != axis)
+                    broadcast = _BroadcastExpr(adj, tuple(arg_type.dims), _DUMMY_SPAN, broadcast_dims=broadcast_dims)
+                    self.type_map[id(broadcast)] = arg_type
+                    self._accumulate(adjoints, arg_name, broadcast)
+                else:
+                    # All-dims sum: broadcast scalar adj to input shape
+                    broadcast = _BroadcastExpr(adj, tuple(arg_type.dims), _DUMMY_SPAN)
+                    self.type_map[id(broadcast)] = arg_type
+                    self._accumulate(adjoints, arg_name, broadcast)
             else:
                 self._accumulate(adjoints, arg_name, adj)
+
+    def _backprop_where(self, args: list[Expr], adj: Expr,
+                         adjoints: dict[str, Expr], var_map: dict[int, str],
+                         node: Expr):
+        """Backprop through where(cond, x, y): adj_x = where(cond, adj, 0), adj_y = where(cond, 0, adj)."""
+        cond = args[0]
+        x_arg = args[1]
+        y_arg = args[2]
+
+        # cond has no gradient (boolean)
+        # For x: gradient flows where cond is true
+        if id(x_arg) in var_map:
+            x_name = var_map[id(x_arg)]
+            x_type = self._type_of(x_arg)
+            zero = self._make_float(0.0)
+            if isinstance(x_type, ArrayType):
+                zero_broadcast = _BroadcastExpr(zero, tuple(x_type.dims), _DUMMY_SPAN)
+                self.type_map[id(zero_broadcast)] = x_type
+                adj_x = self._make_call("where", [cond, adj, zero_broadcast])
+            else:
+                adj_x = self._make_call("where", [cond, adj, zero])
+            self.type_map[id(adj_x)] = self._type_of(x_arg)
+            self._accumulate(adjoints, x_name, adj_x)
+
+        # For y: gradient flows where cond is false
+        if id(y_arg) in var_map:
+            y_name = var_map[id(y_arg)]
+            y_type = self._type_of(y_arg)
+            zero = self._make_float(0.0)
+            if isinstance(y_type, ArrayType):
+                zero_broadcast = _BroadcastExpr(zero, tuple(y_type.dims), _DUMMY_SPAN)
+                self.type_map[id(zero_broadcast)] = y_type
+                adj_y = self._make_call("where", [cond, zero_broadcast, adj])
+            else:
+                adj_y = self._make_call("where", [cond, zero, adj])
+            self.type_map[id(adj_y)] = self._type_of(y_arg)
+            self._accumulate(adjoints, y_name, adj_y)
 
     def _backprop_reshape(self, args: list[Expr], adj: Expr,
                            adjoints: dict[str, Expr], var_map: dict[int, str]):

@@ -298,10 +298,11 @@ class _AvgPoolGrad:
 
 @dataclass
 class _BroadcastExpr:
-    """Internal: broadcast scalar to array shape. Created by AD for sum/mean backprop."""
-    expr: Expr                    # scalar expression to broadcast
+    """Internal: broadcast scalar/lower-rank to array shape. Created by AD for sum/mean backprop."""
+    expr: Expr                    # expression to broadcast
     target_dims: tuple[int, ...]  # target shape dimensions
     span: Span
+    broadcast_dims: tuple[int, ...] | None = None  # explicit dim mapping (None = right-align)
 
 
 @dataclass

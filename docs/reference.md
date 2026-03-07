@@ -174,6 +174,23 @@ false     // bool
 
 Comparisons return `bool` (scalar) or `bool[...]` (elementwise on arrays).
 
+### Broadcasting
+
+Binary operations support numpy-style broadcasting:
+
+- **Scalar + Array**: `f32 * f32[3, 4]` → `f32[3, 4]` (scalar broadcasts to all elements)
+- **Rank extension**: `f32[4] + f32[3, 4]` → `f32[3, 4]` (lower-rank array right-aligned)
+- **Size-1 stretching**: `f32[3, 1] * f32[3, 4]` → `f32[3, 4]` (dimension of size 1 stretches)
+
+This enables common patterns like normalizing along an axis:
+
+```maomi
+fn normalize_rows(x: f32[32, 128]) -> f32[32, 128] {
+    let row_sums = reshape(sum(x, 1), 32, 1);
+    x / row_sums
+}
+```
+
 ---
 
 ## Builtins — Elementwise
@@ -203,16 +220,47 @@ All elementwise builtins are differentiable.
 | Builtin | Signature | Description |
 |---------|-----------|-------------|
 | `sum(x)` | `f32[...] -> f32` | Sum all elements |
+| `sum(x, axis)` | `f32[M, N] -> f32[M]` (axis=1) | Sum along specific axis |
 | `mean(x)` | `f32[...] -> f32` | Average of all elements |
+| `mean(x, axis)` | `f32[M, N] -> f32[N]` (axis=0) | Average along specific axis |
 
 ```maomi
 fn mse_loss(pred: f32[32], target: f32[32]) -> f32 {
     let diff = pred - target;
     mean(diff * diff)
 }
+
+fn softmax(x: f32[32, 128]) -> f32[32, 128] {
+    let e = exp(x);
+    let s = reshape(sum(e, 1), 32, 1);
+    e / s
+}
 ```
 
-Both are differentiable. `grad` through `sum` distributes ones; `grad` through `mean` distributes `1/N`.
+Axis-specific reductions remove the specified dimension from the result shape. The axis must be an integer literal in range `[0, ndim)`. Both are fully differentiable — `grad` through `sum` distributes ones; `grad` through `mean` distributes `1/N` (or `1/axis_size` for axis-specific).
+
+---
+
+## Builtins — Conditional & Control
+
+| Builtin | Signature | Description |
+|---------|-----------|-------------|
+| `where(cond, x, y)` | `bool[...], T, T -> T` | Element-wise conditional select |
+| `stop_gradient(x)` | `T -> T` | Identity in forward pass, blocks gradient flow |
+
+```maomi
+fn masked_scores(scores: f32[128], mask: bool[128]) -> f32[128] {
+    where(mask, scores, 0.0)
+}
+
+fn td_target(reward: f32, gamma: f32, next_v: f32) -> f32 {
+    reward + gamma * stop_gradient(next_v)
+}
+```
+
+`where` is the array-conditional counterpart to `if/else` — it selects element-by-element based on a bool array. Both branches are evaluated. Differentiable: gradient flows to `x` where condition is true, to `y` where false.
+
+`stop_gradient` prevents gradient flow during reverse-mode AD. The value passes through unchanged, but `grad` treats it as a constant (zero adjoint). Used for RL targets, detached baselines, and any computation that should not be differentiated.
 
 ---
 
@@ -631,7 +679,9 @@ The expression must produce a scalar (`f32`). The result has the same type as th
 | `+` `-` `*` `/` `**` | Yes | Standard rules |
 | `@` (matmul) | Yes | Transposes for backward pass |
 | `exp` `log` `tanh` `sqrt` `abs` | Yes | Chain rule applied |
-| `sum` `mean` | Yes | Distributes ones / `1/N` |
+| `sum` `mean` | Yes | Distributes ones / `1/N` (supports axis-specific) |
+| `where` | Yes | Gradient flows per-element based on condition |
+| `stop_gradient` | Blocks | Identity forward, zero adjoint backward |
 | `reshape` `concat` | Yes | Reshapes/slices gradient back |
 | `if/else` | Yes | Both branches differentiated, condition selects |
 | User functions | Yes | Inlined then differentiated |
