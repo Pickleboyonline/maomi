@@ -10,6 +10,12 @@
   "main": "./extension.js",
   "activationEvents": ["onLanguage:maomi"],
   "contributes": {
+    "commands": [
+      {
+        "command": "maomi.run",
+        "title": "Maomi: Run Function"
+      }
+    ],
     "languages": [
       {
         "id": "maomi",

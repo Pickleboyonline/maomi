@@ -23,6 +23,7 @@ from maomi.lsp import (
     _build_document_highlights,
     _goto_type_definition,
     _workspace_symbols,
+    _build_code_lenses,
 )
 from maomi.ast_nodes import (
     Identifier, IntLiteral, FloatLiteral, BinOp, CallExpr,
@@ -1826,3 +1827,57 @@ class TestWorkspaceSymbols:
         finally:
             _cache.clear()
             _cache.update(old_cache)
+# Code Lens tests
+# ---------------------------------------------------------------------------
+
+class TestCodeLens:
+    def test_no_params_gets_run_and_references(self):
+        source = "fn f() -> f32 { 1.0 }"
+        diags, result = validate(source, "<test>")
+        assert diags == []
+        lenses = _build_code_lenses(result, "file:///test.mao")
+        titles = [l.command.title for l in lenses]
+        assert "\u25b6 Run" in titles
+        assert "0 references" in titles
+
+    def test_concrete_array_params_gets_run(self):
+        source = "fn f(x: f32[3]) -> f32 { x[0] }"
+        diags, result = validate(source, "<test>")
+        assert diags == []
+        lenses = _build_code_lenses(result, "file:///test.mao")
+        titles = [l.command.title for l in lenses]
+        assert "\u25b6 Run" in titles
+
+    def test_symbolic_dims_no_run(self):
+        source = "fn f(x: f32[N]) -> f32 { x[0] }"
+        diags, result = validate(source, "<test>")
+        assert diags == []
+        lenses = _build_code_lenses(result, "file:///test.mao")
+        titles = [l.command.title for l in lenses]
+        assert "\u25b6 Run" not in titles
+        # Should still get references lens
+        ref_lenses = [l for l in lenses if "reference" in l.command.title]
+        assert len(ref_lenses) == 1
+
+    def test_references_count(self):
+        source = "fn add(x: f32, y: f32) -> f32 { x + y }\nfn g() -> f32 { add(1.0, 2.0) + add(3.0, 4.0) }"
+        diags, result = validate(source, "<test>")
+        assert diags == []
+        lenses = _build_code_lenses(result, "file:///test.mao")
+        # Find the references lens for 'add'
+        add_ref = [l for l in lenses if "reference" in l.command.title and l.range.start.line == 0]
+        assert len(add_ref) == 1
+        assert add_ref[0].command.title == "2 references"
+
+    def test_multiple_functions_each_get_lenses(self):
+        source = "fn f() -> f32 { 1.0 }\nfn g() -> f32 { 2.0 }"
+        diags, result = validate(source, "<test>")
+        assert diags == []
+        lenses = _build_code_lenses(result, "file:///test.mao")
+        # Each function should have at least a references lens
+        lines = {l.range.start.line for l in lenses}
+        assert 0 in lines
+        assert 1 in lines
+        # Both should get run lenses (no params)
+        run_lenses = [l for l in lenses if l.command.title == "\u25b6 Run"]
+        assert len(run_lenses) == 2
