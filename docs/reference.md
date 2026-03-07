@@ -264,6 +264,30 @@ fn td_target(reward: f32, gamma: f32, next_v: f32) -> f32 {
 
 ---
 
+## Builtins — Debugging
+
+### callback
+
+Fire-and-forget host callback — sends values from the XLA device to Python during execution. Used for logging, printing intermediate values, and debugging.
+
+```maomi
+callback(expr1, expr2, ...)   // any number of args (including zero)
+```
+
+```maomi
+fn train_step(x: f32[4], w: f32[4]) -> f32[4] {
+    let loss = sum(x * w);
+    callback(loss);
+    grad(loss, w)
+}
+```
+
+When using `maomi run`, callbacks print their arguments to stdout prefixed with `[callback]`. When using the Python API (`compile_source` + `run_stablehlo`), you provide custom Python callables via the `host_callbacks` parameter.
+
+`callback` returns no value (type `None`), has side effects (the compiler cannot eliminate it), and is ignored by AD (zero gradient). It is the equivalent of JAX's `jax.debug.callback`.
+
+---
+
 ## Builtins — Shape & Array
 
 ### reshape
@@ -836,7 +860,6 @@ The compiler is written in Python. Source lives in `src/maomi/`. Key files:
 - **Concrete dimensions required for codegen.** Symbolic dimensions (`f32[B, 128]`) are valid in type annotations for expressing shape relationships, but produce an error during code generation. All dimensions must be concrete integers to compile. This is inherent to XLA — it needs static shapes to make tiling, fusion, layout, and memory allocation decisions. JAX works the same way (`jax.jit` recompiles per input shape). Symbolic dims are a type-checking convenience for verifying shape consistency, not a runtime feature.
 - **`map` bodies must be elementwise.** No cross-element dependencies allowed in `map` bodies.
 - **Slice bounds must be literals.** `x[1:3]` works, but `x[a:b]` where `a` and `b` are variables does not.
-- **`callback` is a no-op.** The `callback` builtin compiles but does not execute host callbacks at runtime.
 - **No rank polymorphism.** Functions have fixed-rank parameters — you cannot write a single function that works on any rank.
 - **Fixed literal types.** Integer literals are always `i32`, float literals are always `f32`. No `f64` or `i64` literals.
 - **No visibility modifiers.** All functions in a module are importable. No `pub`/`private` distinction.

@@ -39,6 +39,7 @@ def run_stablehlo(
     fn_sig: FnSignature,
     seed: int = 42,
     inputs: list[np.ndarray] | None = None,
+    host_callbacks: list | None = None,
 ) -> tuple[list[np.ndarray], np.ndarray]:
     """Compile and execute a StableHLO module, returning (inputs, output).
 
@@ -48,6 +49,7 @@ def run_stablehlo(
         fn_sig: Function signature (param names, types, return type)
         seed: Random seed for reproducible input generation
         inputs: Optional pre-built inputs (overrides seed-based generation)
+        host_callbacks: Optional list of Python callables for callback() builtins
 
     Returns:
         (inputs, output) where inputs is a list of numpy arrays and
@@ -70,7 +72,7 @@ def run_stablehlo(
         module,
         xc.DeviceList(tuple(jax.devices())),
         xc.CompileOptions(),
-        [],
+        host_callbacks or [],
     )
 
     # Generate inputs if not provided

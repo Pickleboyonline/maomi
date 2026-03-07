@@ -112,6 +112,19 @@ def _mlir_type(t: MaomiType) -> str:
     raise MaomiError("codegen: unknown type", "<codegen>", 0, 0)
 
 
+def _callback_layout(t: MaomiType) -> str:
+    """Return MLIR operand layout attribute for a type (row-major)."""
+    if isinstance(t, ScalarType):
+        return "dense<> : tensor<0xindex>"
+    if isinstance(t, ArrayType):
+        ndim = len(t.dims)
+        if ndim == 1:
+            return "dense<0> : tensor<1xindex>"
+        order = ", ".join(str(i) for i in reversed(range(ndim)))
+        return f"dense<[{order}]> : tensor<{ndim}xindex>"
+    return "dense<> : tensor<0xindex>"
+
+
 def _collect_body_refs(block: Block) -> set[str]:
     """Collect all Identifier names referenced in a block."""
     refs: set[str] = set()
@@ -190,6 +203,7 @@ class StableHLOCodegen:
         self._batch_depth = 0
         self._batch_dims: list[int] = []
         self._batched_fns: dict[tuple[str, tuple[int, ...]], str] = {}
+        self._callback_count: int = 0
 
     def generate(self) -> str:
         self._emit("module {")
@@ -551,11 +565,43 @@ class StableHLOCodegen:
     _CALLBACK_BUILTINS = {"callback"}
     _RNG_BUILTINS = {"rng_key", "rng_split", "rng_uniform", "rng_normal"}
 
+    def _gen_callback(self, expr: CallExpr, env: dict[str, str]) -> str:
+        """Emit stablehlo.custom_call targeting JAX's FFI callback handler."""
+        arg_ssas = [self._gen_expr(a, env) for a in expr.args]
+        arg_types = [self._type_of(a) for a in expr.args]
+
+        idx = self._callback_count
+        self._callback_count += 1
+
+        if arg_ssas:
+            operands = ", ".join(arg_ssas)
+            mlir_types = ", ".join(_mlir_type(t) for t in arg_types)
+            layouts = ", ".join(_callback_layout(t) for t in arg_types)
+            self._emit(
+                f'"stablehlo.custom_call"({operands}) '
+                f'{{call_target_name = "xla_ffi_python_cpu_callback", '
+                f'has_side_effect = true, backend_config = "", '
+                f'api_version = 1 : i32, '
+                f'mhlo.backend_config = {{index = {idx} : ui64}}, '
+                f'operand_layouts = [{layouts}], '
+                f'result_layouts = []}} : ({mlir_types}) -> ()'
+            )
+        else:
+            self._emit(
+                f'"stablehlo.custom_call"() '
+                f'{{call_target_name = "xla_ffi_python_cpu_callback", '
+                f'has_side_effect = true, backend_config = "", '
+                f'api_version = 1 : i32, '
+                f'mhlo.backend_config = {{index = {idx} : ui64}}, '
+                f'operand_layouts = [], '
+                f'result_layouts = []}} : () -> ()'
+            )
+        return ""
+
     def _gen_call(self, expr: CallExpr, env: dict[str, str]) -> str:
-        # Callback: no-op in codegen (host callbacks are future work)
+        # Callback: emit stablehlo.custom_call to fire Python callback via FFI
         if expr.callee in self._CALLBACK_BUILTINS:
-            self._emit(f"// callback (no-op)")
-            return ""
+            return self._gen_callback(expr, env)
 
         # iota(N) → stablehlo.iota
         if expr.callee == "iota":

@@ -342,3 +342,87 @@ class TestCompileSource:
         from maomi.errors import MaomiError
         with pytest.raises(MaomiError):
             compile_source("fn f(x: f32) -> i32 { x }")
+
+    def test_callback_count(self):
+        result = compile_source("fn f(x: f32) -> f32 { callback(x); x }")
+        assert result.callback_count == 1
+
+    def test_callback_count_multiple(self):
+        result = compile_source("fn f(x: f32) -> f32 { callback(x); callback(x); x }")
+        assert result.callback_count == 2
+
+    def test_callback_count_zero(self):
+        result = compile_source("fn f(x: f32) -> f32 { x }")
+        assert result.callback_count == 0
+
+
+class TestCallback:
+    def test_callback_fires(self):
+        """callback should invoke Python function during execution."""
+        result = compile_source("fn f(x: f32) -> f32 { callback(x); x + 1.0 }")
+        sig = result.fn_table["f"]
+        captured = []
+        def cb(*args):
+            captured.append([np.asarray(a) for a in args])
+            return ()
+        _, output = run_stablehlo(result.mlir_text, "f", sig, seed=42, host_callbacks=[cb])
+        assert len(captured) == 1
+
+    def test_callback_receives_correct_value(self):
+        result = compile_source("fn f(x: f32) -> f32 { callback(x); x }")
+        sig = result.fn_table["f"]
+        captured = []
+        def cb(*args):
+            captured.append([np.asarray(a) for a in args])
+            return ()
+        inputs, _ = run_stablehlo(result.mlir_text, "f", sig, seed=42, host_callbacks=[cb])
+        assert np.isclose(captured[0][0], inputs[0])
+
+    def test_callback_zero_args(self):
+        result = compile_source("fn f(x: f32) -> f32 { callback(); x }")
+        sig = result.fn_table["f"]
+        called = [False]
+        def cb(*args):
+            called[0] = True
+            return ()
+        run_stablehlo(result.mlir_text, "f", sig, seed=42, host_callbacks=[cb])
+        assert called[0]
+
+    def test_callback_multiple(self):
+        result = compile_source("fn f(x: f32, y: f32) -> f32 { callback(x); callback(y); x + y }")
+        sig = result.fn_table["f"]
+        captured = []
+        cbs = []
+        for _ in range(result.callback_count):
+            def make_cb():
+                def cb(*args):
+                    captured.append([np.asarray(a) for a in args])
+                    return ()
+                return cb
+            cbs.append(make_cb())
+        _, output = run_stablehlo(result.mlir_text, "f", sig, seed=42, host_callbacks=cbs)
+        assert len(captured) == 2
+
+    def test_callback_array_arg(self):
+        result = compile_source("fn f(x: f32[4]) -> f32[4] { callback(x); x }")
+        sig = result.fn_table["f"]
+        captured = []
+        def cb(*args):
+            captured.append([np.asarray(a) for a in args])
+            return ()
+        inputs, _ = run_stablehlo(result.mlir_text, "f", sig, seed=42, host_callbacks=[cb])
+        assert captured[0][0].shape == (4,)
+        assert np.allclose(captured[0][0], inputs[0])
+
+    def test_callback_multi_args(self):
+        """callback with multiple args should pass all of them."""
+        result = compile_source("fn f(x: f32, y: f32) -> f32 { callback(x, y); x + y }")
+        sig = result.fn_table["f"]
+        captured = []
+        def cb(*args):
+            captured.append([np.asarray(a) for a in args])
+            return ()
+        inputs, _ = run_stablehlo(result.mlir_text, "f", sig, seed=42, host_callbacks=[cb])
+        assert len(captured[0]) == 2
+        assert np.isclose(captured[0][0], inputs[0])
+        assert np.isclose(captured[0][1], inputs[1])
