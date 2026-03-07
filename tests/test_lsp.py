@@ -26,6 +26,7 @@ from maomi.lsp import (
     _build_code_lenses,
     _call_hierarchy_prepare, _call_hierarchy_incoming, _call_hierarchy_outgoing,
     _on_type_format, _compute_brace_depth,
+    _find_matching_brace,
 )
 from maomi.ast_nodes import (
     Identifier, IntLiteral, FloatLiteral, BinOp, CallExpr,
@@ -2035,3 +2036,33 @@ class TestOnTypeFormatting:
         source = ""
         edits = _on_type_format(source, 0, 0, "\n")
         assert len(edits) == 0
+class TestMatchingBrace:
+    def test_simple_forward(self):
+        result = _find_matching_brace("{ }", 0, 0)
+        assert result == types.Position(line=0, character=2)
+
+    def test_simple_reverse(self):
+        result = _find_matching_brace("{ }", 0, 2)
+        assert result == types.Position(line=0, character=0)
+
+    def test_nested(self):
+        result = _find_matching_brace("{ { } }", 0, 0)
+        assert result == types.Position(line=0, character=6)
+
+    def test_multiline(self):
+        source = "fn f() {\n    x;\n}"
+        result = _find_matching_brace(source, 0, 8)
+        assert result == types.Position(line=2, character=0)
+
+    def test_no_brace_at_cursor(self):
+        result = _find_matching_brace("hello", 0, 0)
+        assert result is None
+
+    def test_unmatched(self):
+        result = _find_matching_brace("{ {", 0, 0)
+        assert result is None
+
+    def test_adjacent_check(self):
+        # Cursor right after '{' (col 1), should find match via adjacent check
+        result = _find_matching_brace("{ }", 0, 1)
+        assert result == types.Position(line=0, character=2)
