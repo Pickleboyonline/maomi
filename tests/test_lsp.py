@@ -20,6 +20,7 @@ from maomi.lsp import (
     _ca_edit_distance, _ca_find_similar, code_actions, _cache,
     _build_folding_ranges,
     _sel_collect_ancestors, _sel_build_chain,
+    _call_hierarchy_prepare, _call_hierarchy_incoming, _call_hierarchy_outgoing,
 )
 from maomi.ast_nodes import (
     Identifier, IntLiteral, FloatLiteral, BinOp, CallExpr,
@@ -1567,3 +1568,83 @@ class TestDocComments:
     def test_signature_help_no_doc(self):
         sh = _build_signature_help("myfn", ["x"], ["f32"], "f32", 0)
         assert sh.signatures[0].documentation is None
+
+
+# ---------------------------------------------------------------------------
+# Call Hierarchy tests
+# ---------------------------------------------------------------------------
+
+class TestCallHierarchy:
+    """Tests for call hierarchy (prepare, incoming, outgoing)."""
+
+    SOURCE = "fn c(x: f32) -> f32 { x }\nfn b(x: f32) -> f32 { c(x) }\nfn a(x: f32) -> f32 { b(x) }"
+
+    def _setup(self):
+        diags, result = validate(self.SOURCE, "<test>")
+        assert diags == []
+        assert result.program is not None
+        return result
+
+    def test_prepare_on_fndef(self):
+        """Prepare on FnDef 'b' returns CallHierarchyItem with name 'b'."""
+        result = self._setup()
+        # 'b' is defined on line 2 (0-indexed: line=1)
+        items = _call_hierarchy_prepare(result, "file:///test.mao", 1, 3)
+        assert items is not None
+        assert len(items) == 1
+        assert items[0].name == "b"
+
+    def test_prepare_on_callexpr(self):
+        """Prepare on CallExpr 'c(x)' inside b returns item for 'c'."""
+        result = self._setup()
+        # line 2 (0-indexed: 1), c(x) starts around col 22
+        items = _call_hierarchy_prepare(result, "file:///test.mao", 1, 22)
+        assert items is not None
+        assert len(items) == 1
+        assert items[0].name == "c"
+
+    def test_incoming_calls_for_b(self):
+        """Incoming calls for 'b': a calls b."""
+        result = self._setup()
+        _cache["file:///test.mao"] = result
+        incoming = _call_hierarchy_incoming(result, "file:///test.mao", "b")
+        assert len(incoming) == 1
+        assert incoming[0].from_.name == "a"
+
+    def test_incoming_calls_for_c(self):
+        """Incoming calls for 'c': b calls c."""
+        result = self._setup()
+        _cache["file:///test.mao"] = result
+        incoming = _call_hierarchy_incoming(result, "file:///test.mao", "c")
+        assert len(incoming) == 1
+        assert incoming[0].from_.name == "b"
+
+    def test_outgoing_calls_for_a(self):
+        """Outgoing calls for 'a': a calls b."""
+        result = self._setup()
+        _cache["file:///test.mao"] = result
+        outgoing = _call_hierarchy_outgoing(result, "file:///test.mao", "a")
+        assert len(outgoing) == 1
+        assert outgoing[0].to.name == "b"
+
+    def test_outgoing_calls_for_b(self):
+        """Outgoing calls for 'b': b calls c."""
+        result = self._setup()
+        _cache["file:///test.mao"] = result
+        outgoing = _call_hierarchy_outgoing(result, "file:///test.mao", "b")
+        assert len(outgoing) == 1
+        assert outgoing[0].to.name == "c"
+
+    def test_no_callers(self):
+        """Incoming calls for 'a' returns empty list (nothing calls a)."""
+        result = self._setup()
+        _cache["file:///test.mao"] = result
+        incoming = _call_hierarchy_incoming(result, "file:///test.mao", "a")
+        assert incoming == []
+
+    def test_no_callees(self):
+        """Outgoing calls for 'c' returns empty list (c has no user-fn calls)."""
+        result = self._setup()
+        _cache["file:///test.mao"] = result
+        outgoing = _call_hierarchy_outgoing(result, "file:///test.mao", "c")
+        assert outgoing == []
