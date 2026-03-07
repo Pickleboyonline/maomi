@@ -227,8 +227,19 @@ class _IndexGrad:
     span: Span
 
 
+@dataclass
+class _GatherGrad:
+    """Internal: backward pass of array-based indexing (gather).
+    Created by AD, compiled by codegen as stablehlo.scatter."""
+    base_expr: Expr               # original array (for shape, e.g. f32[V, D])
+    adj: Expr                     # adjoint of gathered result (e.g. f32[B, D])
+    indices: Expr                 # the index array (e.g. i32[B])
+    gather_axis: int              # which operand axis was gathered
+    span: Span
+
+
 # Union types for convenience
-Expr = IntLiteral | FloatLiteral | BoolLiteral | Identifier | UnaryOp | BinOp | IfExpr | CallExpr | ScanExpr | MapExpr | GradExpr | StructLiteral | FieldAccess | WithExpr | IndexExpr | _ScanGrad | _IndexGrad
+Expr = IntLiteral | FloatLiteral | BoolLiteral | Identifier | UnaryOp | BinOp | IfExpr | CallExpr | ScanExpr | MapExpr | GradExpr | StructLiteral | FieldAccess | WithExpr | IndexExpr | _ScanGrad | _IndexGrad | _GatherGrad
 Stmt = LetStmt | ExprStmt
 
 

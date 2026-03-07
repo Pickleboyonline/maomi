@@ -45,6 +45,7 @@ from .ast_nodes import (
     IndexComponent,
     _ScanGrad,
     _IndexGrad,
+    _GatherGrad,
     Span,
     Expr,
 )
@@ -55,7 +56,8 @@ _DUMMY_SPAN = Span(0, 0, 0, 0)
 
 _ELEMENTWISE_BUILTINS = {"exp", "log", "tanh", "sqrt", "abs"}
 _REDUCTION_BUILTINS = {"mean", "sum"}
-_CALLBACK_BUILTINS = {"callback"}
+_NONDIFF_BUILTINS = {"callback"}
+_IOTA_BUILTINS = {"iota"}
 
 
 def _collect_free_vars(expr: Expr) -> set[str]:
@@ -119,6 +121,10 @@ def _collect_free_vars_inner(expr: Expr, result: set[str]):
                     _collect_free_vars_inner(ic.start, result)
                 if ic.end is not None:
                     _collect_free_vars_inner(ic.end, result)
+        case _GatherGrad(base_expr=base, adj=adj, indices=indices):
+            _collect_free_vars_inner(base, result)
+            _collect_free_vars_inner(adj, result)
+            _collect_free_vars_inner(indices, result)
 
 
 def transform_grad(program: Program, type_map: dict[int, MaomiType]) -> Program:
@@ -331,10 +337,10 @@ class ADTransform:
                 var_map[id(expr)] = name
                 tape.append((name, expr))
             case CallExpr(callee=callee, args=args):
-                if callee in _CALLBACK_BUILTINS:
+                if callee in _NONDIFF_BUILTINS:
                     # Callback: no value, no gradient. Skip entirely.
                     return
-                elif callee in _ELEMENTWISE_BUILTINS | _REDUCTION_BUILTINS:
+                elif callee in _IOTA_BUILTINS | _ELEMENTWISE_BUILTINS | _REDUCTION_BUILTINS:
                     # Built-in: put on tape as-is
                     for a in args:
                         self._linearize(a, tape, var_map, let_env)
@@ -613,7 +619,9 @@ class ADTransform:
                 self._accumulate(adjoints, r_name, self._make_binop("@", l_transposed, adj))
 
             case CallExpr(callee=callee, args=args):
-                if callee in _ELEMENTWISE_BUILTINS:
+                if callee in _IOTA_BUILTINS:
+                    pass  # iota produces integers — no gradient flows through
+                elif callee in _ELEMENTWISE_BUILTINS:
                     self._backprop_elementwise(callee, args, adj, adjoints, var_map, node)
                 elif callee in _REDUCTION_BUILTINS:
                     self._backprop_reduction(callee, args, adj, adjoints, var_map, node)
@@ -657,8 +665,24 @@ class ADTransform:
 
             case IndexExpr(base=base, indices=indices):
                 base_name = var_map[id(base)]
-                grad_node = _IndexGrad(base, adj, indices, _DUMMY_SPAN)
                 base_type = self._type_of(base)
+
+                # Check if any index is an array (gather case)
+                gather_axis = None
+                gather_indices = None
+                for ic_i, ic in enumerate(indices):
+                    if ic.kind == "single":
+                        idx_type = self._type_of(ic.value)
+                        if isinstance(idx_type, ArrayType):
+                            gather_axis = ic_i
+                            gather_indices = ic.value
+                            break
+
+                if gather_axis is not None:
+                    grad_node = _GatherGrad(base, adj, gather_indices, gather_axis, _DUMMY_SPAN)
+                else:
+                    grad_node = _IndexGrad(base, adj, indices, _DUMMY_SPAN)
+
                 if base_type is not None:
                     self.type_map[id(grad_node)] = base_type
                 self._accumulate(adjoints, base_name, grad_node)

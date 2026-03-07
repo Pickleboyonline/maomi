@@ -515,16 +515,41 @@ class TypeChecker:
             return None
 
         result_dims: list[int | str] = []
+        has_array_index = False
         for i, ic in enumerate(expr.indices):
             dim = base_type.dims[i]
             if ic.kind == "single":
                 idx_type = self._infer(ic.value, env)
-                if idx_type is not None and idx_type != I32:
-                    self._error(
-                        f"index must be i32, got {idx_type}",
-                        ic.span.line_start, ic.span.col_start,
-                    )
-                # Single index removes this dimension
+                if idx_type is not None:
+                    if isinstance(idx_type, ArrayType):
+                        # Array-based indexing (gather)
+                        if idx_type.base not in ("i32", "i64"):
+                            self._error(
+                                f"array index must have integer element type, got {idx_type}",
+                                ic.span.line_start, ic.span.col_start,
+                            )
+                            return None
+                        if len(idx_type.dims) != 1:
+                            self._error(
+                                f"array index must be 1-D, got {idx_type}",
+                                ic.span.line_start, ic.span.col_start,
+                            )
+                            return None
+                        if has_array_index:
+                            self._error(
+                                "only one array index is supported per indexing expression",
+                                ic.span.line_start, ic.span.col_start,
+                            )
+                            return None
+                        has_array_index = True
+                        result_dims.append(idx_type.dims[0])
+                        continue
+                    elif idx_type != I32:
+                        self._error(
+                            f"index must be i32 or integer array, got {idx_type}",
+                            ic.span.line_start, ic.span.col_start,
+                        )
+                # Single scalar index removes this dimension
             elif ic.kind == "slice":
                 start_type = self._infer(ic.start, env)
                 end_type = self._infer(ic.end, env)
@@ -690,6 +715,21 @@ class TypeChecker:
             for arg in expr.args:
                 self._infer(arg, env)
             return None
+
+        # iota(N) — returns i32[N], N must be a positive integer literal
+        if expr.callee == "iota":
+            if len(expr.args) != 1:
+                self._error("iota expects exactly 1 argument", expr.span.line_start, expr.span.col_start)
+                return None
+            arg = expr.args[0]
+            if not isinstance(arg, IntLiteral):
+                self._error("iota argument must be an integer literal", expr.span.line_start, expr.span.col_start)
+                return None
+            if arg.value <= 0:
+                self._error("iota argument must be positive", expr.span.line_start, expr.span.col_start)
+                return None
+            self._infer(arg, env)
+            return ArrayType("i32", (arg.value,))
 
         sig = self.fn_table.get(expr.callee)
         if sig is None:

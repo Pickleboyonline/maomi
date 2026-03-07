@@ -157,7 +157,7 @@ class TestTypeCheckerIndexing:
     def test_error_non_i32_index(self):
         _, tc, errors = _check("fn f(x: f32[10], i: f32) -> f32 { x[i] }")
         assert len(errors) >= 1
-        assert any("index must be i32" in e.message for e in errors)
+        assert any("index must be i32 or integer array" in e.message for e in errors)
 
     def test_error_empty_slice(self):
         _, tc, errors = _check("fn f(x: f32[10]) -> f32[0] { x[3:3] }")
@@ -244,3 +244,116 @@ class TestADIndexing:
         """
         prog, tc, errors = _check(src)
         assert not errors
+
+
+# ---------- Iota tests ----------
+
+
+class TestIotaTypeChecker:
+    def test_iota_returns_i32_array(self):
+        _, tc, errors = _check("fn f() -> i32[10] { iota(10) }")
+        assert not errors
+
+    def test_iota_error_non_literal(self):
+        _, tc, errors = _check("fn f(n: i32) -> i32[10] { iota(n) }")
+        assert len(errors) >= 1
+        assert any("integer literal" in e.message for e in errors)
+
+    def test_iota_error_zero(self):
+        _, tc, errors = _check("fn f() -> i32[1] { iota(0) }")
+        assert len(errors) >= 1
+        assert any("positive" in e.message for e in errors)
+
+    def test_iota_error_wrong_arg_count(self):
+        _, tc, errors = _check("fn f() -> i32[10] { iota(10, 20) }")
+        assert len(errors) >= 1
+        assert any("1 argument" in e.message for e in errors)
+
+
+class TestIotaCodegen:
+    def test_iota_emits_stablehlo_iota(self):
+        mlir = _compile("fn f() -> i32[10] { iota(10) }")
+        assert "stablehlo.iota" in mlir
+        assert "dim = 0" in mlir
+        assert "tensor<10xi32>" in mlir
+
+
+# ---------- Array indexing (gather) tests ----------
+
+
+class TestArrayIndexTypeChecker:
+    def test_gather_2d_first_axis(self):
+        _, tc, errors = _check("fn f(x: f32[100, 64], ids: i32[8]) -> f32[8, 64] { x[ids] }")
+        assert not errors
+
+    def test_gather_1d(self):
+        _, tc, errors = _check("fn f(x: f32[100], ids: i32[8]) -> f32[8] { x[ids] }")
+        assert not errors
+
+    def test_gather_second_axis(self):
+        _, tc, errors = _check("fn f(x: f32[10, 20], ids: i32[5]) -> f32[10, 5] { x[:, ids] }")
+        assert not errors
+
+    def test_gather_with_iota(self):
+        _, tc, errors = _check("fn f(x: f32[100, 64]) -> f32[8, 64] { x[iota(8)] }")
+        assert not errors
+
+    def test_error_float_array_index(self):
+        _, tc, errors = _check("fn f(x: f32[100], ids: f32[8]) -> f32[8] { x[ids] }")
+        assert len(errors) >= 1
+        assert any("integer" in e.message.lower() for e in errors)
+
+    def test_error_2d_array_index(self):
+        _, tc, errors = _check("fn f(x: f32[100], ids: i32[4, 2]) -> f32[4] { x[ids] }")
+        assert len(errors) >= 1
+        assert any("1-D" in e.message for e in errors)
+
+    def test_error_multiple_array_indices(self):
+        _, tc, errors = _check(
+            "fn f(x: f32[10, 20], a: i32[3], b: i32[3]) -> f32[3, 3] { x[a, b] }"
+        )
+        assert len(errors) >= 1
+        assert any("only one array index" in e.message for e in errors)
+
+
+class TestArrayIndexCodegen:
+    def test_gather_emits_stablehlo_gather(self):
+        mlir = _compile("fn f(x: f32[100, 64], ids: i32[8]) -> f32[8, 64] { x[ids] }")
+        assert '"stablehlo.gather"' in mlir
+        assert "stablehlo.reshape" in mlir  # indices reshaped
+
+    def test_gather_1d(self):
+        mlir = _compile("fn f(x: f32[100], ids: i32[8]) -> f32[8] { x[ids] }")
+        assert '"stablehlo.gather"' in mlir
+
+    def test_gather_second_axis(self):
+        mlir = _compile("fn f(x: f32[10, 20], ids: i32[5]) -> f32[10, 5] { x[:, ids] }")
+        assert '"stablehlo.gather"' in mlir
+
+    def test_gather_with_iota(self):
+        mlir = _compile("fn f(x: f32[100, 64]) -> f32[8, 64] { x[iota(8)] }")
+        assert "stablehlo.iota" in mlir
+        assert '"stablehlo.gather"' in mlir
+
+
+class TestArrayIndexAD:
+    def test_gather_grad_1d(self):
+        src = """
+        fn f(x: f32[100], ids: i32[8]) -> f32[100] {
+            grad(sum(x[ids]), x)
+        }
+        """
+        mlir = _compile(src)
+        assert '"stablehlo.scatter"' in mlir
+
+    def test_gather_grad_2d_uses_scatter(self):
+        # Use map+sum to reduce the 2D gather result to scalar
+        src = """
+        fn f(table: f32[100, 64], ids: i32[8]) -> f32[100, 64] {
+            let rows: f32[8, 64] = table[ids];
+            let total: f32 = sum(map r in rows { sum(r) });
+            grad(total, table)
+        }
+        """
+        mlir = _compile(src)
+        assert '"stablehlo.scatter"' in mlir

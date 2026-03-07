@@ -23,6 +23,7 @@ from .ast_nodes import (
     IndexComponent,
     _ScanGrad,
     _IndexGrad,
+    _GatherGrad,
     Expr,
 )
 from .types import MaomiType, ScalarType, ArrayType, StructType
@@ -244,6 +245,8 @@ class StableHLOCodegen:
                 return self._gen_scan_grad(expr, env)
             case _IndexGrad():
                 return self._gen_index_grad(expr, env)
+            case _GatherGrad():
+                return self._gen_gather_grad(expr, env)
             case _:
                 raise MaomiError(
                     f"codegen: unsupported expression type {type(expr).__name__}",
@@ -390,6 +393,10 @@ class StableHLOCodegen:
             self._emit(f"// callback (no-op)")
             return ""
 
+        # iota(N) → stablehlo.iota
+        if expr.callee == "iota":
+            return self._gen_iota(expr, env)
+
         # Handle builtins
         if expr.callee in _BUILTIN_OPS:
             return self._gen_elementwise_builtin(expr, env)
@@ -418,6 +425,13 @@ class StableHLOCodegen:
         op = _BUILTIN_OPS[expr.callee]
         var = self._fresh()
         self._emit(f"{var} = {op} {arg} : {mlir_t}")
+        return var
+
+    def _gen_iota(self, expr: CallExpr, env: dict[str, str]) -> str:
+        result_type = self._type_of(expr)
+        mlir_t = _mlir_type(result_type)
+        var = self._fresh()
+        self._emit(f"{var} = stablehlo.iota dim = 0 : {mlir_t}")
         return var
 
     def _gen_mean(self, expr: CallExpr, env: dict[str, str]) -> str:
@@ -584,12 +598,20 @@ class StableHLOCodegen:
     # -- Index codegen --
 
     def _gen_index(self, expr: IndexExpr, env: dict[str, str]) -> str:
-        base_ssa = self._gen_expr(expr.base, env)
         base_type = self._type_of(expr.base)
-        result_type = self._type_of(expr)
 
         if not isinstance(base_type, ArrayType):
             raise MaomiError("codegen: indexing non-array", "<codegen>", expr.span.line_start, expr.span.col_start)
+
+        # Check for array-based indexing (gather) — dispatch before scalar path
+        for ic in expr.indices:
+            if ic.kind == "single":
+                idx_type = self._type_of(ic.value)
+                if isinstance(idx_type, ArrayType):
+                    return self._gen_gather(expr, env)
+
+        base_ssa = self._gen_expr(expr.base, env)
+        result_type = self._type_of(expr)
 
         # Build per-dimension start indices and slice sizes
         start_ssas: list[str] = []
@@ -747,6 +769,156 @@ class StableHLOCodegen:
         self._emit(
             f"{result} = stablehlo.dynamic_update_slice {zeros}, {adj_ssa}, {starts_str} "
             f": ({mlir_base}, {mlir_update}, {start_types}) -> {mlir_base}"
+        )
+        return result
+
+    # -- Gather / Scatter codegen --
+
+    def _gen_gather(self, expr: IndexExpr, env: dict[str, str]) -> str:
+        """Emit stablehlo.gather for array-based indexing (e.g., table[ids])."""
+        base_ssa = self._gen_expr(expr.base, env)
+        base_type = self._type_of(expr.base)
+        result_type = self._type_of(expr)
+        rank = len(base_type.dims)
+
+        # Find the array-indexed axis
+        gather_axis = 0
+        indices_expr = None
+        for i, ic in enumerate(expr.indices):
+            if ic.kind == "single":
+                idx_type = self._type_of(ic.value)
+                if isinstance(idx_type, ArrayType):
+                    gather_axis = i
+                    indices_expr = ic.value
+                    break
+
+        indices_ssa = self._gen_expr(indices_expr, env)
+        indices_type = self._type_of(indices_expr)
+        B = indices_type.dims[0]
+
+        # Reshape indices: i32[B] → i32[B, 1] (add index_vector_dim)
+        reshaped_type = ArrayType(indices_type.base, (B, 1))
+        reshaped_indices = self._fresh()
+        self._emit(
+            f"{reshaped_indices} = stablehlo.reshape {indices_ssa} "
+            f": ({_mlir_type(indices_type)}) -> {_mlir_type(reshaped_type)}"
+        )
+
+        # Dimension numbers
+        offset_dims = list(range(0, gather_axis)) + list(range(gather_axis + 1, rank))
+        collapsed_slice_dims = [gather_axis]
+        start_index_map = [gather_axis]
+
+        # Slice sizes: 1 for gathered axis, full for others
+        slice_sizes = [d for d in base_type.dims]
+        slice_sizes[gather_axis] = 1
+
+        # Format dimension number lists
+        od_str = ", ".join(str(d) for d in offset_dims)
+        cd_str = ", ".join(str(d) for d in collapsed_slice_dims)
+        sim_str = ", ".join(str(d) for d in start_index_map)
+        ss_str = ", ".join(str(s) for s in slice_sizes)
+
+        # Build gather dimension_numbers attribute — omit offset_dims if empty
+        dnums_parts = []
+        if offset_dims:
+            dnums_parts.append(f"offset_dims = [{od_str}]")
+        dnums_parts.append(f"collapsed_slice_dims = [{cd_str}]")
+        dnums_parts.append(f"start_index_map = [{sim_str}]")
+        dnums_parts.append("index_vector_dim = 1")
+        dnums_str = ", ".join(dnums_parts)
+
+        result = self._fresh()
+        self._emit(
+            f'{result} = "stablehlo.gather"({base_ssa}, {reshaped_indices}) '
+            f'<{{dimension_numbers = #stablehlo.gather<{dnums_str}>, '
+            f'indices_are_sorted = false, '
+            f'slice_sizes = array<i64: {ss_str}>}}> '
+            f': ({_mlir_type(base_type)}, {_mlir_type(reshaped_type)}) -> {_mlir_type(result_type)}'
+        )
+        return result
+
+    def _gen_gather_grad(self, expr: _GatherGrad, env: dict[str, str]) -> str:
+        """Emit stablehlo.scatter (add-combiner) for gather gradient."""
+        base_type = self._type_of(expr.base_expr)
+        adj_ssa = self._gen_expr(expr.adj, env)
+        adj_type = self._type_of(expr.adj)
+        indices_ssa = self._gen_expr(expr.indices, env)
+        indices_type = self._type_of(expr.indices)
+        k = expr.gather_axis
+        rank = len(base_type.dims)
+        B = indices_type.dims[0]
+
+        # Expected updates shape = gather output shape (base with dims[k] → B)
+        updates_dims = list(base_type.dims)
+        updates_dims[k] = B
+        updates_type = ArrayType(base_type.base, tuple(updates_dims))
+
+        # Broadcast adjoint if it's scalar or lower rank than expected
+        if adj_type != updates_type:
+            broadcast_dims: list[int] = []
+            if isinstance(adj_type, ArrayType):
+                # Map existing dims to output dims
+                broadcast_dims = list(range(len(adj_type.dims)))
+            broadcast_str = ", ".join(str(d) for d in broadcast_dims)
+            broadcasted = self._fresh()
+            self._emit(
+                f"{broadcasted} = stablehlo.broadcast_in_dim {adj_ssa}, dims = [{broadcast_str}] "
+                f": ({_mlir_type(adj_type)}) -> {_mlir_type(updates_type)}"
+            )
+            adj_ssa = broadcasted
+            adj_type = updates_type
+
+        mlir_base = _mlir_type(base_type)
+
+        # Create zero tensor of base shape
+        zeros = self._fresh()
+        self._emit(f"{zeros} = stablehlo.constant dense<0.000000e+00> : {mlir_base}")
+
+        # Reshape indices: i32[B] → i32[B, 1]
+        B = indices_type.dims[0]
+        reshaped_idx_type = ArrayType(indices_type.base, (B, 1))
+        reshaped_indices = self._fresh()
+        self._emit(
+            f"{reshaped_indices} = stablehlo.reshape {indices_ssa} "
+            f": ({_mlir_type(indices_type)}) -> {_mlir_type(reshaped_idx_type)}"
+        )
+
+        # Scatter dimension numbers (mirror of gather)
+        update_window_dims = list(range(0, k)) + list(range(k + 1, rank))
+        inserted_window_dims = [k]
+        scatter_dims_to_operand_dims = [k]
+
+        uwd_str = ", ".join(str(d) for d in update_window_dims)
+        iwd_str = ", ".join(str(d) for d in inserted_window_dims)
+        sdtod_str = ", ".join(str(d) for d in scatter_dims_to_operand_dims)
+
+        # Build scatter dimension_numbers attribute — omit update_window_dims if empty
+        sdnums_parts = []
+        if update_window_dims:
+            sdnums_parts.append(f"update_window_dims = [{uwd_str}]")
+        sdnums_parts.append(f"inserted_window_dims = [{iwd_str}]")
+        sdnums_parts.append(f"scatter_dims_to_operand_dims = [{sdtod_str}]")
+        sdnums_parts.append("index_vector_dim = 1")
+        sdnums_str = ", ".join(sdnums_parts)
+
+        # Element type for combiner region — use fresh names to avoid SSA conflicts
+        etype = _MLIR_ETYPE[base_type.base]
+        lhs = self._fresh()
+        rhs = self._fresh()
+        add_var = self._fresh()
+
+        result = self._fresh()
+        self._emit(
+            f'{result} = "stablehlo.scatter"({zeros}, {reshaped_indices}, {adj_ssa}) '
+            f'<{{scatter_dimension_numbers = #stablehlo.scatter<{sdnums_str}>, '
+            f'indices_are_sorted = false, unique_indices = false}}> '
+            f'({{')
+        self._emit(f'  ^bb0({lhs}: tensor<{etype}>, {rhs}: tensor<{etype}>):')
+        self._emit(f'    {add_var} = stablehlo.add {lhs}, {rhs} : tensor<{etype}>')
+        self._emit(f'    stablehlo.return {add_var} : tensor<{etype}>')
+        self._emit(
+            f'}}) : ({mlir_base}, {_mlir_type(reshaped_idx_type)}, {_mlir_type(adj_type)}) -> {mlir_base}'
         )
         return result
 
