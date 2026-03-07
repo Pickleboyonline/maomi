@@ -569,6 +569,44 @@ scan (c, x, y) in (init, xs, ys) {
 
 Differentiable: backward pass runs a reverse scan to propagate gradients.
 
+### while
+
+Loop with a runtime condition. Unlike `scan`, the iteration count is determined by the condition, not a sequence length — the program doesn't need to recompile when the number of iterations changes.
+
+```maomi
+while state in init { condition } do {
+    body
+}
+```
+
+```maomi
+fn converge(x: f32) -> f32 {
+    while s in x { s > 0.01 } do {
+        s * 0.5
+    }
+}
+```
+
+The condition block must return `bool`. The body must return the same type as the initial state. The result is the final state value.
+
+**Bounded while** — adding `max N` pre-allocates a trajectory buffer of N entries, enabling reverse-mode AD. The loop still stops when the condition is false, but runs at most N iterations.
+
+```maomi
+fn converge_diff(x: f32) -> f32 {
+    let result = while s in x max 100 { s > 0.01 } do {
+        s * 0.5
+    };
+    grad(result, x)
+}
+```
+
+| Variant | Differentiable? | Use case |
+|---------|----------------|----------|
+| `while s in init { cond } do { body }` | No | Inference, dynamic stopping |
+| `while s in init max N { cond } do { body }` | Yes | Training through dynamic loops |
+
+Attempting `grad` through an unbounded `while` (no `max`) produces a compile error. This matches JAX's semantics — `jax.grad` through `jax.lax.while_loop` is also unsupported.
+
 ---
 
 ## Automatic Differentiation
@@ -599,6 +637,8 @@ The expression must produce a scalar (`f32`). The result has the same type as th
 | User functions | Yes | Inlined then differentiated |
 | `map` | Yes | Gradient distributes over body |
 | `scan` | Yes | Reverse scan for backward pass |
+| `while ... max N` | Yes | Pre-allocated trajectory for backward pass |
+| `while` (no max) | No | Unknown iteration count; use bounded variant for grad |
 | Structs / field access | Yes | Per-field gradients |
 | Array indexing / gather | Yes | `dynamic_update_slice` / scatter |
 | `conv2d` | Yes | Gradient w.r.t. input and kernel |

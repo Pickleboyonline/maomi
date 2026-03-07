@@ -154,6 +154,16 @@ class ScanExpr:
 
 
 @dataclass
+class WhileExpr:
+    state_var: str          # loop state variable name
+    init: Expr              # initial state value
+    max_iters: int | None   # None = non-differentiable, int = bounded + differentiable
+    cond: Block             # condition block (must return bool)
+    body: Block             # body block (must return state type)
+    span: Span
+
+
+@dataclass
 class MapExpr:
     elem_var: str
     sequence: Expr
@@ -217,6 +227,20 @@ class _ScanGrad:
     forward_result: Expr
     adj: Expr
     wrt: str
+    span: Span
+
+
+@dataclass
+class _WhileGrad:
+    """Internal: backward pass of bounded while. Pre-allocated trajectory."""
+    d_body_d_state: Expr    # symbolic derivative of body w.r.t. state
+    state_var: str
+    init: Expr              # original init
+    max_iters: int          # trajectory buffer size
+    cond: Block             # original condition (for forward augmented loop)
+    body: Block             # original body (for forward augmented loop)
+    forward_result: Expr    # reference to forward WhileExpr
+    adj: Expr               # upstream adjoint
     span: Span
 
 
@@ -289,7 +313,7 @@ class _ReduceSum:
 
 
 # Union types for convenience
-Expr = IntLiteral | FloatLiteral | BoolLiteral | Identifier | UnaryOp | BinOp | IfExpr | CallExpr | ScanExpr | MapExpr | GradExpr | StructLiteral | FieldAccess | WithExpr | IndexExpr | _ScanGrad | _IndexGrad | _GatherGrad | _Conv2dGrad | _MaxPoolGrad | _AvgPoolGrad | _BroadcastExpr
+Expr = IntLiteral | FloatLiteral | BoolLiteral | Identifier | UnaryOp | BinOp | IfExpr | CallExpr | ScanExpr | WhileExpr | MapExpr | GradExpr | StructLiteral | FieldAccess | WithExpr | IndexExpr | _ScanGrad | _WhileGrad | _IndexGrad | _GatherGrad | _Conv2dGrad | _MaxPoolGrad | _AvgPoolGrad | _BroadcastExpr
 Stmt = LetStmt | ExprStmt
 
 

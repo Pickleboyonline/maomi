@@ -21,6 +21,7 @@ from .ast_nodes import (
     IfExpr,
     CallExpr,
     ScanExpr,
+    WhileExpr,
     MapExpr,
     GradExpr,
     StructDef,
@@ -268,6 +269,8 @@ class Parser:
     # -- Expressions (precedence climbing) --
 
     def _parse_expr(self) -> Expr:
+        if self._check(TokenType.WHILE):
+            return self._parse_while()
         if self._check(TokenType.SCAN):
             return self._parse_scan()
         if self._check(TokenType.MAP):
@@ -316,6 +319,22 @@ class Parser:
         self._expect(TokenType.RPAREN)
         body = self._parse_block()
         return ScanExpr(carry_var, elem_vars, init, sequences, body, self._span_from(start))
+
+    def _parse_while(self) -> WhileExpr:
+        start = self._expect(TokenType.WHILE)
+        state_var = self._expect(TokenType.IDENT).value
+        self._expect(TokenType.IN)
+        init = self._parse_expr()
+        max_iters: int | None = None
+        if self._match(TokenType.MAX):
+            tok = self._expect(TokenType.INT_LIT)
+            max_iters = int(tok.value)
+            if max_iters <= 0:
+                self._error(f"max iterations must be positive, got {max_iters}")
+        cond = self._parse_block()
+        self._expect(TokenType.DO)
+        body = self._parse_block()
+        return WhileExpr(state_var, init, max_iters, cond, body, self._span_from(start))
 
     def _parse_map(self) -> MapExpr:
         start = self._expect(TokenType.MAP)

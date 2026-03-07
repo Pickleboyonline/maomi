@@ -21,6 +21,9 @@ class TokenType(StrEnum):
     MAP = auto()
     GRAD = auto()
     IN = auto()
+    WHILE = auto()
+    DO = auto()
+    MAX = auto()
     IMPORT = auto()
     FROM = auto()
     AS = auto()
@@ -102,4 +105,7 @@ KEYWORDS: dict[str, TokenType] = {
     "as": TokenType.AS,
     "struct": TokenType.STRUCT,
     "with": TokenType.WITH,
+    "while": TokenType.WHILE,
+    "do": TokenType.DO,
+    "max": TokenType.MAX,
 }

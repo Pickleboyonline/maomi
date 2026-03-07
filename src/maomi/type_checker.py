@@ -16,6 +16,7 @@ from .ast_nodes import (
     IfExpr,
     CallExpr,
     ScanExpr,
+    WhileExpr,
     MapExpr,
     GradExpr,
     StructLiteral,
@@ -279,6 +280,8 @@ class TypeChecker:
                 return self._check_call(expr, env)
             case ScanExpr():
                 return self._check_scan(expr, env)
+            case WhileExpr():
+                return self._check_while(expr, env)
             case MapExpr():
                 return self._check_map(expr, env)
             case GradExpr():
@@ -364,6 +367,38 @@ class TypeChecker:
             return ArrayType(carry_type.base, (seq_first,))
         else:
             return ArrayType(carry_type.base, (seq_first,) + carry_type.dims)
+
+    def _check_while(self, expr: WhileExpr, env: TypeEnv) -> MaomiType | None:
+        state_type = self._infer(expr.init, env)
+        if state_type is None:
+            return None
+
+        body_env = env.child()
+        body_env.define(expr.state_var, state_type)
+
+        cond_type = self._check_block(expr.cond, body_env)
+        if cond_type is None:
+            return None
+        if not (isinstance(cond_type, ScalarType) and cond_type.base == "bool"):
+            self._error(
+                f"while condition must return bool, got {cond_type}",
+                expr.cond.expr.span.line_start if expr.cond.expr else expr.span.line_start,
+                expr.cond.expr.span.col_start if expr.cond.expr else expr.span.col_start,
+            )
+            return None
+
+        body_type = self._check_block(expr.body, body_env)
+        if body_type is None:
+            return None
+        if not self._types_compatible(body_type, state_type):
+            self._error(
+                f"while body returns {body_type}, but state has type {state_type}",
+                expr.body.expr.span.line_start if expr.body.expr else expr.span.line_start,
+                expr.body.expr.span.col_start if expr.body.expr else expr.span.col_start,
+            )
+            return None
+
+        return state_type
 
     def _check_map(self, expr: MapExpr, env: TypeEnv) -> MaomiType | None:
         seq_type = self._infer(expr.sequence, env)

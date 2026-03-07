@@ -15,6 +15,7 @@ from .ast_nodes import (
     IfExpr,
     CallExpr,
     ScanExpr,
+    WhileExpr,
     MapExpr,
     StructLiteral,
     FieldAccess,
@@ -22,6 +23,7 @@ from .ast_nodes import (
     IndexExpr,
     IndexComponent,
     _ScanGrad,
+    _WhileGrad,
     _IndexGrad,
     _GatherGrad,
     _Conv2dGrad,
@@ -313,6 +315,8 @@ class StableHLOCodegen:
                 return self._gen_call(expr, env)
             case ScanExpr():
                 return self._gen_scan(expr, env)
+            case WhileExpr():
+                return self._gen_while(expr, env)
             case MapExpr():
                 return self._gen_map(expr, env)
             case StructLiteral():
@@ -325,6 +329,8 @@ class StableHLOCodegen:
                 return self._gen_index(expr, env)
             case _ScanGrad():
                 return self._gen_scan_grad(expr, env)
+            case _WhileGrad():
+                return self._gen_while_grad(expr, env)
             case _IndexGrad():
                 return self._gen_index_grad(expr, env)
             case _GatherGrad():
@@ -2066,6 +2072,228 @@ class StableHLOCodegen:
         return result
 
     # -- Scan codegen --
+
+    # -- While loop codegen --
+
+    def _gen_while(self, expr: WhileExpr, env: dict[str, str]) -> str:
+        init_val = self._gen_expr(expr.init, env)
+        state_type = self._type_of(expr.init)
+        mlir_state = _mlir_type(state_type)
+
+        uid = self._counter
+        state_name = f"whileS{uid}"
+
+        while_result = self._fresh()
+        header = f"%{state_name} = {init_val}"
+        self._emit(f"{while_result}:1 = stablehlo.while({header}) : {mlir_state}")
+
+        # Cond region
+        self._emit("cond {")
+        self._indent += 1
+        cond_env = dict(env)
+        cond_env[expr.state_var] = f"%{state_name}"
+        cond_val = self._gen_block(expr.cond, cond_env)
+        self._emit(f"stablehlo.return {cond_val} : tensor<i1>")
+        self._indent -= 1
+
+        # Body region
+        self._emit("} do {")
+        self._indent += 1
+        body_env = dict(env)
+        body_env[expr.state_var] = f"%{state_name}"
+        new_state = self._gen_block(expr.body, body_env)
+        self._emit(f"stablehlo.return {new_state} : {mlir_state}")
+        self._indent -= 1
+        self._emit("}")
+
+        return f"{while_result}#0"
+
+    def _gen_while_grad(self, expr: _WhileGrad, env: dict[str, str]) -> str:
+        """Emit augmented forward + reverse while for bounded while backward pass."""
+        # Generate the forward result (the original while loop)
+        fwd_val = self._gen_expr(expr.forward_result, env)
+
+        state_type = self._type_of(expr.init)
+        mlir_state = _mlir_type(state_type)
+        mlir_i32 = "tensor<i32>"
+        mlir_bool = "tensor<i1>"
+        max_iters = expr.max_iters
+
+        # Build trajectory type: tensor<max_iters x ...state_shape>
+        if isinstance(state_type, ScalarType):
+            traj_type = ArrayType(state_type.base, (max_iters,))
+        elif isinstance(state_type, ArrayType):
+            traj_type = ArrayType(state_type.base, (max_iters,) + state_type.dims)
+        else:
+            raise MaomiError("codegen: while grad only supports scalar/array state", "<codegen>", 0, 0)
+        mlir_traj = _mlir_type(traj_type)
+
+        # ── Forward augmented while: save trajectory ──
+        init_val = self._gen_expr(expr.init, env)
+
+        # Pre-allocate trajectory buffer (zeros)
+        traj_init = self._fresh()
+        self._emit(f"{traj_init} = stablehlo.constant dense<0.000000e+00> : {mlir_traj}")
+
+        # Step counter = 0
+        step_init = self._fresh()
+        self._emit(f"{step_init} = stablehlo.constant dense<0> : {mlir_i32}")
+
+        # running = true
+        run_init = self._fresh()
+        self._emit(f"{run_init} = stablehlo.constant dense<true> : {mlir_bool}")
+
+        uid = self._counter
+        s_name = f"fwdS{uid}"
+        step_name = f"fwdStep{uid}"
+        traj_name = f"fwdTraj{uid}"
+        run_name = f"fwdRun{uid}"
+
+        fwd_result = self._fresh()
+        header_parts = ", ".join([
+            f"%{s_name} = {init_val}",
+            f"%{step_name} = {step_init}",
+            f"%{traj_name} = {traj_init}",
+            f"%{run_name} = {run_init}",
+        ])
+        types_str = f"{mlir_state}, {mlir_i32}, {mlir_traj}, {mlir_bool}"
+        self._emit(f"{fwd_result}:4 = stablehlo.while({header_parts}) : {types_str}")
+
+        # Cond: running && step < max_iters
+        self._emit("cond {")
+        self._indent += 1
+        max_v = self._fresh()
+        self._emit(f"{max_v} = stablehlo.constant dense<{max_iters}> : {mlir_i32}")
+        lt_v = self._fresh()
+        self._emit(f"{lt_v} = stablehlo.compare LT, %{step_name}, {max_v}, SIGNED : ({mlir_i32}, {mlir_i32}) -> {mlir_bool}")
+        and_v = self._fresh()
+        self._emit(f"{and_v} = stablehlo.and %{run_name}, {lt_v} : {mlir_bool}")
+        self._emit(f"stablehlo.return {and_v} : {mlir_bool}")
+        self._indent -= 1
+
+        # Body: save state to trajectory, run body, check cond on new state
+        self._emit("} do {")
+        self._indent += 1
+
+        # Save current state to trajectory at position step
+        if isinstance(state_type, ScalarType):
+            reshaped = self._fresh()
+            self._emit(f"{reshaped} = stablehlo.reshape %{s_name} : ({mlir_state}) -> tensor<1x{_MLIR_ETYPE[state_type.base]}>")
+            new_traj = self._fresh()
+            self._emit(f"{new_traj} = stablehlo.dynamic_update_slice %{traj_name}, {reshaped}, %{step_name} : ({mlir_traj}, tensor<1x{_MLIR_ETYPE[state_type.base]}>, {mlir_i32}) -> {mlir_traj}")
+        elif isinstance(state_type, ArrayType):
+            reshaped = self._fresh()
+            inner_shape = "x".join(str(d) for d in state_type.dims)
+            etype = _MLIR_ETYPE[state_type.base]
+            self._emit(f"{reshaped} = stablehlo.reshape %{s_name} : ({mlir_state}) -> tensor<1x{inner_shape}x{etype}>")
+            # Start indices: step for dim 0, then zeros for remaining dims
+            zeros = [self._fresh() for _ in state_type.dims]
+            for z in zeros:
+                self._emit(f"{z} = stablehlo.constant dense<0> : {mlir_i32}")
+            start_indices = f"%{step_name}, " + ", ".join(zeros)
+            slice_shape = f"1x{inner_shape}x{etype}"
+            new_traj = self._fresh()
+            self._emit(f"{new_traj} = stablehlo.dynamic_update_slice %{traj_name}, {reshaped}, {start_indices} : ({mlir_traj}, tensor<{slice_shape}>, {', '.join([mlir_i32] * (1 + len(state_type.dims)))}) -> {mlir_traj}")
+
+        # Run body
+        body_env = dict(env)
+        body_env[expr.state_var] = f"%{s_name}"
+        new_state = self._gen_block(expr.body, body_env)
+
+        # Check condition on new state
+        cond_env = dict(env)
+        cond_env[expr.state_var] = new_state
+        still_running = self._gen_block(expr.cond, cond_env)
+
+        # Increment step
+        one_v = self._fresh()
+        self._emit(f"{one_v} = stablehlo.constant dense<1> : {mlir_i32}")
+        new_step = self._fresh()
+        self._emit(f"{new_step} = stablehlo.add %{step_name}, {one_v} : {mlir_i32}")
+
+        vals_str = f"{new_state}, {new_step}, {new_traj}, {still_running}"
+        self._emit(f"stablehlo.return {vals_str} : {types_str}")
+        self._indent -= 1
+        self._emit("}")
+
+        # Extract: num_iters = fwd_result#1, trajectory = fwd_result#2
+        fwd_num_iters = f"{fwd_result}#1"
+        fwd_trajectory = f"{fwd_result}#2"
+
+        # ── Backward while: reverse through trajectory ──
+        adj_val = self._gen_expr(expr.adj, env)
+
+        # Start step = num_iters - 1
+        one_bwd = self._fresh()
+        self._emit(f"{one_bwd} = stablehlo.constant dense<1> : {mlir_i32}")
+        start_step = self._fresh()
+        self._emit(f"{start_step} = stablehlo.subtract {fwd_num_iters}, {one_bwd} : {mlir_i32}")
+
+        uid2 = self._counter
+        badj_name = f"bwdAdj{uid2}"
+        bstep_name = f"bwdStep{uid2}"
+
+        bwd_result = self._fresh()
+        bwd_header = f"%{badj_name} = {adj_val}, %{bstep_name} = {start_step}"
+        bwd_types = f"{mlir_state}, {mlir_i32}"
+        self._emit(f"{bwd_result}:2 = stablehlo.while({bwd_header}) : {bwd_types}")
+
+        # Cond: step >= 0
+        self._emit("cond {")
+        self._indent += 1
+        zero_v = self._fresh()
+        self._emit(f"{zero_v} = stablehlo.constant dense<0> : {mlir_i32}")
+        ge_v = self._fresh()
+        self._emit(f"{ge_v} = stablehlo.compare GE, %{bstep_name}, {zero_v}, SIGNED : ({mlir_i32}, {mlir_i32}) -> {mlir_bool}")
+        self._emit(f"stablehlo.return {ge_v} : {mlir_bool}")
+        self._indent -= 1
+
+        # Body: read saved state, evaluate derivative, multiply
+        self._emit("} do {")
+        self._indent += 1
+
+        # Read saved state from trajectory at step
+        if isinstance(state_type, ScalarType):
+            etype = _MLIR_ETYPE[state_type.base]
+            sliced = self._fresh()
+            self._emit(f"{sliced} = stablehlo.dynamic_slice {fwd_trajectory}, %{bstep_name}, sizes = [1] : ({mlir_traj}, {mlir_i32}) -> tensor<1x{etype}>")
+            saved_state = self._fresh()
+            self._emit(f"{saved_state} = stablehlo.reshape {sliced} : (tensor<1x{etype}>) -> {mlir_state}")
+        elif isinstance(state_type, ArrayType):
+            inner_shape = "x".join(str(d) for d in state_type.dims)
+            etype = _MLIR_ETYPE[state_type.base]
+            zeros_bwd = [self._fresh() for _ in state_type.dims]
+            for z in zeros_bwd:
+                self._emit(f"{z} = stablehlo.constant dense<0> : {mlir_i32}")
+            start_indices_bwd = f"%{bstep_name}, " + ", ".join(zeros_bwd)
+            n_idx = 1 + len(state_type.dims)
+            slice_sizes = f"1x{inner_shape}x{etype}"
+            sliced = self._fresh()
+            self._emit(f"{sliced} = stablehlo.dynamic_slice {fwd_trajectory}, {start_indices_bwd}, sizes = [1, {', '.join(str(d) for d in state_type.dims)}] : ({mlir_traj}, {', '.join([mlir_i32] * n_idx)}) -> tensor<{slice_sizes}>")
+            saved_state = self._fresh()
+            self._emit(f"{saved_state} = stablehlo.reshape {sliced} : (tensor<{slice_sizes}>) -> {mlir_state}")
+
+        # Evaluate d_body_d_state with state_var = saved_state
+        deriv_env = dict(env)
+        deriv_env[expr.state_var] = saved_state
+        d_val = self._gen_expr(expr.d_body_d_state, deriv_env)
+
+        # new_adj = adj * d_val
+        new_adj = self._fresh()
+        self._emit(f"{new_adj} = stablehlo.multiply %{badj_name}, {d_val} : {mlir_state}")
+
+        # Decrement step
+        one_bwd2 = self._fresh()
+        self._emit(f"{one_bwd2} = stablehlo.constant dense<1> : {mlir_i32}")
+        new_bstep = self._fresh()
+        self._emit(f"{new_bstep} = stablehlo.subtract %{bstep_name}, {one_bwd2} : {mlir_i32}")
+
+        self._emit(f"stablehlo.return {new_adj}, {new_bstep} : {bwd_types}")
+        self._indent -= 1
+        self._emit("}")
+
+        # Result is the accumulated adjoint (index 0)
+        return f"{bwd_result}#0"
 
     def _gen_scan(self, expr: ScanExpr, env: dict[str, str]) -> str:
         init_val = self._gen_expr(expr.init, env)

@@ -39,6 +39,7 @@ from .ast_nodes import (
     IfExpr,
     CallExpr,
     ScanExpr,
+    WhileExpr,
     MapExpr,
     GradExpr,
     StructLiteral,
@@ -47,6 +48,7 @@ from .ast_nodes import (
     IndexExpr,
     IndexComponent,
     _ScanGrad,
+    _WhileGrad,
     _IndexGrad,
     _GatherGrad,
     _Conv2dGrad,
@@ -115,6 +117,15 @@ def _collect_free_vars_inner(expr: Expr, result: set[str]):
                 for ev in evs:
                     inner.discard(ev)
                 result.update(inner)
+        case WhileExpr(state_var=sv, init=init, cond=cond, body=body):
+            _collect_free_vars_inner(init, result)
+            inner = set[str]()
+            if cond.expr:
+                _collect_free_vars_inner(cond.expr, inner)
+            if body.expr:
+                _collect_free_vars_inner(body.expr, inner)
+            inner.discard(sv)
+            result.update(inner)
         case StructLiteral(fields=fields):
             for _, fv in fields:
                 _collect_free_vars_inner(fv, result)
@@ -248,6 +259,17 @@ class ADTransform:
                     self._transform_block(expr.body),
                     expr.span,
                     expr.reverse,
+                )
+                self._copy_type(expr, result)
+                return result
+            case WhileExpr():
+                result = WhileExpr(
+                    expr.state_var,
+                    self._transform_expr(expr.init),
+                    expr.max_iters,
+                    self._transform_block(expr.cond),
+                    self._transform_block(expr.body),
+                    expr.span,
                 )
                 self._copy_type(expr, result)
                 return result
@@ -401,6 +423,11 @@ class ADTransform:
                 name = self._fresh_name("v")
                 var_map[id(expr)] = name
                 tape.append((name, expr))
+            case WhileExpr(init=init):
+                self._linearize(init, tape, var_map, let_env)
+                name = self._fresh_name("v")
+                var_map[id(expr)] = name
+                tape.append((name, expr))
             case FieldAccess(object=obj):
                 self._linearize(obj, tape, var_map, let_env)
                 name = self._fresh_name("v")
@@ -545,6 +572,14 @@ class ADTransform:
                 inner_subst = {k: v for k, v in subst.items() if k != cv and k not in evs}
                 new_body = self._substitute_block(body, inner_subst)
                 node = ScanExpr(cv, evs, new_init, new_seqs, new_body, expr.span, expr.reverse)
+                self._copy_type(expr, node)
+                return node
+            case WhileExpr(state_var=sv, init=init, cond=cond, body=body):
+                new_init = self._substitute(init, subst)
+                inner_subst = {k: v for k, v in subst.items() if k != sv}
+                new_cond = self._substitute_block(cond, inner_subst)
+                new_body = self._substitute_block(body, inner_subst)
+                node = WhileExpr(sv, new_init, expr.max_iters, new_cond, new_body, expr.span)
                 self._copy_type(expr, node)
                 return node
             case StructLiteral(name=name, fields=fields):
@@ -745,6 +780,9 @@ class ADTransform:
 
             case ScanExpr(carry_var=cv, elem_vars=evs, init=init, sequences=seqs, body=body):
                 self._backprop_scan(cv, evs, init, seqs, body, adj, adjoints, var_map, node)
+
+            case WhileExpr(state_var=sv, init=init, max_iters=mi, cond=cond, body=body):
+                self._backprop_while(sv, init, mi, cond, body, adj, adjoints, var_map, node)
 
             case FieldAccess(object=obj, field=field):
                 # adj of obj += struct with only 'field' set to adj
@@ -1146,6 +1184,45 @@ class ADTransform:
                 self.type_map[id(reduced)] = w_type
 
             self._accumulate(adjoints, v_name, reduced)
+
+    def _backprop_while(self, state_var: str, init: Expr,
+                         max_iters: int | None, cond: Block, body: Block,
+                         adj: Expr, adjoints: dict[str, Expr],
+                         var_map: dict[int, str], node: Expr):
+        """Backprop through while: emit _WhileGrad for bounded, error for unbounded."""
+        if max_iters is None:
+            raise MaomiError(
+                "reverse-mode AD is not supported through while loops without max iterations. "
+                "Use 'while state in init max N { cond } do { body }' for differentiable while loops, "
+                "or use scan for fixed-iteration differentiable loops.",
+                "<ad>", node.span.line_start, node.span.col_start,
+            )
+
+        body_expr = body.expr
+        if body_expr is None:
+            return
+
+        # Compute symbolic derivative of body w.r.t. state
+        d_body_d_state = self._differentiate_branch(body_expr, state_var)
+
+        fwd_ref = node
+
+        if id(init) in var_map:
+            init_name = var_map[id(init)]
+            grad_node = _WhileGrad(
+                d_body_d_state=d_body_d_state,
+                state_var=state_var,
+                init=init,
+                max_iters=max_iters,
+                cond=cond,
+                body=body,
+                forward_result=fwd_ref,
+                adj=adj,
+                span=node.span,
+            )
+            state_type = self._type_of(init)
+            self.type_map[id(grad_node)] = state_type
+            self._accumulate(adjoints, init_name, grad_node)
 
     def _backprop_scan(self, carry_var: str, elem_vars: list[str],
                         init: Expr, sequences: list[Expr], body: Block,

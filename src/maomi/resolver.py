@@ -12,6 +12,7 @@ from .ast_nodes import (
     ExprStmt,
     CallExpr,
     ScanExpr,
+    WhileExpr,
     MapExpr,
     IfExpr,
     GradExpr,
@@ -188,6 +189,12 @@ def _rewrite_expr(expr: Expr, rename_map: dict[str, str]) -> Expr:
             new_body = _rewrite_calls_in_block(expr.body, rename_map)
             return ScanExpr(expr.carry_var, expr.elem_vars, new_init, new_seqs,
                             new_body, expr.span, expr.reverse)
+        case WhileExpr():
+            new_init = _rewrite_expr(expr.init, rename_map)
+            new_cond = _rewrite_calls_in_block(expr.cond, rename_map)
+            new_body = _rewrite_calls_in_block(expr.body, rename_map)
+            return WhileExpr(expr.state_var, new_init, expr.max_iters,
+                             new_cond, new_body, expr.span)
         case MapExpr():
             new_seq = _rewrite_expr(expr.sequence, rename_map)
             new_body = _rewrite_calls_in_block(expr.body, rename_map)
