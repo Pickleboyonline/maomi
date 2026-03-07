@@ -18,6 +18,7 @@ from .types import MaomiType, ArrayType
 class CompileResult:
     mlir_text: str
     fn_table: dict[str, FnSignature]
+    callback_count: int = 0
 
 
 @dataclass
@@ -36,8 +37,9 @@ def compile_source(source: str, filename: str = "<stdin>") -> CompileResult:
     if errors:
         raise errors[0]
     program = transform_grad(program, checker.type_map)
-    mlir_text = StableHLOCodegen(program, checker.type_map).generate()
-    return CompileResult(mlir_text, dict(checker.fn_table))
+    codegen = StableHLOCodegen(program, checker.type_map)
+    mlir_text = codegen.generate()
+    return CompileResult(mlir_text, dict(checker.fn_table), codegen._callback_count)
 
 
 def compile_source_relax(source: str, filename: str = "<stdin>") -> RelaxCompileResult:
@@ -231,8 +233,21 @@ def _run(path: str, fn_name: str, seed: int):
         )
         sys.exit(1)
 
+    # Create default print callbacks
+    import numpy as np
+    host_callbacks = []
+    for i in range(result.callback_count):
+        def _print_cb(*args, _idx=i):
+            vals = [np.asarray(a) for a in args]
+            print(f"[callback]", *vals)
+            return ()
+        host_callbacks.append(_print_cb)
+
     try:
-        inputs, outputs = run_stablehlo(result.mlir_text, fn_name, fn_sig, seed=seed)
+        inputs, outputs = run_stablehlo(
+            result.mlir_text, fn_name, fn_sig, seed=seed,
+            host_callbacks=host_callbacks if host_callbacks else None,
+        )
     except Exception as e:
         print(f"error: execution failed: {e}", file=sys.stderr)
         sys.exit(1)

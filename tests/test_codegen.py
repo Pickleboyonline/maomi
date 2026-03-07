@@ -300,14 +300,15 @@ class TestSymbolicDimError:
 
 class TestCallbackCodegen:
     def test_callback_compiles(self):
-        """callback should compile as a no-op."""
+        """callback should emit stablehlo.custom_call for FFI callback."""
         out = codegen("""
             fn f(x: f32, y: f32) -> f32 {
                 callback(x, y);
                 x + y
             }
         """)
-        assert "callback" in out  # comment
+        assert "xla_ffi_python_cpu_callback" in out
+        assert "has_side_effect = true" in out
         assert "func.func @f" in out
 
     def test_callback_no_args_compiles(self):
@@ -317,7 +318,19 @@ class TestCallbackCodegen:
                 x
             }
         """)
+        assert "xla_ffi_python_cpu_callback" in out
         assert "func.func @f" in out
+
+    def test_callback_multiple_have_different_indices(self):
+        out = codegen("""
+            fn f(x: f32) -> f32 {
+                callback(x);
+                callback(x);
+                x
+            }
+        """)
+        assert "index = 0 : ui64" in out
+        assert "index = 1 : ui64" in out
 
 
 class TestStructCodegen:
