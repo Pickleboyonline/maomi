@@ -339,6 +339,11 @@ COMPLEX: dict[str, ComplexBuiltin] = {
         "Reduce-min. `min(x)` over all elements, `min(x, axis=1)` along an axis, `min(x, axis=1, keepdims=true)` to keep reduced dim as size 1.",
         (["x", "axis", "keepdims"], ["f32[...]", "int", "bool"], "f32"),
     ),
+    "logsumexp": ComplexBuiltin(
+        "logsumexp", "reduction", "has_rule",
+        "Numerically stable log-sum-exp. `logsumexp(x)` over all elements, `logsumexp(x, axis=1)` along an axis, `logsumexp(x, axis=1, keepdims=true)` to keep reduced dim as size 1.",
+        (["x", "axis", "keepdims"], ["f32[...]", "int", "bool"], "f32"),
+    ),
 
     # Argmax/argmin
     "argmax": ComplexBuiltin(

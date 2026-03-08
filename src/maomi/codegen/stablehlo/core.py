@@ -621,6 +621,8 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
             return self._gen_sum(expr, env)
         if expr.callee in ("max", "min"):
             return self._gen_max_min(expr, env)
+        if expr.callee == "logsumexp":
+            return self._gen_logsumexp(expr, env)
         if expr.callee in ("argmax", "argmin"):
             return self._gen_argmax(expr, env)
         if expr.callee == "transpose":
@@ -987,6 +989,91 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
         elif base == "i64":
             return "-9223372036854775807" if is_max else "9223372036854775807"
         return "0xFF800000" if is_max else "0x7F800000"
+
+    def _gen_logsumexp(self, expr: CallExpr, env: dict[str, str]) -> str:
+        """Generate numerically stable logsumexp: m + log(sum(exp(x - m), axis))
+        where m = max(x, axis, keepdims=true)."""
+        arg = self._gen_expr(expr.args[0], env)
+        arg_type = self._type_of(expr.args[0])
+        result_type = self._type_of(expr)
+
+        if not isinstance(arg_type, ArrayType):
+            return arg  # logsumexp of scalar is itself
+
+        keepdims = self._has_keepdims(expr)
+        has_axis = len(expr.args) >= 2
+        bd = self._batch_depth
+        mlir_arg = _mlir_type(arg_type)
+
+        if has_axis:
+            axis = expr.args[1].value
+            actual_axis = bd + axis
+
+            # Step 1: m = max(x, axis, keepdims=true)
+            # Compute reduced type (without keepdims dim) for the max reduction
+            reduced_dims = tuple(d for i, d in enumerate(arg_type.dims) if i != axis)
+            reduced_type = ArrayType(arg_type.base, reduced_dims) if reduced_dims else ScalarType(arg_type.base)
+            m_reduced = self._gen_reduce_max_min_single_axis(arg, arg_type, reduced_type, actual_axis, True)
+
+            # Reshape m to keepdims shape for broadcasting
+            keepdims_dims = tuple(1 if i == axis else d for i, d in enumerate(arg_type.dims))
+            keepdims_type = ArrayType(arg_type.base, keepdims_dims)
+            m_keepdims = self._fresh()
+            self._emit(f"{m_keepdims} = stablehlo.reshape {m_reduced} : ({_mlir_type(reduced_type)}) -> {_mlir_type(keepdims_type)}")
+
+            # Step 2: Broadcast m to input shape and subtract: shifted = x - m
+            m_broadcast = self._fresh()
+            self._emit(f"{m_broadcast} = stablehlo.broadcast_in_dim {m_keepdims}, dims = [{', '.join(str(i) for i in range(len(arg_type.dims)))}] : ({_mlir_type(keepdims_type)}) -> {mlir_arg}")
+            shifted = self._fresh()
+            self._emit(f"{shifted} = stablehlo.subtract {arg}, {m_broadcast} : {mlir_arg}")
+
+            # Step 3: exp(shifted)
+            exp_shifted = self._fresh()
+            self._emit(f"{exp_shifted} = stablehlo.exponential {shifted} : {mlir_arg}")
+
+            # Step 4: sum(exp_shifted, axis)
+            sum_exp = self._gen_reduce_sum_single_axis(exp_shifted, arg_type, reduced_type, actual_axis)
+
+            # Step 5: log(sum_exp)
+            mlir_reduced = _mlir_type(reduced_type)
+            log_sum = self._fresh()
+            self._emit(f"{log_sum} = stablehlo.log {sum_exp} : {mlir_reduced}")
+
+            # Step 6: result = log_sum + m_reduced
+            result = self._fresh()
+            self._emit(f"{result} = stablehlo.add {log_sum}, {m_reduced} : {mlir_reduced}")
+
+            if keepdims:
+                return self._keepdims_reshape(result, arg_type, axis, result_type)
+            return result
+        else:
+            # All-dims reduction
+            # Step 1: m = max(x) — scalar
+            scalar_type = ScalarType(arg_type.base)
+            m_scalar = self._gen_reduce_max_min(arg, arg_type, scalar_type, True)
+
+            # Step 2: Broadcast m to input shape and subtract
+            m_broadcast = self._fresh()
+            self._emit(f"{m_broadcast} = stablehlo.broadcast_in_dim {m_scalar}, dims = [] : ({_mlir_type(scalar_type)}) -> {mlir_arg}")
+            shifted = self._fresh()
+            self._emit(f"{shifted} = stablehlo.subtract {arg}, {m_broadcast} : {mlir_arg}")
+
+            # Step 3: exp(shifted)
+            exp_shifted = self._fresh()
+            self._emit(f"{exp_shifted} = stablehlo.exponential {shifted} : {mlir_arg}")
+
+            # Step 4: sum(exp_shifted) — all dims
+            sum_exp = self._gen_reduce_sum(exp_shifted, arg_type, result_type)
+
+            # Step 5: log(sum_exp)
+            mlir_result = _mlir_type(result_type)
+            log_sum = self._fresh()
+            self._emit(f"{log_sum} = stablehlo.log {sum_exp} : {mlir_result}")
+
+            # Step 6: result = log_sum + m
+            result = self._fresh()
+            self._emit(f"{result} = stablehlo.add {log_sum}, {m_scalar} : {mlir_result}")
+            return result
 
     def _gen_argmax(self, expr: CallExpr, env: dict[str, str]) -> str:
         """Generate argmax/argmin via variadic reduce with (value, index) pairs."""
