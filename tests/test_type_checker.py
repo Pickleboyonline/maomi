@@ -214,6 +214,18 @@ class TestBuiltins:
     def test_reciprocal(self):
         check_ok("fn f(x: f32) -> f32 { reciprocal(x) }")
 
+    def test_log1p(self):
+        check_ok("fn f(x: f32) -> f32 { log1p(x) }")
+
+    def test_log1p_array(self):
+        check_ok("fn f(x: f32[3]) -> f32[3] { log1p(x) }")
+
+    def test_expm1(self):
+        check_ok("fn f(x: f32) -> f32 { expm1(x) }")
+
+    def test_expm1_array(self):
+        check_ok("fn f(x: f32[3]) -> f32[3] { expm1(x) }")
+
 
 class TestScan:
     def test_basic_scan(self):

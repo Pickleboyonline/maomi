@@ -148,6 +148,13 @@ def _grad_reciprocal(ctx: Any, arg_ref: Expr, adj: Expr) -> Expr:
     return ctx._make_binop("*", adj, ctx._make_unary("-", recip_sq))
 
 
+def _grad_log1p(ctx: Any, arg_ref: Expr, adj: Expr) -> Expr:
+    # d/dx log(1+x) = 1/(1+x) * dz
+    one_plus_x = ctx._make_binop("+", ctx._make_float(1.0), arg_ref)
+    return ctx._make_binop("/", adj, one_plus_x)
+
+
+
 # ---------------------------------------------------------------------------
 # Compound elementwise codegen functions
 # ---------------------------------------------------------------------------
@@ -309,6 +316,14 @@ ELEMENTWISE: dict[str, ElementwiseBuiltin] = {
         "reciprocal", None, _grad_reciprocal,
         "Compute element-wise reciprocal (1/x).",
         codegen_fn=_codegen_reciprocal,
+    ),
+    "log1p": ElementwiseBuiltin(
+        "log1p", "stablehlo.log_plus_one", _grad_log1p,
+        "Compute element-wise log(1 + x), accurate for small x.",
+    ),
+    "expm1": ElementwiseBuiltin(
+        "expm1", "stablehlo.exponential_minus_one", _grad_exp,  # d/dx(exp(x)-1) = exp(x), same as exp
+        "Compute element-wise exp(x) - 1, accurate for small x.",
     ),
 }
 
