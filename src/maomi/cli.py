@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass, field
 from .lexer import Lexer
 from .parser import Parser
 from .type_checker import TypeChecker, FnSignature
-from .codegen_stablehlo import StableHLOCodegen
+from .codegen.stablehlo import StableHLOCodegen
 from .ad import transform_grad
 from .resolver import resolve
 from .errors import MaomiError
@@ -46,7 +46,7 @@ def compile_source(source: str, filename: str = "<stdin>") -> CompileResult:
 
 def compile_source_relax(source: str, filename: str = "<stdin>") -> RelaxCompileResult:
     """Full compilation pipeline with Relax backend: lex -> parse -> resolve -> typecheck -> AD -> relax codegen."""
-    from .codegen_relax import RelaxCodegen
+    from .codegen.relax import RelaxCodegen
 
     tokens = Lexer(source, filename=filename).tokenize()
     program = Parser(tokens, filename=filename).parse()
@@ -180,7 +180,7 @@ def _compile(path: str, emit: str, backend: str = "stablehlo"):
 
         # Codegen
         if backend == "relax":
-            from .codegen_relax import RelaxCodegen
+            from .codegen.relax import RelaxCodegen
             ir_mod = RelaxCodegen(program, checker.type_map).generate()
             print(ir_mod)
         else:

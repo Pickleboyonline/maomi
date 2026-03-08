@@ -10,7 +10,7 @@ from maomi.lexer import Lexer
 from maomi.parser import Parser
 from maomi.type_checker import TypeChecker, KEY_TYPE
 from maomi.ad import transform_grad
-from maomi.codegen_stablehlo import StableHLOCodegen
+from maomi.codegen.stablehlo import StableHLOCodegen
 from maomi.cli import compile_source
 from maomi.types import ArrayType, ScalarType
 

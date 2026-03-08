@@ -1,7 +1,7 @@
 from maomi.lexer import Lexer
 from maomi.parser import Parser
 from maomi.type_checker import TypeChecker
-from maomi.codegen_stablehlo import StableHLOCodegen
+from maomi.codegen.stablehlo import StableHLOCodegen
 from maomi.errors import MaomiError
 import pytest
 
@@ -520,7 +520,7 @@ class TestStringCallbackCodegen:
         from maomi.lexer import Lexer
         from maomi.parser import Parser
         from maomi.type_checker import TypeChecker
-        from maomi.codegen_stablehlo import StableHLOCodegen
+        from maomi.codegen.stablehlo import StableHLOCodegen
 
         source = 'fn f(x: f32) -> f32 { callback("loss", x); x }'
         tokens = Lexer(source).tokenize()

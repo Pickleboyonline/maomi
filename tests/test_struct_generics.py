@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from maomi.lexer import Lexer
 from maomi.parser import Parser
 from maomi.type_checker import TypeChecker
-from maomi.codegen_stablehlo import StableHLOCodegen
+from maomi.codegen.stablehlo import StableHLOCodegen
 
 
 # -- Helpers --

@@ -6,7 +6,7 @@ from maomi.lexer import Lexer
 from maomi.parser import Parser
 from maomi.resolver import resolve
 from maomi.type_checker import TypeChecker
-from maomi.codegen_stablehlo import StableHLOCodegen
+from maomi.codegen.stablehlo import StableHLOCodegen
 from maomi.ad import transform_grad
 from maomi.errors import MaomiError
 

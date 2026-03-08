@@ -7,7 +7,7 @@ tvm = pytest.importorskip("tvm")
 from maomi.lexer import Lexer
 from maomi.parser import Parser
 from maomi.type_checker import TypeChecker
-from maomi.codegen_relax import RelaxCodegen
+from maomi.codegen.relax import RelaxCodegen
 
 
 def codegen(source: str):
