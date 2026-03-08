@@ -71,7 +71,7 @@ from .errors import MaomiError
 
 _DUMMY_SPAN = Span(0, 0, 0, 0)
 
-_ELEMENTWISE_BUILTINS = {"exp", "log", "tanh", "sqrt", "abs"}
+_ELEMENTWISE_BUILTINS = {"exp", "log", "tanh", "sqrt", "abs", "cos", "sin"}
 _REDUCTION_BUILTINS = {"mean", "sum", "max", "min"}
 _SHAPE_BUILTINS = {"reshape", "concat"}
 _NONDIFF_BUILTINS = {"callback"}
@@ -1269,6 +1269,18 @@ class ADTransform:
             abs_x = self._make_call("abs", [arg_ref])
             sign = self._make_binop("/", arg_ref, abs_x)
             self._accumulate(adjoints, arg_name, self._make_binop("*", adj, sign))
+
+        elif callee == "cos":
+            # d/dx cos(x) = -sin(x) * dz
+            sin_x = self._make_call("sin", [arg_ref])
+            neg_sin = UnaryOp("-", sin_x, _DUMMY_SPAN)
+            self.type_map[id(neg_sin)] = self._type_of(arg)
+            self._accumulate(adjoints, arg_name, self._make_binop("*", adj, neg_sin))
+
+        elif callee == "sin":
+            # d/dx sin(x) = cos(x) * dz
+            cos_x = self._make_call("cos", [arg_ref])
+            self._accumulate(adjoints, arg_name, self._make_binop("*", adj, cos_x))
 
     def _backprop_reduction(self, callee: str, args: list[Expr], adj: Expr,
                              adjoints: dict[str, Expr], var_map: dict[int, str],

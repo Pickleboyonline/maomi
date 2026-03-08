@@ -228,6 +228,8 @@ These operate on scalars and lift to arrays automatically (applied elementwise).
 | `tanh(x)` | `f32 -> f32` | Hyperbolic tangent |
 | `sqrt(x)` | `f32 -> f32` | Square root |
 | `abs(x)` | `f32 -> f32` | Absolute value |
+| `cos(x)` | `f32 -> f32` | Cosine |
+| `sin(x)` | `f32 -> f32` | Sine |
 
 ```maomi
 fn softplus(x: f32[4]) -> f32[4] {
@@ -236,6 +238,13 @@ fn softplus(x: f32[4]) -> f32[4] {
 ```
 
 All elementwise builtins are differentiable.
+
+**Struct-level application:** Elementwise builtins also work on structs — they apply field-by-field recursively, returning a struct of the same type. All leaf fields must be float.
+
+```maomi
+struct V { w: f32[4, 4], b: f32[4] }
+fn f(v: V) -> V { sqrt(v) }  // applies sqrt to v.w and v.b
+```
 
 ---
 
@@ -620,6 +629,50 @@ fn train(p: Params, x: f32[4]) -> Params {
 }
 ```
 
+### Struct Arithmetic
+
+Arithmetic operators work on structs field-by-field, recursing into nested structs. All leaf fields must be numeric.
+
+| Expression | Meaning |
+|-----------|---------|
+| `a + b` | Field-wise addition (same struct type) |
+| `a - b` | Field-wise subtraction |
+| `a * b` | Field-wise multiplication |
+| `a / b` | Field-wise division |
+| `s * a` / `a * s` | Scale each field by scalar `s` |
+| `a / s` | Divide each field by scalar `s` |
+| `s + a` / `a + s` | Add scalar to each field |
+| `-a` | Negate each field |
+
+```maomi
+struct Model { w: f32[4, 4], b: f32[4] }
+
+fn sgd_step(params: Model, grads: Model, lr: f32) -> Model {
+    params - lr * grads  // field-wise: w - lr*gw, b - lr*gb
+}
+```
+
+### Struct-Generic Functions (Type Variables)
+
+Single uppercase letters (`T`, `U`, etc.) in type position are **type variables** — they match any struct type and are resolved at call sites via monomorphization.
+
+```maomi
+fn sgd_update(params: T, grads: T, lr: f32) -> T {
+    params - lr * grads
+}
+
+struct Model { w: f32[4, 4], b: f32[4] }
+fn train(m: Model, g: Model) -> Model {
+    sgd_update(m, g, 0.01)  // T = Model, generates sgd_update$Model
+}
+```
+
+Rules:
+- Only single uppercase letters (A-Z) are type variables. Multi-char unknown names error.
+- All uses of the same type variable in a function must bind to the same struct type.
+- Type variables must bind to struct types (not scalars or arrays).
+- Struct arithmetic and struct-level builtins work inside generic functions.
+
 ---
 
 ## Control Flow
@@ -855,6 +908,25 @@ from "../lib/nn" as nn import { linear };
 ```
 
 Module resolution handles cycle detection, diamond dependencies, and caching. All functions in a module are importable (no visibility modifiers yet).
+
+### Standard Library Modules
+
+| Module | Functions | Description |
+|--------|-----------|-------------|
+| `nn` | `relu`, `sigmoid`, `softmax`, `log_softmax` | Neural network activations |
+| `optim` | `sgd_update`, `adam_update`, `adam_m_update`, `adam_v_update`, `linear_decay`, `cosine_decay` | Optimizers and LR schedules |
+
+```maomi
+from optim import { sgd_update };
+
+struct Model { w: f32[4, 4], b: f32[4] }
+
+fn train_step(m: Model, x: f32[32, 4], y: f32[32, 4]) -> Model {
+    let pred = x @ m.w + m.b;
+    let g = grad(mean((pred - y) * (pred - y)), m);
+    sgd_update(m, g, 0.01)
+}
+```
 
 ---
 

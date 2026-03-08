@@ -45,7 +45,15 @@ class StringType:
         return "str"
 
 
-MaomiType = ScalarType | ArrayType | StructType | WildcardArrayType | StringType
+@dataclass(frozen=True)
+class TypeVar:
+    name: str  # single uppercase letter: "T", "U", etc.
+
+    def __str__(self) -> str:
+        return self.name
+
+
+MaomiType = ScalarType | ArrayType | StructType | WildcardArrayType | StringType | TypeVar
 
 # Convenience constants
 F32 = ScalarType("f32")
