@@ -442,6 +442,23 @@ COMPLEX: dict[str, ComplexBuiltin] = {
         (["key", "mean", "std", "dims..."], ["Key", "f32", "f32", "int..."], "f32[...]"),
     ),
 
+    # Utility / inspection
+    "isfinite": ComplexBuiltin(
+        "isfinite", "construction", "zero_grad",
+        "Test element-wise if value is finite (not NaN or Inf). Returns bool.",
+        (["x"], ["f32[...]"], "bool[...]"),
+    ),
+    "zeros_like": ComplexBuiltin(
+        "zeros_like", "construction", "zero_grad",
+        "Create an array of zeros with the same shape as the input.",
+        (["x"], ["f32[...]"], "f32[...]"),
+    ),
+    "ones_like": ComplexBuiltin(
+        "ones_like", "construction", "zero_grad",
+        "Create an array of ones with the same shape as the input.",
+        (["x"], ["f32[...]"], "f32[...]"),
+    ),
+
     # Callbacks
     "callback": ComplexBuiltin(
         "callback", "callback", "nondiff",

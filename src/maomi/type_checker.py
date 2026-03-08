@@ -1300,6 +1300,14 @@ class TypeChecker:
         if expr.callee == "transpose":
             return self._check_transpose(expr, env)
 
+        # isfinite(x) — returns bool with same shape
+        if expr.callee == "isfinite":
+            return self._check_isfinite(expr, env)
+
+        # zeros_like(x) / ones_like(x) — same type filled with 0 or 1
+        if expr.callee in ("zeros_like", "ones_like"):
+            return self._check_like(expr, env)
+
         sig = self.fn_table.get(expr.callee)
         if sig is None:
             # Check for generic (wildcard) function
@@ -1529,6 +1537,35 @@ class TypeChecker:
             return None
 
         return result_type
+
+    def _check_isfinite(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
+        if len(expr.args) != 1:
+            self._error("isfinite expects exactly 1 argument", expr.span.line_start, expr.span.col_start)
+            return None
+        arg_type = self._infer(expr.args[0], env)
+        if arg_type is None:
+            return None
+        if not isinstance(arg_type, (ScalarType, ArrayType)) or arg_type.base not in ("f32", "f64"):
+            self._error(f"isfinite requires a float scalar or array, got {arg_type}", expr.span.line_start, expr.span.col_start)
+            return None
+        if isinstance(arg_type, ScalarType):
+            return BOOL
+        return ArrayType("bool", arg_type.dims)
+
+    def _check_like(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
+        if len(expr.args) != 1:
+            self._error(f"{expr.callee} expects exactly 1 argument", expr.span.line_start, expr.span.col_start)
+            return None
+        arg_type = self._infer(expr.args[0], env)
+        if arg_type is None:
+            return None
+        if isinstance(arg_type, (ScalarType, ArrayType)):
+            if arg_type.base not in ("f32", "f64"):
+                self._error(f"{expr.callee} requires a float type, got {arg_type}", expr.span.line_start, expr.span.col_start)
+                return None
+            return arg_type
+        self._error(f"{expr.callee} requires a float scalar or array, got {arg_type}", expr.span.line_start, expr.span.col_start)
+        return None
 
     def _check_transpose(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
         if len(expr.args) < 1:

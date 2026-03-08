@@ -631,6 +631,10 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
             return self._gen_concat(expr, env)
         if expr.callee == "stop_gradient":
             return self._gen_expr(expr.args[0], env)
+        if expr.callee == "isfinite":
+            return self._gen_isfinite(expr, env)
+        if expr.callee in ("zeros_like", "ones_like"):
+            return self._gen_like(expr, env)
         if expr.callee == "where":
             return self._gen_where(expr, env)
         if expr.callee == "conv2d":
@@ -723,6 +727,33 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
         result = self._fresh()
         self._emit(f"{result} = stablehlo.broadcast_in_dim {scalar}, dims = [] : (tensor<f32>) -> {mlir_t}")
         return result
+
+    def _gen_isfinite(self, expr: CallExpr, env: dict[str, str]) -> str:
+        arg = self._gen_expr(expr.args[0], env)
+        arg_type = self._type_of(expr.args[0])
+        mlir_arg = _mlir_type(arg_type)
+        var = self._fresh()
+        self._emit(f"{var} = stablehlo.is_finite {arg} : {mlir_arg}")
+        return var
+
+    def _gen_like(self, expr: CallExpr, env: dict[str, str]) -> str:
+        # Generate the input arg for side effects (ensure on tape), but we only need its type
+        self._gen_expr(expr.args[0], env)
+        result_type = self._type_of(expr)
+        value = "0.000000e+00" if expr.callee == "zeros_like" else "1.000000e+00"
+
+        if isinstance(result_type, ScalarType):
+            var = self._fresh()
+            self._emit(f"{var} = stablehlo.constant dense<{value}> : {_mlir_type(result_type)}")
+            return var
+
+        # Array: constant scalar + broadcast
+        scalar_type = ScalarType(result_type.base)
+        scalar = self._fresh()
+        self._emit(f"{scalar} = stablehlo.constant dense<{value}> : {_mlir_type(scalar_type)}")
+        var = self._fresh()
+        self._emit(f"{var} = stablehlo.broadcast_in_dim {scalar}, dims = [] : ({_mlir_type(scalar_type)}) -> {_mlir_type(result_type)}")
+        return var
 
     def _gen_mean(self, expr: CallExpr, env: dict[str, str]) -> str:
         arg = self._gen_expr(expr.args[0], env)

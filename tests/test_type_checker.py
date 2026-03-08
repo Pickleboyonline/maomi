@@ -571,3 +571,35 @@ class TestStringLiteral:
             'fn g(x: f32) -> f32 { x }\nfn f() -> f32 { g("hello") }',
             "string literals can only be used as callback arguments",
         )
+
+
+class TestUtilityBuiltins:
+    def test_isfinite_scalar(self):
+        check_ok("fn f(x: f32) -> bool { isfinite(x) }")
+
+    def test_isfinite_array(self):
+        check_ok("fn f(x: f32[3, 4]) -> bool[3, 4] { isfinite(x) }")
+
+    def test_isfinite_error_int(self):
+        check_err("fn f(x: i32) -> bool { isfinite(x) }", "float")
+
+    def test_isfinite_error_no_args(self):
+        check_err("fn f(x: f32) -> bool { isfinite() }", "1 argument")
+
+    def test_zeros_like_scalar(self):
+        check_ok("fn f(x: f32) -> f32 { zeros_like(x) }")
+
+    def test_zeros_like_array(self):
+        check_ok("fn f(x: f32[3, 4]) -> f32[3, 4] { zeros_like(x) }")
+
+    def test_zeros_like_error_int(self):
+        check_err("fn f(x: i32) -> i32 { zeros_like(x) }", "float")
+
+    def test_ones_like_scalar(self):
+        check_ok("fn f(x: f32) -> f32 { ones_like(x) }")
+
+    def test_ones_like_array(self):
+        check_ok("fn f(x: f32[4]) -> f32[4] { ones_like(x) }")
+
+    def test_ones_like_error_no_args(self):
+        check_err("fn f(x: f32) -> f32 { ones_like() }", "1 argument")
