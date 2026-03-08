@@ -1379,22 +1379,66 @@ class TypeChecker:
         return result_type
 
     def _check_transpose(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
-        if len(expr.args) != 1:
+        if len(expr.args) < 1:
             self._error(
-                "transpose expects exactly 1 argument",
+                "transpose expects at least 1 argument: transpose(array) or transpose(array, axes...)",
                 expr.span.line_start, expr.span.col_start,
             )
             return None
         arg_type = self._infer(expr.args[0], env)
         if arg_type is None:
             return None
-        if not isinstance(arg_type, ArrayType) or len(arg_type.dims) != 2:
+        if not isinstance(arg_type, ArrayType):
             self._error(
-                "transpose requires a 2D array",
+                f"transpose requires an array, got {arg_type}",
                 expr.span.line_start, expr.span.col_start,
             )
             return None
-        return ArrayType(arg_type.base, (arg_type.dims[1], arg_type.dims[0]))
+
+        rank = len(arg_type.dims)
+        if len(expr.args) == 1:
+            # Shorthand: transpose(x) — requires 2D, swaps axes
+            if rank != 2:
+                self._error(
+                    f"transpose(x) shorthand requires a 2D array, got {rank}D. Use transpose(x, axes...) for higher ranks.",
+                    expr.span.line_start, expr.span.col_start,
+                )
+                return None
+            perm = (1, 0)
+        else:
+            # General: transpose(x, ax0, ax1, ...)
+            axes = expr.args[1:]
+            if len(axes) != rank:
+                self._error(
+                    f"transpose permutation must have {rank} axes for a {rank}D array, got {len(axes)}",
+                    expr.span.line_start, expr.span.col_start,
+                )
+                return None
+            perm_list = []
+            for ax in axes:
+                if not isinstance(ax, IntLiteral):
+                    self._error(
+                        "transpose axes must be integer literals",
+                        ax.span.line_start, ax.span.col_start,
+                    )
+                    return None
+                if ax.value < 0 or ax.value >= rank:
+                    self._error(
+                        f"transpose axis {ax.value} out of range for {rank}D array",
+                        ax.span.line_start, ax.span.col_start,
+                    )
+                    return None
+                perm_list.append(ax.value)
+            if sorted(perm_list) != list(range(rank)):
+                self._error(
+                    f"transpose axes must be a permutation of [0..{rank-1}], got {perm_list}",
+                    expr.span.line_start, expr.span.col_start,
+                )
+                return None
+            perm = tuple(perm_list)
+
+        new_dims = tuple(arg_type.dims[p] for p in perm)
+        return ArrayType(arg_type.base, new_dims)
 
     def _check_reshape(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
         if len(expr.args) < 2:

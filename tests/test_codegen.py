@@ -498,3 +498,103 @@ class TestStringCallbackCodegen:
         result = compile_source('fn f(x: f32) -> f32 { callback("loss", x); x }')
         assert result.callback_labels == {0: ["loss"]}
         assert result.callback_count == 1
+
+
+# ---------- General transpose tests ----------
+
+
+class TestGeneralTranspose:
+    def test_2d_shorthand(self):
+        """transpose(x) on 2D still works"""
+        out = codegen("fn f(x: f32[4, 8]) -> f32[8, 4] { transpose(x) }")
+        assert "stablehlo.transpose" in out
+        assert "dims = [1, 0]" in out
+
+    def test_2d_explicit(self):
+        """transpose(x, 1, 0) same as shorthand"""
+        out = codegen("fn f(x: f32[4, 8]) -> f32[8, 4] { transpose(x, 1, 0) }")
+        assert "stablehlo.transpose" in out
+        assert "dims = [1, 0]" in out
+
+    def test_3d_permutation(self):
+        """transpose(x, 0, 2, 1) swaps last two axes of 3D"""
+        out = codegen("fn f(x: f32[2, 4, 8]) -> f32[2, 8, 4] { transpose(x, 0, 2, 1) }")
+        assert "stablehlo.transpose" in out
+        assert "dims = [0, 2, 1]" in out
+
+    def test_4d_permutation(self):
+        """transpose(x, 0, 2, 1, 3) — multi-head attention axis swap"""
+        out = codegen("fn f(x: f32[2, 16, 4, 8]) -> f32[2, 4, 16, 8] { transpose(x, 0, 2, 1, 3) }")
+        assert "stablehlo.transpose" in out
+        assert "dims = [0, 2, 1, 3]" in out
+
+    def test_4d_full_reverse(self):
+        """transpose(x, 3, 2, 1, 0) reverses all axes"""
+        out = codegen("fn f(x: f32[2, 3, 4, 5]) -> f32[5, 4, 3, 2] { transpose(x, 3, 2, 1, 0) }")
+        assert "stablehlo.transpose" in out
+        assert "dims = [3, 2, 1, 0]" in out
+
+    def test_transpose_in_map_general(self):
+        """General transpose inside map"""
+        out = codegen("""
+            fn f(xs: f32[32, 2, 4, 8]) -> f32[32, 4, 2, 8] {
+                map x in xs { transpose(x, 1, 0, 2) }
+            }
+        """)
+        assert "stablehlo.transpose" in out
+
+    def test_grad_through_general_transpose(self):
+        """Gradient flows through general transpose via inverse permutation"""
+        from maomi.ad import transform_grad
+        src = """
+            fn f(x: f32[2, 3, 4]) -> f32[2, 3, 4] {
+                let t = transpose(x, 0, 2, 1);
+                grad(sum(t), x)
+            }
+        """
+        tokens = Lexer(src).tokenize()
+        prog = Parser(tokens).parse()
+        tc = TypeChecker()
+        errors = tc.check(prog)
+        assert not errors, errors
+        prog = transform_grad(prog, tc.type_map)
+        out = StableHLOCodegen(prog, tc.type_map).generate()
+        assert "stablehlo.transpose" in out
+
+
+class TestTransposeTypeErrors:
+    def test_shorthand_non_2d(self):
+        """transpose(x) on 3D should error"""
+        tokens = Lexer("fn f(x: f32[2, 3, 4]) -> f32[4, 3, 2] { transpose(x) }").tokenize()
+        prog = Parser(tokens).parse()
+        tc = TypeChecker()
+        errors = tc.check(prog)
+        assert errors
+        assert "2D" in errors[0].message
+
+    def test_wrong_axis_count(self):
+        """Wrong number of axes"""
+        tokens = Lexer("fn f(x: f32[2, 3, 4]) -> f32[2, 3, 4] { transpose(x, 0, 1) }").tokenize()
+        prog = Parser(tokens).parse()
+        tc = TypeChecker()
+        errors = tc.check(prog)
+        assert errors
+        assert "3 axes" in errors[0].message
+
+    def test_duplicate_axis(self):
+        """Duplicate axis in permutation"""
+        tokens = Lexer("fn f(x: f32[2, 3, 4]) -> f32[2, 3, 4] { transpose(x, 0, 1, 1) }").tokenize()
+        prog = Parser(tokens).parse()
+        tc = TypeChecker()
+        errors = tc.check(prog)
+        assert errors
+        assert "permutation" in errors[0].message
+
+    def test_axis_out_of_range(self):
+        """Axis index too large"""
+        tokens = Lexer("fn f(x: f32[2, 3]) -> f32[3, 2] { transpose(x, 0, 5) }").tokenize()
+        prog = Parser(tokens).parse()
+        tc = TypeChecker()
+        errors = tc.check(prog)
+        assert errors
+        assert "out of range" in errors[0].message

@@ -1007,10 +1007,20 @@ class ADTransform:
                 elif callee == "concat":
                     self._backprop_concat(args, adj, adjoints, var_map)
                 elif callee == "transpose":
-                    # transpose is self-adjoint: d/dx transpose(x) = transpose(adj)
+                    # d/dx transpose(x, perm) = transpose(adj, inv_perm)
                     arg = args[0]
                     arg_name = var_map[id(arg)]
-                    self._accumulate(adjoints, arg_name, self._make_call("transpose", [adj]))
+                    if len(args) == 1:
+                        # 2D shorthand: self-adjoint
+                        self._accumulate(adjoints, arg_name, self._make_call("transpose", [adj]))
+                    else:
+                        # General: compute inverse permutation
+                        perm = [a.value for a in args[1:]]
+                        inv_perm = [0] * len(perm)
+                        for i, p in enumerate(perm):
+                            inv_perm[p] = i
+                        inv_args = [adj] + [IntLiteral(p, _DUMMY_SPAN) for p in inv_perm]
+                        self._accumulate(adjoints, arg_name, self._make_call("transpose", inv_args))
                 elif callee in _CONV_POOL_BUILTINS:
                     self._backprop_conv_pool(callee, args, adj, adjoints, var_map, node)
                 elif callee in _STOP_GRAD_BUILTINS:
@@ -2198,10 +2208,18 @@ class ADTransform:
         # Infer type from first arg for elementwise, or special-case transpose/reshape
         if name == "transpose" and args:
             arg_t = self.type_map.get(id(args[0]))
-            if isinstance(arg_t, ArrayType) and len(arg_t.dims) == 2:
-                self.type_map[id(node)] = ArrayType(arg_t.base, (arg_t.dims[1], arg_t.dims[0]))
-            elif arg_t is not None:
-                self.type_map[id(node)] = arg_t
+            if isinstance(arg_t, ArrayType):
+                if len(args) == 1 and len(arg_t.dims) == 2:
+                    # 2D shorthand
+                    self.type_map[id(node)] = ArrayType(arg_t.base, (arg_t.dims[1], arg_t.dims[0]))
+                elif len(args) > 1:
+                    # General permutation
+                    perm = [a.value for a in args[1:] if isinstance(a, IntLiteral)]
+                    if len(perm) == len(arg_t.dims):
+                        new_dims = tuple(arg_t.dims[p] for p in perm)
+                        self.type_map[id(node)] = ArrayType(arg_t.base, new_dims)
+                elif arg_t is not None:
+                    self.type_map[id(node)] = arg_t
         elif name == "reshape" and len(args) > 1:
             arg_t = self.type_map.get(id(args[0]))
             dims = tuple(a.value for a in args[1:] if isinstance(a, IntLiteral))

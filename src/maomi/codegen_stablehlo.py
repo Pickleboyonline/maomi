@@ -1304,12 +1304,17 @@ class StableHLOCodegen:
         arg_type = self._type_of(expr.args[0])
         result_type = self._type_of(expr)
 
-        bd = self._batch_depth
-        expected_rank = 2 + bd
-        if not isinstance(arg_type, ArrayType) or len(arg_type.dims) != expected_rank:
-            raise MaomiError("codegen: transpose requires 2D array", "<codegen>", expr.span.line_start, expr.span.col_start)
+        if not isinstance(arg_type, ArrayType):
+            raise MaomiError("codegen: transpose requires an array", "<codegen>", expr.span.line_start, expr.span.col_start)
 
-        perm = list(range(bd)) + [bd + 1, bd]
+        bd = self._batch_depth
+        if len(expr.args) == 1:
+            # Shorthand: swap last two dims
+            perm = list(range(bd)) + [bd + 1, bd]
+        else:
+            # General: axes from args, shifted by batch depth
+            perm = list(range(bd)) + [bd + a.value for a in expr.args[1:]]
+
         perm_str = ", ".join(str(p) for p in perm)
 
         var = self._fresh()

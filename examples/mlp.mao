@@ -12,7 +12,6 @@ fn relu(x: f32[B, N]) -> f32[B, N] {
 }
 
 fn apple(x: f32[..]) -> f32[..] {
-    
     exp(x)
 } 
 

@@ -1181,7 +1181,7 @@ _BUILTIN_DOCS: dict[str, str] = {
     "reshape": "Reshape an array to the given dimensions.\n\nTotal element count must be preserved.",
     "concat": "Concatenate arrays along the given axis.",
     "iota": "Generate an integer sequence `[0, 1, ..., n-1]` as `i32[n]`.",
-    "transpose": "Transpose a 2D matrix (swap rows and columns).",
+    "transpose": "Permute array axes. transpose(x) swaps 2D; transpose(x, 0, 2, 1, 3) for general permutation.",
     "callback": "Host callback (no-op in compiled code). Useful for debugging.",
     "random.key": "Create a PRNG key from an integer seed.",
     "random.split": "Split a PRNG key into `n` independent subkeys.",
