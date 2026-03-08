@@ -48,6 +48,7 @@ _WHERE_BUILTINS = {n for n, b in _CX_REGISTRY.items() if b.category == "where"}
 _CLIP_BUILTINS = {n for n, b in _CX_REGISTRY.items() if b.category == "clip"}
 _ARGMAX_BUILTINS = {n for n, b in _CX_REGISTRY.items() if b.category == "argmax"}
 _TWO_ARG_EW_BUILTINS = {n for n, b in _CX_REGISTRY.items() if b.category == "two_arg_elementwise"}
+_EINSUM_BUILTINS = {n for n, b in _CX_REGISTRY.items() if b.category == "einsum"}
 _MAX_GRAD_DEPTH = 10
 
 

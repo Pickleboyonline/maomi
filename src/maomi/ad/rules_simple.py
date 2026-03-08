@@ -3,6 +3,7 @@ from __future__ import annotations
 from ..ast_nodes import (
     IntLiteral,
     BoolLiteral,
+    StringLiteral,
     BinOp,
     CallExpr,
     CastExpr,
@@ -605,3 +606,80 @@ class SimpleGradRulesMixin:
 
         grad = self._reduce_broadcast(adj, arg_type)
         self._accumulate(adjoints, arg_name, grad)
+    def _backprop_einsum(self, args: list[Expr], adj: Expr,
+                          adjoints: dict[str, Expr], var_map: dict[int, str],
+                          node: Expr):
+        """Backprop through einsum.
+
+        For einsum("ij,jk->ik", a, b):
+          grad_a = einsum("ik,jk->ij", adj, b)  — contract output with other input
+          grad_b = einsum("ij,ik->jk", a, adj)  — contract input with adjoint
+
+        General rule: for each input i, the gradient einsum spec is formed by
+        replacing that input's subscripts with the output subscripts in the spec,
+        keeping the other inputs (including adjoint which has the output subscripts).
+        """
+        spec_arg = args[0]  # StringLiteral
+        spec = spec_arg.value
+        lhs_str, out_sub = spec.split("->")
+        input_subscripts = lhs_str.split(",")
+
+        if len(input_subscripts) == 2:
+            # 2-input einsum
+            a_arg, b_arg = args[1], args[2]
+            a_sub, b_sub = input_subscripts
+
+            # grad w.r.t. a: einsum(out_sub + "," + b_sub + "->" + a_sub, adj, b)
+            if id(a_arg) in var_map:
+                a_name = var_map[id(a_arg)]
+                a_type = self._type_of(a_arg)
+                b_ref = self._make_ref(var_map[id(b_arg)], self._type_of(b_arg))
+                grad_spec = f"{out_sub},{b_sub}->{a_sub}"
+                grad_spec_lit = StringLiteral(grad_spec, _DUMMY_SPAN)
+                self.type_map[id(grad_spec_lit)] = ScalarType("i32")  # StringType not needed in tape
+                grad_call = CallExpr("einsum", [grad_spec_lit, adj, b_ref], _DUMMY_SPAN)
+                self.type_map[id(grad_call)] = a_type
+                self._accumulate(adjoints, a_name, grad_call)
+
+            # grad w.r.t. b: einsum(a_sub + "," + out_sub + "->" + b_sub, a, adj)
+            if id(b_arg) in var_map:
+                b_name = var_map[id(b_arg)]
+                b_type = self._type_of(b_arg)
+                a_ref = self._make_ref(var_map[id(a_arg)], self._type_of(a_arg))
+                grad_spec = f"{a_sub},{out_sub}->{b_sub}"
+                grad_spec_lit = StringLiteral(grad_spec, _DUMMY_SPAN)
+                self.type_map[id(grad_spec_lit)] = ScalarType("i32")
+                grad_call = CallExpr("einsum", [grad_spec_lit, a_ref, adj], _DUMMY_SPAN)
+                self.type_map[id(grad_call)] = b_type
+                self._accumulate(adjoints, b_name, grad_call)
+
+        elif len(input_subscripts) == 1:
+            # 1-input einsum: grad_a = einsum(reverse_spec, adj)
+            a_arg = args[1]
+            a_sub = input_subscripts[0]
+            if id(a_arg) in var_map:
+                a_name = var_map[id(a_arg)]
+                a_type = self._type_of(a_arg)
+
+                # Check if any dims are summed over (appear in input but not output)
+                sum_chars = set(a_sub) - set(out_sub)
+                if sum_chars:
+                    # Dims summed: gradient broadcasts adjoint back
+                    # einsum("out_sub->a_sub") would need to create dims — not valid
+                    # Instead, use broadcast to expand adj to original shape
+                    adj_type = self._type_of(adj)
+                    if isinstance(a_type, ArrayType):
+                        broadcast = _BroadcastExpr(adj, tuple(a_type.dims), _DUMMY_SPAN)
+                        # Compute broadcast_dims: map output chars to input positions
+                        broadcast_dims = tuple(a_sub.index(c) for c in out_sub)
+                        broadcast.broadcast_dims = broadcast_dims
+                        self.type_map[id(broadcast)] = a_type
+                        self._accumulate(adjoints, a_name, broadcast)
+                else:
+                    # Pure transpose: reverse it
+                    grad_spec = f"{out_sub}->{a_sub}"
+                    grad_spec_lit = StringLiteral(grad_spec, _DUMMY_SPAN)
+                    self.type_map[id(grad_spec_lit)] = ScalarType("i32")
+                    grad_call = CallExpr("einsum", [grad_spec_lit, adj], _DUMMY_SPAN)
+                    self.type_map[id(grad_call)] = a_type
+                    self._accumulate(adjoints, a_name, grad_call)

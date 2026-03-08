@@ -733,6 +733,12 @@ COMPLEX: dict[str, ComplexBuiltin] = {
         "Element-wise power: x raised to the power y.",
         (["x", "y"], ["f32", "f32"], "f32"),
     ),
+    # Einsum
+    "einsum": ComplexBuiltin(
+        "einsum", "einsum", "has_rule",
+        "Einstein summation: `einsum(\"ij,jk->ik\", a, b)` for matrix multiply, `einsum(\"ij->ji\", a)` for transpose, etc.",
+        (["spec", "a", "b"], ["str", "f32[...]", "f32[...]"], "f32[...]"),
+    ),
 }
 
 # ---------------------------------------------------------------------------

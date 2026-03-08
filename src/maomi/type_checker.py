@@ -1338,6 +1338,9 @@ class TypeChecker:
         # pad(x, val, pad_lo, pad_hi) — pad array with constant value
         if expr.callee == "pad":
             return self._check_pad(expr, env)
+        # einsum("spec", a, b) — Einstein summation
+        if expr.callee == "einsum":
+            return self._check_einsum(expr, env)
 
         sig = self.fn_table.get(expr.callee)
         if sig is None:
@@ -1688,6 +1691,112 @@ class TypeChecker:
             return None
 
         return result_type
+
+    def _check_einsum(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
+        """Check einsum("spec", a, b) or einsum("spec", a)."""
+        if len(expr.args) < 2:
+            self._error(
+                "einsum expects at least 2 arguments: einsum(spec, array, ...)",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        # First arg must be a string literal
+        spec_arg = expr.args[0]
+        if not isinstance(spec_arg, StringLiteral):
+            self._error(
+                "einsum first argument must be a string literal spec, e.g. \"ij,jk->ik\"",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+        self._infer(spec_arg, env)
+
+        spec = spec_arg.value
+
+        # Parse the spec: "inputs->output"
+        if "->" not in spec:
+            self._error(
+                f"einsum spec must contain '->' separator, got \"{spec}\"",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        lhs, rhs = spec.split("->", 1)
+        input_subscripts = lhs.split(",")
+        output_subscript = rhs
+
+        # Number of input subscripts must match number of array args
+        num_arrays = len(expr.args) - 1
+        if len(input_subscripts) != num_arrays:
+            self._error(
+                f"einsum spec has {len(input_subscripts)} input(s) but got {num_arrays} array argument(s)",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        # Infer types for all array args
+        arg_types: list[MaomiType | None] = []
+        for arg in expr.args[1:]:
+            arg_types.append(self._infer(arg, env))
+
+        # Validate all args are arrays with matching base types
+        base_type: str | None = None
+        for i, (at, sub) in enumerate(zip(arg_types, input_subscripts)):
+            if at is None:
+                return None
+            if not isinstance(at, ArrayType):
+                self._error(
+                    f"einsum: argument {i+1} must be an array, got {at}",
+                    expr.args[i+1].span.line_start, expr.args[i+1].span.col_start,
+                )
+                return None
+            if base_type is None:
+                base_type = at.base
+            elif at.base != base_type:
+                self._error(
+                    f"einsum: all arrays must have the same base type, got {base_type} and {at.base}",
+                    expr.args[i+1].span.line_start, expr.args[i+1].span.col_start,
+                )
+                return None
+            # Check rank matches subscript length
+            if len(at.dims) != len(sub):
+                self._error(
+                    f"einsum: subscript \"{sub}\" has {len(sub)} indices but argument {i+1} has rank {len(at.dims)}",
+                    expr.args[i+1].span.line_start, expr.args[i+1].span.col_start,
+                )
+                return None
+
+        # Build dim map: each subscript char -> dimension size
+        dim_map: dict[str, int | str] = {}
+        for at, sub in zip(arg_types, input_subscripts):
+            assert isinstance(at, ArrayType)
+            for ch, dim in zip(sub, at.dims):
+                if ch in dim_map:
+                    existing = dim_map[ch]
+                    if isinstance(existing, int) and isinstance(dim, int) and existing != dim:
+                        self._error(
+                            f"einsum: dimension mismatch for index '{ch}': {existing} vs {dim}",
+                            expr.span.line_start, expr.span.col_start,
+                        )
+                        return None
+                else:
+                    dim_map[ch] = dim
+
+        # Validate output subscript chars all appear in inputs
+        for ch in output_subscript:
+            if ch not in dim_map:
+                self._error(
+                    f"einsum: output index '{ch}' does not appear in any input subscript",
+                    expr.span.line_start, expr.span.col_start,
+                )
+                return None
+
+        # Build output shape
+        assert base_type is not None
+        output_dims = tuple(dim_map[ch] for ch in output_subscript)
+        if len(output_dims) == 0:
+            return ScalarType(base_type)
+        return ArrayType(base_type, output_dims)
 
     def _check_transpose(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
         if len(expr.args) < 1:

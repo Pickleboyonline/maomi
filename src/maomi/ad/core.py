@@ -81,6 +81,7 @@ from .constants import (
     _CLIP_BUILTINS,
     _ARGMAX_BUILTINS,
     _TWO_ARG_EW_BUILTINS,
+    _EINSUM_BUILTINS,
     _MAX_GRAD_DEPTH,
     _collect_free_vars,
 )
@@ -336,7 +337,7 @@ class ADTransform(SimpleGradRulesMixin, ComplexGradRulesMixin):
                 if callee in _NONDIFF_BUILTINS:
                     # Callback: no value, no gradient. Skip entirely.
                     return
-                elif callee in _IOTA_BUILTINS | _ELEMENTWISE_BUILTINS | _REDUCTION_BUILTINS | _SHAPE_BUILTINS | _CONV_POOL_BUILTINS | _RNG_BUILTINS | _STOP_GRAD_BUILTINS | _WHERE_BUILTINS | _CLIP_BUILTINS | _ARGMAX_BUILTINS | _TWO_ARG_EW_BUILTINS | {"transpose"}:
+                elif callee in _IOTA_BUILTINS | _ELEMENTWISE_BUILTINS | _REDUCTION_BUILTINS | _SHAPE_BUILTINS | _CONV_POOL_BUILTINS | _RNG_BUILTINS | _STOP_GRAD_BUILTINS | _WHERE_BUILTINS | _CLIP_BUILTINS | _ARGMAX_BUILTINS | _TWO_ARG_EW_BUILTINS | _EINSUM_BUILTINS | {"transpose"}:
                     # Built-in: put on tape as-is
                     for a in args:
                         self._linearize(a, tape, var_map, let_env)
@@ -908,6 +909,8 @@ class ADTransform(SimpleGradRulesMixin, ComplexGradRulesMixin):
                     pass  # non-differentiable (returns i32 indices)
                 elif callee in _TWO_ARG_EW_BUILTINS:
                     self._backprop_two_arg_elementwise(callee, args, adj, adjoints, var_map, node)
+                elif callee in _EINSUM_BUILTINS:
+                    self._backprop_einsum(args, adj, adjoints, var_map, node)
                 else:
                     raise MaomiError(
                         f"grad: unsupported function call '{callee}' inside grad",
