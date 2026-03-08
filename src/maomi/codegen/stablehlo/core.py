@@ -602,6 +602,10 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
         if expr.callee == "iota":
             return self._gen_iota(expr, env)
 
+        # one_hot(index, n) → iota + broadcast + compare + convert
+        if expr.callee == "one_hot":
+            return self._gen_one_hot(expr, env)
+
         # zeros/ones/full → constant + broadcast
         if expr.callee in ("zeros", "ones", "full"):
             return self._gen_fill(expr, env)
@@ -708,6 +712,34 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
         var = self._fresh()
         self._emit(f"{var} = stablehlo.iota dim = 0 : {mlir_t}")
         return var
+
+    def _gen_one_hot(self, expr: CallExpr, env: dict[str, str]) -> str:
+        index = self._gen_expr(expr.args[0], env)
+        index_type = self._type_of(expr.args[0])
+        result_type = self._type_of(expr)
+        output_dims = result_type.dims
+        ndim_in = len(index_type.dims) if isinstance(index_type, ArrayType) else 0
+
+        # Step 1: iota along the last (new) dimension
+        iota_i32_type = ArrayType("i32", output_dims)
+        iota_mlir = _mlir_type(iota_i32_type)
+        iota_var = self._fresh()
+        self._emit(f"{iota_var} = stablehlo.iota dim = {ndim_in} : {iota_mlir}")
+
+        # Step 2: broadcast index to output shape
+        dims_str = ", ".join(str(d) for d in range(ndim_in))
+        idx_broadcast = self._fresh()
+        self._emit(f"{idx_broadcast} = stablehlo.broadcast_in_dim {index}, dims = [{dims_str}] : ({_mlir_type(index_type)}) -> {iota_mlir}")
+
+        # Step 3: compare EQ → bool
+        bool_type = ArrayType("bool", output_dims)
+        cmp = self._fresh()
+        self._emit(f"{cmp} = stablehlo.compare {idx_broadcast}, {iota_var}, EQ : ({iota_mlir}, {iota_mlir}) -> {_mlir_type(bool_type)}")
+
+        # Step 4: convert bool → f32
+        result = self._fresh()
+        self._emit(f"{result} = stablehlo.convert {cmp} : ({_mlir_type(bool_type)}) -> {_mlir_type(result_type)}")
+        return result
 
     def _gen_fill(self, expr: CallExpr, env: dict[str, str]) -> str:
         result_type = self._type_of(expr)

@@ -375,6 +375,11 @@ COMPLEX: dict[str, ComplexBuiltin] = {
         "Generate an integer sequence `[0, 1, ..., n-1]` as `i32[n]`.",
         (["n"], ["int"], "i32[n]"),
     ),
+    "one_hot": ComplexBuiltin(
+        "one_hot", "construction", "zero_grad",
+        "Convert integer indices to one-hot float vectors. one_hot(index, n) → f32[..., n].",
+        (["index", "n"], ["i32", "int"], "f32[...]"),
+    ),
     "zeros": ComplexBuiltin(
         "zeros", "construction", "zero_grad",
         "Create an array of zeros with the given shape. `zeros(3, 4)` → `f32[3, 4]`.",

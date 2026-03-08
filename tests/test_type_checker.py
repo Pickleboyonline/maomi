@@ -571,3 +571,26 @@ class TestStringLiteral:
             'fn g(x: f32) -> f32 { x }\nfn f() -> f32 { g("hello") }',
             "string literals can only be used as callback arguments",
         )
+
+
+class TestOneHot:
+    def test_one_hot_scalar(self):
+        check_ok("fn f(x: i32) -> f32[5] { one_hot(x, 5) }")
+
+    def test_one_hot_array(self):
+        check_ok("fn f(x: i32[3]) -> f32[3, 5] { one_hot(x, 5) }")
+
+    def test_one_hot_2d(self):
+        check_ok("fn f(x: i32[3, 4]) -> f32[3, 4, 5] { one_hot(x, 5) }")
+
+    def test_one_hot_wrong_type(self):
+        check_err("fn f(x: f32) -> f32[5] { one_hot(x, 5) }", "i32")
+
+    def test_one_hot_no_literal(self):
+        check_err("fn f(x: i32, n: i32) -> f32 { one_hot(x, n) }", "literal")
+
+    def test_one_hot_zero_n(self):
+        check_err("fn f(x: i32) -> f32[1] { one_hot(x, 0) }", "positive")
+
+    def test_one_hot_wrong_arg_count(self):
+        check_err("fn f(x: i32) -> f32[5] { one_hot(x) }", "2 arguments")

@@ -1237,6 +1237,10 @@ class TypeChecker:
             self._infer(arg, env)
             return ArrayType("i32", (arg.value,))
 
+        # one_hot(index, n) — convert i32 indices to one-hot f32 vectors
+        if expr.callee == "one_hot":
+            return self._check_one_hot(expr, env)
+
         # zeros(d1, d2, ...) / ones(d1, d2, ...) — filled f32 arrays
         if expr.callee in ("zeros", "ones"):
             if len(expr.args) < 1:
@@ -1591,6 +1595,36 @@ class TypeChecker:
 
         new_dims = tuple(arg_type.dims[p] for p in perm)
         return ArrayType(arg_type.base, new_dims)
+
+    def _check_one_hot(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
+        if len(expr.args) != 2:
+            self._error("one_hot expects exactly 2 arguments (index, n)", expr.span.line_start, expr.span.col_start)
+            return None
+
+        index_type = self._infer(expr.args[0], env)
+        if index_type is None:
+            return None
+
+        # index must be i32 (scalar or array)
+        is_i32 = (isinstance(index_type, (ScalarType, ArrayType))
+                  and index_type.base == "i32")
+        if not is_i32:
+            self._error("one_hot index must be i32", expr.span.line_start, expr.span.col_start)
+            return None
+
+        # n must be positive integer literal
+        n_arg = expr.args[1]
+        if not isinstance(n_arg, IntLiteral):
+            self._error("one_hot n must be an integer literal", expr.span.line_start, expr.span.col_start)
+            return None
+        if n_arg.value <= 0:
+            self._error("one_hot n must be positive", expr.span.line_start, expr.span.col_start)
+            return None
+        self._infer(n_arg, env)
+
+        n = n_arg.value
+        prefix_dims = index_type.dims if isinstance(index_type, ArrayType) else ()
+        return ArrayType("f32", prefix_dims + (n,))
 
     def _check_reshape(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
         if len(expr.args) < 2:
