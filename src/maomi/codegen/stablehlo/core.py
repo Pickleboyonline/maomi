@@ -639,6 +639,8 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
             return self._gen_max_pool(expr, env)
         if expr.callee == "avg_pool":
             return self._gen_avg_pool(expr, env)
+        if expr.callee == "einsum":
+            return self._gen_einsum(expr, env)
 
         # User-defined function call
         if self._batch_depth > 0:
@@ -1103,6 +1105,153 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
             f": ({_mlir_type(arg_type)}) -> {_mlir_type(result_type)}"
         )
         return var
+
+    def _gen_einsum(self, expr: CallExpr, env: dict[str, str]) -> str:
+        """Lower einsum to stablehlo.dot_general (2-input) or transpose/reduce (1-input)."""
+        spec = expr.args[0].value  # StringLiteral
+        lhs_str, rhs_str = spec.split("->")
+        input_subscripts = lhs_str.split(",")
+        result_type = self._type_of(expr)
+
+        if len(input_subscripts) == 2:
+            # 2-input einsum: lower to dot_general
+            a_ssa = self._gen_expr(expr.args[1], env)
+            b_ssa = self._gen_expr(expr.args[2], env)
+            a_type = self._type_of(expr.args[1])
+            b_type = self._type_of(expr.args[2])
+            a_sub, b_sub = input_subscripts
+
+            # Identify contracting dims: chars in both inputs but NOT in output
+            a_chars = set(a_sub)
+            b_chars = set(b_sub)
+            shared = a_chars & b_chars
+            contract_chars = shared - set(rhs_str)
+            batch_chars = shared & set(rhs_str)
+
+            # Build dimension index lists
+            a_contract = [a_sub.index(c) for c in sorted(contract_chars)]
+            b_contract = [b_sub.index(c) for c in sorted(contract_chars)]
+            a_batch = [a_sub.index(c) for c in sorted(batch_chars)]
+            b_batch = [b_sub.index(c) for c in sorted(batch_chars)]
+
+            a_contract_str = ", ".join(str(d) for d in a_contract)
+            b_contract_str = ", ".join(str(d) for d in b_contract)
+            a_batch_str = ", ".join(str(d) for d in a_batch)
+            b_batch_str = ", ".join(str(d) for d in b_batch)
+
+            var = self._fresh()
+            if a_batch:
+                self._emit(
+                    f"{var} = stablehlo.dot_general {a_ssa}, {b_ssa}, "
+                    f"batching_dims = [{a_batch_str}] x [{b_batch_str}], "
+                    f"contracting_dims = [{a_contract_str}] x [{b_contract_str}], "
+                    f"precision = [DEFAULT, DEFAULT] "
+                    f": ({_mlir_type(a_type)}, {_mlir_type(b_type)}) -> {_mlir_type(result_type)}"
+                )
+            else:
+                self._emit(
+                    f"{var} = stablehlo.dot_general {a_ssa}, {b_ssa}, "
+                    f"contracting_dims = [{a_contract_str}] x [{b_contract_str}], "
+                    f"precision = [DEFAULT, DEFAULT] "
+                    f": ({_mlir_type(a_type)}, {_mlir_type(b_type)}) -> {_mlir_type(result_type)}"
+                )
+
+            # dot_general output ordering: batch dims, then a free dims, then b free dims
+            # We may need a transpose if the output subscript ordering differs
+            a_free_chars = [c for c in a_sub if c not in contract_chars and c not in batch_chars]
+            b_free_chars = [c for c in b_sub if c not in contract_chars and c not in batch_chars]
+            dot_output_order = sorted(batch_chars) + a_free_chars + b_free_chars
+
+            if list(rhs_str) != dot_output_order:
+                # Need a transpose to match the requested output order
+                perm = [dot_output_order.index(c) for c in rhs_str]
+                perm_str = ", ".join(str(p) for p in perm)
+                result_var = self._fresh()
+                # The dot_general result has the dot_output_order shape
+                dot_dims = tuple(
+                    result_type.dims[rhs_str.index(c)] if isinstance(result_type, ArrayType) else 0
+                    for c in dot_output_order
+                )
+                dot_type = ArrayType(a_type.base, dot_dims) if isinstance(a_type, ArrayType) else result_type
+                self._emit(
+                    f"{result_var} = stablehlo.transpose {var}, dims = [{perm_str}] "
+                    f": ({_mlir_type(dot_type)}) -> {_mlir_type(result_type)}"
+                )
+                return result_var
+
+            return var
+
+        else:
+            # 1-input einsum
+            a_ssa = self._gen_expr(expr.args[1], env)
+            a_type = self._type_of(expr.args[1])
+            a_sub = input_subscripts[0]
+
+            if not isinstance(a_type, ArrayType):
+                raise MaomiError("einsum: argument must be an array", "<codegen>",
+                                 expr.span.line_start, expr.span.col_start)
+
+            # Determine which dims to sum over (in input but not output)
+            sum_chars = [c for c in a_sub if c not in rhs_str]
+
+            if not sum_chars:
+                # Pure transpose: no summation needed
+                perm = [a_sub.index(c) for c in rhs_str]
+                perm_str = ", ".join(str(p) for p in perm)
+                var = self._fresh()
+                self._emit(
+                    f"{var} = stablehlo.transpose {a_ssa}, dims = [{perm_str}] "
+                    f": ({_mlir_type(a_type)}) -> {_mlir_type(result_type)}"
+                )
+                return var
+
+            # Sum over dims then optionally transpose
+            sum_axes = [a_sub.index(c) for c in sum_chars]
+
+            # After reducing these axes, remaining chars in their original order
+            remaining_chars = [c for c in a_sub if c not in sum_chars]
+            remaining_dims = tuple(d for i, d in enumerate(a_type.dims) if i not in sum_axes)
+            if remaining_dims:
+                reduced_type = ArrayType(a_type.base, remaining_dims)
+            else:
+                reduced_type = ScalarType(a_type.base)
+
+            # Reduce
+            dims_str = ", ".join(str(a) for a in sum_axes)
+            init_var = self._fresh()
+            scalar_type = ScalarType(a_type.base)
+            mlir_scalar = _mlir_type(scalar_type)
+            self._emit(f"{init_var} = stablehlo.constant dense<0.000000e+00> : {mlir_scalar}")
+            reduced_var = self._fresh()
+            self._emit(
+                f"{reduced_var} = stablehlo.reduce({a_ssa} init: {init_var}) "
+                f"across dimensions = [{dims_str}] "
+                f": ({_mlir_type(a_type)}, {mlir_scalar}) -> {_mlir_type(reduced_type)}"
+            )
+            self._indent += 1
+            a_var = self._fresh()
+            b_var = self._fresh()
+            self._emit(f"reducer({a_var}: {mlir_scalar}, {b_var}: {mlir_scalar}) {{")
+            self._indent += 1
+            sum_var = self._fresh()
+            self._emit(f"{sum_var} = stablehlo.add {a_var}, {b_var} : {mlir_scalar}")
+            self._emit(f"stablehlo.return {sum_var} : {mlir_scalar}")
+            self._indent -= 1
+            self._emit("}")
+            self._indent -= 1
+
+            # If remaining order doesn't match output, transpose
+            if remaining_chars and list(rhs_str) != remaining_chars:
+                perm = [remaining_chars.index(c) for c in rhs_str]
+                perm_str = ", ".join(str(p) for p in perm)
+                var = self._fresh()
+                self._emit(
+                    f"{var} = stablehlo.transpose {reduced_var}, dims = [{perm_str}] "
+                    f": ({_mlir_type(reduced_type)}) -> {_mlir_type(result_type)}"
+                )
+                return var
+
+            return reduced_var
 
     def _gen_reshape(self, expr: CallExpr, env: dict[str, str]) -> str:
         arg = self._gen_expr(expr.args[0], env)

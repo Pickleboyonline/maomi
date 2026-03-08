@@ -79,6 +79,7 @@ from .constants import (
     _STOP_GRAD_BUILTINS,
     _WHERE_BUILTINS,
     _ARGMAX_BUILTINS,
+    _EINSUM_BUILTINS,
     _MAX_GRAD_DEPTH,
     _collect_free_vars,
 )
@@ -334,7 +335,7 @@ class ADTransform(SimpleGradRulesMixin, ComplexGradRulesMixin):
                 if callee in _NONDIFF_BUILTINS:
                     # Callback: no value, no gradient. Skip entirely.
                     return
-                elif callee in _IOTA_BUILTINS | _ELEMENTWISE_BUILTINS | _REDUCTION_BUILTINS | _SHAPE_BUILTINS | _CONV_POOL_BUILTINS | _RNG_BUILTINS | _STOP_GRAD_BUILTINS | _WHERE_BUILTINS | _ARGMAX_BUILTINS | {"transpose"}:
+                elif callee in _IOTA_BUILTINS | _ELEMENTWISE_BUILTINS | _REDUCTION_BUILTINS | _SHAPE_BUILTINS | _CONV_POOL_BUILTINS | _RNG_BUILTINS | _STOP_GRAD_BUILTINS | _WHERE_BUILTINS | _ARGMAX_BUILTINS | _EINSUM_BUILTINS | {"transpose"}:
                     # Built-in: put on tape as-is
                     for a in args:
                         self._linearize(a, tape, var_map, let_env)
@@ -892,6 +893,8 @@ class ADTransform(SimpleGradRulesMixin, ComplexGradRulesMixin):
                     self._backprop_where(args, adj, adjoints, var_map, node)
                 elif callee in _ARGMAX_BUILTINS:
                     pass  # non-differentiable (returns i32 indices)
+                elif callee in _EINSUM_BUILTINS:
+                    self._backprop_einsum(args, adj, adjoints, var_map, node)
                 else:
                     raise MaomiError(
                         f"grad: unsupported function call '{callee}' inside grad",

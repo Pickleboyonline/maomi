@@ -448,6 +448,13 @@ COMPLEX: dict[str, ComplexBuiltin] = {
         "Host callback (no-op in compiled code). Useful for debugging.",
         ([], [], "void"),
     ),
+
+    # Einsum
+    "einsum": ComplexBuiltin(
+        "einsum", "einsum", "has_rule",
+        "Einstein summation: `einsum(\"ij,jk->ik\", a, b)` for matrix multiply, `einsum(\"ij->ji\", a)` for transpose, etc.",
+        (["spec", "a", "b"], ["str", "f32[...]", "f32[...]"], "f32[...]"),
+    ),
 }
 
 # ---------------------------------------------------------------------------
