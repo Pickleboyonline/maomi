@@ -155,6 +155,37 @@ class TestFunctionCalls:
         assert "stablehlo.negate" in out
         assert "tensor<4xf32>" in out
 
+    def test_builtin_square(self):
+        out = codegen("fn f(x: f32) -> f32 { square(x) }")
+        assert "stablehlo.multiply" in out
+
+    def test_builtin_square_array(self):
+        out = codegen("fn f(x: f32[4]) -> f32[4] { square(x) }")
+        assert "stablehlo.multiply" in out
+
+    def test_builtin_relu(self):
+        out = codegen("fn f(x: f32) -> f32 { relu(x) }")
+        assert "stablehlo.compare" in out
+        assert "stablehlo.select" in out
+
+    def test_builtin_relu_array(self):
+        out = codegen("fn f(x: f32[4]) -> f32[4] { relu(x) }")
+        assert "stablehlo.compare" in out
+        assert "stablehlo.select" in out
+
+    def test_builtin_softplus(self):
+        out = codegen("fn f(x: f32) -> f32 { softplus(x) }")
+        assert "stablehlo.exponential" in out
+        assert "stablehlo.log" in out
+
+    def test_builtin_silu(self):
+        out = codegen("fn f(x: f32) -> f32 { silu(x) }")
+        assert "stablehlo.exponential" in out
+
+    def test_builtin_gelu(self):
+        out = codegen("fn f(x: f32) -> f32 { gelu(x) }")
+        assert "stablehlo.tanh" in out
+
 
 class TestReductions:
     def test_mean(self):

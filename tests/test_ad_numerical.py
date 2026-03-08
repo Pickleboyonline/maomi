@@ -234,6 +234,57 @@ class TestElementwiseGrad:
             [jnp.array(x)],
         )
 
+    def test_square(self):
+        x = np.array([1.0, 2.0, 3.0, -1.0], dtype=np.float32)
+        _check(
+            "fn f(x: f32[4]) -> f32 { sum(square(x)) }\n"
+            "fn grad_f(x: f32[4]) -> f32[4] { grad(f(x), x) }",
+            [x],
+            jax.grad(lambda x: jnp.sum(x**2)),
+            [jnp.array(x)],
+        )
+
+    def test_relu(self):
+        x = np.array([-2.0, -1.0, 0.5, 2.0], dtype=np.float32)
+        _check(
+            "fn f(x: f32[4]) -> f32 { sum(relu(x)) }\n"
+            "fn grad_f(x: f32[4]) -> f32[4] { grad(f(x), x) }",
+            [x],
+            jax.grad(lambda x: jnp.sum(jax.nn.relu(x))),
+            [jnp.array(x)],
+        )
+
+    def test_softplus(self):
+        x = np.array([-1.0, 0.0, 1.0, 2.0], dtype=np.float32)
+        _check(
+            "fn f(x: f32[4]) -> f32 { sum(softplus(x)) }\n"
+            "fn grad_f(x: f32[4]) -> f32[4] { grad(f(x), x) }",
+            [x],
+            jax.grad(lambda x: jnp.sum(jax.nn.softplus(x))),
+            [jnp.array(x)],
+        )
+
+    def test_silu(self):
+        x = np.array([-1.0, 0.0, 1.0, 2.0], dtype=np.float32)
+        _check(
+            "fn f(x: f32[4]) -> f32 { sum(silu(x)) }\n"
+            "fn grad_f(x: f32[4]) -> f32[4] { grad(f(x), x) }",
+            [x],
+            jax.grad(lambda x: jnp.sum(jax.nn.silu(x))),
+            [jnp.array(x)],
+        )
+
+    def test_gelu(self):
+        x = np.array([-1.0, 0.0, 1.0, 2.0], dtype=np.float32)
+        _check(
+            "fn f(x: f32[4]) -> f32 { sum(gelu(x)) }\n"
+            "fn grad_f(x: f32[4]) -> f32[4] { grad(f(x), x) }",
+            [x],
+            jax.grad(lambda x: jnp.sum(jax.nn.gelu(x, approximate=True))),
+            [jnp.array(x)],
+            atol=1e-5,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Matmul

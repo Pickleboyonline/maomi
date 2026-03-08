@@ -225,6 +225,35 @@ class TestBuiltins:
 
     def test_expm1_array(self):
         check_ok("fn f(x: f32[3]) -> f32[3] { expm1(x) }")
+    def test_square(self):
+        check_ok("fn f(x: f32) -> f32 { square(x) }")
+
+    def test_square_array(self):
+        check_ok("fn f(x: f32[3]) -> f32[3] { square(x) }")
+
+    def test_softplus(self):
+        check_ok("fn f(x: f32) -> f32 { softplus(x) }")
+
+    def test_softplus_array(self):
+        check_ok("fn f(x: f32[4]) -> f32[4] { softplus(x) }")
+
+    def test_relu(self):
+        check_ok("fn f(x: f32) -> f32 { relu(x) }")
+
+    def test_relu_array(self):
+        check_ok("fn f(x: f32[4]) -> f32[4] { relu(x) }")
+
+    def test_silu(self):
+        check_ok("fn f(x: f32) -> f32 { silu(x) }")
+
+    def test_silu_array(self):
+        check_ok("fn f(x: f32[4]) -> f32[4] { silu(x) }")
+
+    def test_gelu(self):
+        check_ok("fn f(x: f32) -> f32 { gelu(x) }")
+
+    def test_gelu_array(self):
+        check_ok("fn f(x: f32[4]) -> f32[4] { gelu(x) }")
 
 
 class TestScan:
