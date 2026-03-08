@@ -326,9 +326,11 @@ class TestGoToDefinition:
         # Find the CallExpr for helper(y) in main's body
         call_node = self._find_node_by_type_and_attr(main_fn, CallExpr, "callee", "helper")
         assert call_node is not None
-        defn_span = _goto_find_definition(call_node, main_fn, result)
-        assert defn_span is not None
+        found = _goto_find_definition(call_node, main_fn, result)
+        assert found is not None
+        defn_span, source_file = found
         assert defn_span == helper_fn.span
+        assert source_file is None
 
     def test_goto_param_definition(self):
         source = "fn f(x: f32) -> f32 { x }"
@@ -338,8 +340,9 @@ class TestGoToDefinition:
         # Find the Identifier 'x' in the body
         ident_node = self._find_node_by_type_and_attr(fn.body, Identifier, "name", "x")
         assert ident_node is not None
-        defn_span = _goto_find_definition(ident_node, fn, result)
-        assert defn_span is not None
+        found = _goto_find_definition(ident_node, fn, result)
+        assert found is not None
+        defn_span, _ = found
         assert defn_span == fn.params[0].span
 
     def test_goto_let_definition(self):
@@ -350,8 +353,9 @@ class TestGoToDefinition:
         # The trailing expression is Identifier 'a'
         assert isinstance(fn.body.expr, Identifier)
         assert fn.body.expr.name == "a"
-        defn_span = _goto_find_definition(fn.body.expr, fn, result)
-        assert defn_span is not None
+        found = _goto_find_definition(fn.body.expr, fn, result)
+        assert found is not None
+        defn_span, _ = found
         # Should point to the LetStmt
         let_stmt = fn.body.stmts[0]
         assert isinstance(let_stmt, LetStmt)
@@ -366,8 +370,9 @@ class TestGoToDefinition:
         # Find the StructLiteral node
         struct_lit = self._find_node_by_type_and_attr(fn, StructLiteral, "name", "Point")
         assert struct_lit is not None
-        defn_span = _goto_find_definition(struct_lit, fn, result)
-        assert defn_span is not None
+        found = _goto_find_definition(struct_lit, fn, result)
+        assert found is not None
+        defn_span, _ = found
         assert defn_span == struct_def.span
 
     def test_goto_field_access_definition(self):
@@ -379,8 +384,9 @@ class TestGoToDefinition:
         # Find the FieldAccess node
         field_node = self._find_node_by_type_and_attr(fn, FieldAccess, "field", "x")
         assert field_node is not None
-        defn_span = _goto_find_definition(field_node, fn, result)
-        assert defn_span is not None
+        found = _goto_find_definition(field_node, fn, result)
+        assert found is not None
+        defn_span, _ = found
         assert defn_span == struct_def.span
 
     def test_returns_none_for_builtin(self):
@@ -413,8 +419,9 @@ class TestGoToDefinition:
         # Find 'acc' identifier inside scan body
         acc_ident = self._find_node_by_type_and_attr(scan_node.body, Identifier, "name", "acc")
         assert acc_ident is not None
-        defn_span = _goto_find_definition(acc_ident, fn, result)
-        assert defn_span is not None
+        found = _goto_find_definition(acc_ident, fn, result)
+        assert found is not None
+        defn_span, _ = found
         assert defn_span == scan_node.span
 
     def test_goto_map_elem_var(self):
@@ -427,8 +434,9 @@ class TestGoToDefinition:
         # Find 'x' identifier inside map body
         x_ident = self._find_node_by_type_and_attr(map_node.body, Identifier, "name", "x")
         assert x_ident is not None
-        defn_span = _goto_find_definition(x_ident, fn, result)
-        assert defn_span is not None
+        found = _goto_find_definition(x_ident, fn, result)
+        assert found is not None
+        defn_span, _ = found
         assert defn_span == map_node.span
 
     def test_returns_none_for_literal(self):

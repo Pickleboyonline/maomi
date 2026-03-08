@@ -81,7 +81,8 @@ class _ResolveContext:
                     orig = available[name]
                     alias_fn = FnDef(name, orig.params, orig.return_type,
                                      _rewrite_calls_in_block(orig.body, {name: orig.name}),
-                                     orig.span)
+                                     orig.span, doc=orig.doc,
+                                     source_file=orig.source_file)
                     merged_fns.append(alias_fn)
             else:
                 # import math; — qualified access only
@@ -121,7 +122,7 @@ class _ResolveContext:
         # Prefix all functions with module_name
         local_names = {fn.name for fn in mod_program.functions}
         rename_map = {name: f"{module_name}.{name}" for name in local_names}
-        prefixed_fns = [_prefix_fn(fn, module_name, rename_map) for fn in mod_program.functions]
+        prefixed_fns = [_prefix_fn(fn, module_name, rename_map, mod_path) for fn in mod_program.functions]
 
         self._resolving.discard(mod_path)
         self._cache[cache_key] = prefixed_fns
@@ -160,11 +161,13 @@ def _stem(module_path: str) -> str:
     return base
 
 
-def _prefix_fn(fn: FnDef, module_name: str, rename_map: dict[str, str]) -> FnDef:
+def _prefix_fn(fn: FnDef, module_name: str, rename_map: dict[str, str],
+               source_file: str | None = None) -> FnDef:
     """Rename a function and rewrite its internal calls."""
     new_name = rename_map.get(fn.name, fn.name)
     new_body = _rewrite_calls_in_block(fn.body, rename_map)
-    return FnDef(new_name, fn.params, fn.return_type, new_body, fn.span)
+    return FnDef(new_name, fn.params, fn.return_type, new_body, fn.span,
+                 doc=fn.doc, source_file=fn.source_file or source_file)
 
 
 def _rewrite_calls_in_block(block: Block, rename_map: dict[str, str]) -> Block:
