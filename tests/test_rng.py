@@ -186,6 +186,95 @@ class TestRngNormalTypeCheck:
         """)
 
 
+class TestBernoulliTypeCheck:
+    def test_basic(self):
+        check_ok("fn f(key: Key) -> f32[10] { random.bernoulli(key, 0.5, 10) }")
+
+    def test_2d(self):
+        check_ok("fn f(key: Key) -> f32[3, 4] { random.bernoulli(key, 0.5, 3, 4) }")
+
+    def test_return_type(self):
+        ret = infer_type("fn f(key: Key) -> f32[10] { random.bernoulli(key, 0.5, 10) }")
+        assert ret == ArrayType("f32", (10,))
+
+    def test_return_type_2d(self):
+        ret = infer_type("fn f(key: Key) -> f32[3, 4] { random.bernoulli(key, 0.5, 3, 4) }")
+        assert ret == ArrayType("f32", (3, 4))
+
+    def test_wrong_key_type(self):
+        check_err("fn f(k: f32[4]) -> f32[10] { random.bernoulli(k, 0.5, 10) }", "Key")
+
+    def test_wrong_prob_type(self):
+        check_err("fn f(k: Key) -> f32[10] { random.bernoulli(k, 1, 10) }", "f32")
+
+    def test_missing_dims(self):
+        check_err("fn f(k: Key) -> f32[10] { random.bernoulli(k, 0.5) }", "at least 3")
+
+    def test_expression_prob(self):
+        check_ok("""
+            fn f(k: Key, p: f32) -> f32[10] {
+                random.bernoulli(k, p, 10)
+            }
+        """)
+
+
+class TestCategoricalTypeCheck:
+    def test_basic_1d(self):
+        check_ok("fn f(key: Key, logits: f32[5]) -> i32 { random.categorical(key, logits) }")
+
+    def test_batched(self):
+        check_ok("fn f(key: Key, logits: f32[3, 5]) -> i32[3] { random.categorical(key, logits) }")
+
+    def test_return_type_1d(self):
+        ret = infer_type("fn f(key: Key, logits: f32[5]) -> i32 { random.categorical(key, logits) }")
+        assert ret == ScalarType("i32")
+
+    def test_return_type_batched(self):
+        ret = infer_type("fn f(key: Key, logits: f32[3, 5]) -> i32[3] { random.categorical(key, logits) }")
+        assert ret == ArrayType("i32", (3,))
+
+    def test_return_type_3d(self):
+        ret = infer_type("fn f(key: Key, logits: f32[2, 3, 5]) -> i32[2, 3] { random.categorical(key, logits) }")
+        assert ret == ArrayType("i32", (2, 3))
+
+    def test_wrong_key_type(self):
+        check_err("fn f(k: f32[4], logits: f32[5]) -> i32 { random.categorical(k, logits) }", "Key")
+
+    def test_wrong_logits_type(self):
+        check_err("fn f(k: Key, x: i32[5]) -> i32 { random.categorical(k, x) }", "f32 array")
+
+    def test_wrong_arg_count(self):
+        check_err("fn f(k: Key, logits: f32[5]) -> i32 { random.categorical(k) }", "2 arguments")
+
+
+class TestTruncatedNormalTypeCheck:
+    def test_basic(self):
+        check_ok("fn f(key: Key) -> f32[10] { random.truncated_normal(key, -2.0, 2.0, 10) }")
+
+    def test_2d(self):
+        check_ok("fn f(key: Key) -> f32[3, 4] { random.truncated_normal(key, -2.0, 2.0, 3, 4) }")
+
+    def test_return_type(self):
+        ret = infer_type("fn f(key: Key) -> f32[10] { random.truncated_normal(key, -2.0, 2.0, 10) }")
+        assert ret == ArrayType("f32", (10,))
+
+    def test_wrong_key_type(self):
+        check_err("fn f(k: f32[4]) -> f32[10] { random.truncated_normal(k, -2.0, 2.0, 10) }", "Key")
+
+    def test_wrong_param_type(self):
+        check_err("fn f(k: Key) -> f32[10] { random.truncated_normal(k, -2, 2.0, 10) }", "f32")
+
+    def test_missing_dims(self):
+        check_err("fn f(k: Key) -> f32[10] { random.truncated_normal(k, -2.0, 2.0) }", "at least 4")
+
+    def test_expression_params(self):
+        check_ok("""
+            fn f(k: Key, lo: f32, hi: f32) -> f32[10] {
+                random.truncated_normal(k, lo, hi, 10)
+            }
+        """)
+
+
 # =====================================================================
 # Codegen Tests
 # =====================================================================
@@ -241,6 +330,60 @@ class TestRngNormalCodegen:
         assert "tensor<4x4xf32>" in out
 
 
+class TestBernoulliCodegen:
+    def test_emits_rng_bit_generator(self):
+        out = codegen("fn f(k: i32[4]) -> f32[10] { random.bernoulli(k, 0.5, 10) }")
+        assert "stablehlo.rng_bit_generator" in out
+
+    def test_emits_compare(self):
+        out = codegen("fn f(k: i32[4]) -> f32[10] { random.bernoulli(k, 0.5, 10) }")
+        assert "stablehlo.compare" in out
+        assert "stablehlo.convert" in out
+
+    def test_2d_shape(self):
+        out = codegen("fn f(k: i32[4]) -> f32[3, 4] { random.bernoulli(k, 0.5, 3, 4) }")
+        assert "tensor<3x4xf32>" in out
+
+
+class TestCategoricalCodegen:
+    def test_emits_rng_bit_generator(self):
+        out = codegen("fn f(k: i32[4], logits: f32[5]) -> i32 { random.categorical(k, logits) }")
+        assert "stablehlo.rng_bit_generator" in out
+
+    def test_emits_gumbel_noise(self):
+        out = codegen("fn f(k: i32[4], logits: f32[5]) -> i32 { random.categorical(k, logits) }")
+        assert "stablehlo.log" in out
+        assert "stablehlo.negate" in out
+
+    def test_emits_reduce(self):
+        out = codegen("fn f(k: i32[4], logits: f32[5]) -> i32 { random.categorical(k, logits) }")
+        assert "stablehlo.reduce" in out
+
+    def test_batched(self):
+        out = codegen("fn f(k: i32[4], logits: f32[3, 5]) -> i32[3] { random.categorical(k, logits) }")
+        assert "tensor<3xi32>" in out
+
+
+class TestTruncatedNormalCodegen:
+    def test_emits_rng_bit_generator(self):
+        out = codegen("fn f(k: i32[4]) -> f32[10] { random.truncated_normal(k, -2.0, 2.0, 10) }")
+        assert "stablehlo.rng_bit_generator" in out
+
+    def test_emits_box_muller(self):
+        out = codegen("fn f(k: i32[4]) -> f32[10] { random.truncated_normal(k, -2.0, 2.0, 10) }")
+        assert "stablehlo.cosine" in out
+        assert "stablehlo.log" in out
+        assert "stablehlo.sqrt" in out
+
+    def test_emits_clamp(self):
+        out = codegen("fn f(k: i32[4]) -> f32[10] { random.truncated_normal(k, -2.0, 2.0, 10) }")
+        assert "stablehlo.clamp" in out
+
+    def test_2d_emits_reshape(self):
+        out = codegen("fn f(k: i32[4]) -> f32[3, 4] { random.truncated_normal(k, -2.0, 2.0, 3, 4) }")
+        assert "tensor<3x4xf32>" in out
+
+
 # =====================================================================
 # AD Tests
 # =====================================================================
@@ -263,6 +406,26 @@ class TestRngAD:
         out = ad_codegen("""
             fn f(k: i32[4], x: f32[4]) -> f32[4] {
                 let noise = random.normal(k, 0.0, 0.01, 4);
+                grad(sum(x + noise), x)
+            }
+        """)
+        assert "stablehlo.rng_bit_generator" in out
+
+    def test_bernoulli_in_grad(self):
+        """random.bernoulli inside grad: zero gradient through RNG."""
+        out = ad_codegen("""
+            fn f(k: i32[4], x: f32[4]) -> f32[4] {
+                let mask = random.bernoulli(k, 0.5, 4);
+                grad(sum(mask * x), x)
+            }
+        """)
+        assert "stablehlo.rng_bit_generator" in out
+
+    def test_truncated_normal_in_grad(self):
+        """random.truncated_normal inside grad: zero gradient through RNG."""
+        out = ad_codegen("""
+            fn f(k: i32[4], x: f32[4]) -> f32[4] {
+                let noise = random.truncated_normal(k, -2.0, 2.0, 4);
                 grad(sum(x + noise), x)
             }
         """)
@@ -370,3 +533,68 @@ class TestRngRunner:
         _, out = run_stablehlo(result.mlir_text, "f", result.fn_table["f"], seed=42)
         assert out.shape == (4, 4)
         assert out.dtype == np.float32
+
+    def test_bernoulli_values(self):
+        src = "fn f(k: i32[4]) -> f32[1000] { random.bernoulli(k, 0.5, 1000) }"
+        result = compile_source(src)
+        _, out = run_stablehlo(result.mlir_text, "f", result.fn_table["f"], seed=42)
+        assert out.shape == (1000,)
+        assert out.dtype == np.float32
+        # Values should be 0.0 or 1.0
+        unique_vals = set(np.unique(out))
+        assert unique_vals.issubset({0.0, 1.0})
+        # With prob=0.5, expect roughly half ones
+        assert 0.3 < out.mean() < 0.7
+
+    def test_bernoulli_high_prob(self):
+        src = "fn f(k: i32[4]) -> f32[1000] { random.bernoulli(k, 0.99, 1000) }"
+        result = compile_source(src)
+        _, out = run_stablehlo(result.mlir_text, "f", result.fn_table["f"], seed=42)
+        # Most values should be 1.0
+        assert out.mean() > 0.9
+
+    def test_bernoulli_2d(self):
+        src = "fn f(k: i32[4]) -> f32[3, 4] { random.bernoulli(k, 0.5, 3, 4) }"
+        result = compile_source(src)
+        _, out = run_stablehlo(result.mlir_text, "f", result.fn_table["f"], seed=42)
+        assert out.shape == (3, 4)
+
+    def test_truncated_normal_range(self):
+        src = "fn f(k: i32[4]) -> f32[10000] { random.truncated_normal(k, -2.0, 2.0, 10000) }"
+        result = compile_source(src)
+        _, out = run_stablehlo(result.mlir_text, "f", result.fn_table["f"], seed=42)
+        assert out.shape == (10000,)
+        assert out.dtype == np.float32
+        # All values should be in [-2, 2]
+        assert out.min() >= -2.0
+        assert out.max() <= 2.0
+
+    def test_truncated_normal_stats(self):
+        src = "fn f(k: i32[4]) -> f32[10000] { random.truncated_normal(k, -2.0, 2.0, 10000) }"
+        result = compile_source(src)
+        _, out = run_stablehlo(result.mlir_text, "f", result.fn_table["f"], seed=42)
+        # Mean should be roughly 0 (symmetric truncation)
+        assert abs(out.mean()) < 0.1
+
+    def test_truncated_normal_2d(self):
+        src = "fn f(k: i32[4]) -> f32[4, 4] { random.truncated_normal(k, -2.0, 2.0, 4, 4) }"
+        result = compile_source(src)
+        _, out = run_stablehlo(result.mlir_text, "f", result.fn_table["f"], seed=42)
+        assert out.shape == (4, 4)
+
+    @pytest.mark.skip(reason="variadic reduce (%N:2) syntax not supported by JAX's MLIR parser (pre-existing argmax issue)")
+    def test_categorical_1d(self):
+        src = "fn f(k: i32[4], logits: f32[5]) -> i32 { random.categorical(k, logits) }"
+        result = compile_source(src)
+        _, out = run_stablehlo(result.mlir_text, "f", result.fn_table["f"], seed=42)
+        assert out.dtype == np.int32
+        assert 0 <= int(out) < 5
+
+    @pytest.mark.skip(reason="variadic reduce (%N:2) syntax not supported by JAX's MLIR parser (pre-existing argmax issue)")
+    def test_categorical_batched(self):
+        src = "fn f(k: i32[4], logits: f32[3, 5]) -> i32[3] { random.categorical(k, logits) }"
+        result = compile_source(src)
+        _, out = run_stablehlo(result.mlir_text, "f", result.fn_table["f"], seed=42)
+        assert out.shape == (3,)
+        assert out.dtype == np.int32
+        assert all(0 <= v < 5 for v in out)

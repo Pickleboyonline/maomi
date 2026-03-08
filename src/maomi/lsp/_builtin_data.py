@@ -16,7 +16,7 @@ _BUILTINS = sorted(set(_EW_REGISTRY.keys()) | set(_CX_REGISTRY.keys()))
 _BUILTIN_SET = set(_BUILTINS)
 
 _BUILTIN_NAMESPACES: dict[str, list[str]] = {
-    "random": ["key", "split", "uniform", "normal"],
+    "random": ["key", "split", "uniform", "normal", "bernoulli", "categorical", "truncated_normal"],
 }
 
 # Signature and doc data derived from registry

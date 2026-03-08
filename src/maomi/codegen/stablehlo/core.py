@@ -48,7 +48,7 @@ from .utils import (
     _base_of_type,
     _types_equal,
 )
-from ...builtins import ELEMENTWISE as _EW_REGISTRY
+from ...builtins import ELEMENTWISE as _EW_REGISTRY, COMPLEX as _CX_REGISTRY
 from .loops import LoopCodegenMixin
 from .conv import ConvCodegenMixin
 from .map_codegen import MapCodegenMixin
@@ -547,7 +547,7 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
         return var
 
     _CALLBACK_BUILTINS = {"callback"}
-    _RNG_BUILTINS = {"random.key", "random.split", "random.uniform", "random.normal"}
+    _RNG_BUILTINS = {n for n, b in _CX_REGISTRY.items() if b.category == "rng"}
 
     def _gen_callback(self, expr: CallExpr, env: dict[str, str]) -> str:
         """Emit stablehlo.custom_call targeting JAX's FFI callback handler."""
