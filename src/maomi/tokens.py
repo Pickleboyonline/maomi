@@ -31,6 +31,9 @@ class TokenType(StrEnum):
     AS = auto()
     STRUCT = auto()
     WITH = auto()
+    AND = auto()
+    OR = auto()
+    NOT = auto()
 
     # Type keywords
     F32 = auto()
@@ -119,4 +122,7 @@ KEYWORDS: dict[str, TokenType] = {
     "cast": TokenType.CAST,
     "fold": TokenType.FOLD,
     "comptime": TokenType.COMPTIME,
+    "and": TokenType.AND,
+    "or": TokenType.OR,
+    "not": TokenType.NOT,
 }

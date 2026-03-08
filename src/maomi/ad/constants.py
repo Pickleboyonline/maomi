@@ -27,6 +27,8 @@ from ..ast_nodes import (
     _FoldGrad,
     _BroadcastExpr,
     _ReduceSum,
+    _CumsumGrad,
+    _SortGrad,
     Span,
     Expr,
 )
@@ -49,6 +51,8 @@ _CLIP_BUILTINS = {n for n, b in _CX_REGISTRY.items() if b.category == "clip"}
 _ARGMAX_BUILTINS = {n for n, b in _CX_REGISTRY.items() if b.category == "argmax"}
 _TWO_ARG_EW_BUILTINS = {n for n, b in _CX_REGISTRY.items() if b.category == "two_arg_elementwise"}
 _EINSUM_BUILTINS = {n for n, b in _CX_REGISTRY.items() if b.category == "einsum"}
+_CUMULATIVE_BUILTINS = {n for n, b in _CX_REGISTRY.items() if b.category == "cumulative"}
+_SORTING_BUILTINS = {n for n, b in _CX_REGISTRY.items() if b.category == "sorting"}
 _MAX_GRAD_DEPTH = 10
 
 
@@ -190,3 +194,9 @@ def _collect_free_vars_inner(expr: Expr, result: set[str]):
             _collect_free_vars_inner(e, result)
         case _ReduceSum(expr=e):
             _collect_free_vars_inner(e, result)
+        case _CumsumGrad(input_expr=ie, adj=adj):
+            _collect_free_vars_inner(ie, result)
+            _collect_free_vars_inner(adj, result)
+        case _SortGrad(input_expr=ie, adj=adj):
+            _collect_free_vars_inner(ie, result)
+            _collect_free_vars_inner(adj, result)

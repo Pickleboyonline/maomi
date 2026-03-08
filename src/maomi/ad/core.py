@@ -62,6 +62,8 @@ from ..ast_nodes import (
     _FoldGrad,
     _BroadcastExpr,
     _ReduceSum,
+    _CumsumGrad,
+    _SortGrad,
     Expr,
 )
 from ..types import MaomiType, ScalarType, ArrayType, StructType, FLOAT_BASES
@@ -82,6 +84,8 @@ from .constants import (
     _ARGMAX_BUILTINS,
     _TWO_ARG_EW_BUILTINS,
     _EINSUM_BUILTINS,
+    _CUMULATIVE_BUILTINS,
+    _SORTING_BUILTINS,
     _MAX_GRAD_DEPTH,
     _collect_free_vars,
 )
@@ -337,7 +341,7 @@ class ADTransform(SimpleGradRulesMixin, ComplexGradRulesMixin):
                 if callee in _NONDIFF_BUILTINS:
                     # Callback: no value, no gradient. Skip entirely.
                     return
-                elif callee in _IOTA_BUILTINS | _ELEMENTWISE_BUILTINS | _REDUCTION_BUILTINS | _SHAPE_BUILTINS | _CONV_POOL_BUILTINS | _RNG_BUILTINS | _STOP_GRAD_BUILTINS | _WHERE_BUILTINS | _CLIP_BUILTINS | _ARGMAX_BUILTINS | _TWO_ARG_EW_BUILTINS | _EINSUM_BUILTINS | {"transpose"}:
+                elif callee in _IOTA_BUILTINS | _ELEMENTWISE_BUILTINS | _REDUCTION_BUILTINS | _SHAPE_BUILTINS | _CONV_POOL_BUILTINS | _RNG_BUILTINS | _STOP_GRAD_BUILTINS | _WHERE_BUILTINS | _CLIP_BUILTINS | _ARGMAX_BUILTINS | _TWO_ARG_EW_BUILTINS | _EINSUM_BUILTINS | _CUMULATIVE_BUILTINS | _SORTING_BUILTINS | {"transpose"}:
                     # Built-in: put on tape as-is
                     for a in args:
                         self._linearize(a, tape, var_map, let_env)
@@ -486,6 +490,18 @@ class ADTransform(SimpleGradRulesMixin, ComplexGradRulesMixin):
                 var_map[id(expr)] = name
                 tape.append((name, expr))
             case _AvgPoolGrad():
+                self._linearize(expr.input_expr, tape, var_map, let_env)
+                self._linearize(expr.adj, tape, var_map, let_env)
+                name = self._fresh_name("v")
+                var_map[id(expr)] = name
+                tape.append((name, expr))
+            case _CumsumGrad():
+                self._linearize(expr.input_expr, tape, var_map, let_env)
+                self._linearize(expr.adj, tape, var_map, let_env)
+                name = self._fresh_name("v")
+                var_map[id(expr)] = name
+                tape.append((name, expr))
+            case _SortGrad():
                 self._linearize(expr.input_expr, tape, var_map, let_env)
                 self._linearize(expr.adj, tape, var_map, let_env)
                 name = self._fresh_name("v")
@@ -678,6 +694,18 @@ class ADTransform(SimpleGradRulesMixin, ComplexGradRulesMixin):
                 new_input = self._substitute(expr.input_expr, subst)
                 new_adj = self._substitute(expr.adj, subst)
                 node = _AvgPoolGrad(new_input, new_adj, expr.window, expr.strides, expr.span)
+                self._copy_type(expr, node)
+                return node
+            case _CumsumGrad():
+                new_input = self._substitute(expr.input_expr, subst)
+                new_adj = self._substitute(expr.adj, subst)
+                node = _CumsumGrad(new_input, new_adj, expr.axis, expr.op, expr.span)
+                self._copy_type(expr, node)
+                return node
+            case _SortGrad():
+                new_input = self._substitute(expr.input_expr, subst)
+                new_adj = self._substitute(expr.adj, subst)
+                node = _SortGrad(new_input, new_adj, expr.axis, expr.span)
                 self._copy_type(expr, node)
                 return node
             case _FoldGrad():
@@ -911,6 +939,12 @@ class ADTransform(SimpleGradRulesMixin, ComplexGradRulesMixin):
                     self._backprop_two_arg_elementwise(callee, args, adj, adjoints, var_map, node)
                 elif callee in _EINSUM_BUILTINS:
                     self._backprop_einsum(args, adj, adjoints, var_map, node)
+                elif callee in _CUMULATIVE_BUILTINS:
+                    self._backprop_cumulative(callee, args, adj, adjoints, var_map, node)
+                elif callee in _SORTING_BUILTINS:
+                    if callee == "sort":
+                        self._backprop_sort(args, adj, adjoints, var_map, node)
+                    # argsort: zero_grad, handled by _IOTA_BUILTINS check
                 else:
                     raise MaomiError(
                         f"grad: unsupported function call '{callee}' inside grad",
@@ -1108,6 +1142,18 @@ class ADTransform(SimpleGradRulesMixin, ComplexGradRulesMixin):
             case _AvgPoolGrad():
                 raise MaomiError(
                     "grad-of-grad through avg_pool is not yet supported.",
+                    "<ad>", node.span.line_start, node.span.col_start,
+                )
+
+            case _CumsumGrad():
+                raise MaomiError(
+                    "grad-of-grad through cumsum/cumprod is not yet supported.",
+                    "<ad>", node.span.line_start, node.span.col_start,
+                )
+
+            case _SortGrad():
+                raise MaomiError(
+                    "grad-of-grad through sort is not yet supported.",
                     "<ad>", node.span.line_start, node.span.col_start,
                 )
 

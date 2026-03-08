@@ -362,8 +362,27 @@ class _ReduceSum:
     span: Span
 
 
+@dataclass
+class _CumsumGrad:
+    """Internal: backward pass of cumsum/cumprod. Codegen emits reverse-cumsum pattern."""
+    input_expr: Expr              # original input x (needed for cumprod backward)
+    adj: Expr                     # upstream adjoint
+    axis: int                     # axis of cumulation
+    op: str                       # "cumsum" or "cumprod"
+    span: Span
+
+
+@dataclass
+class _SortGrad:
+    """Internal: backward pass of sort. Codegen emits inverse-permutation gather."""
+    input_expr: Expr              # original input x
+    adj: Expr                     # upstream adjoint
+    axis: int                     # axis of sorting
+    span: Span
+
+
 # Union types for convenience
-Expr = IntLiteral | FloatLiteral | BoolLiteral | StringLiteral | Identifier | UnaryOp | BinOp | IfExpr | CallExpr | ScanExpr | WhileExpr | MapExpr | GradExpr | CastExpr | FoldExpr | ArrayLiteral | StructLiteral | FieldAccess | WithExpr | IndexExpr | _ScanGrad | _WhileGrad | _IndexGrad | _GatherGrad | _Conv2dGrad | _MaxPoolGrad | _AvgPoolGrad | _FoldGrad | _BroadcastExpr
+Expr = IntLiteral | FloatLiteral | BoolLiteral | StringLiteral | Identifier | UnaryOp | BinOp | IfExpr | CallExpr | ScanExpr | WhileExpr | MapExpr | GradExpr | CastExpr | FoldExpr | ArrayLiteral | StructLiteral | FieldAccess | WithExpr | IndexExpr | _ScanGrad | _WhileGrad | _IndexGrad | _GatherGrad | _Conv2dGrad | _MaxPoolGrad | _AvgPoolGrad | _FoldGrad | _BroadcastExpr | _CumsumGrad | _SortGrad
 Stmt = LetStmt | ExprStmt
 
 

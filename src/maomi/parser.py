@@ -354,7 +354,7 @@ class Parser:
         start = self._expect(TokenType.MAP)
         elem_var = self._expect(TokenType.IDENT).value
         self._expect(TokenType.IN)
-        sequence = self._parse_comparison()
+        sequence = self._parse_or()
         body = self._parse_block()
         return MapExpr(elem_var, sequence, body, self._span_from(start))
 
@@ -438,7 +438,7 @@ class Parser:
 
     def _parse_if_expr(self) -> IfExpr:
         start = self._expect(TokenType.IF)
-        condition = self._parse_comparison()
+        condition = self._parse_or()
         then_block = self._parse_block()
         self._expect(TokenType.ELSE)
         else_block = self._parse_block()
@@ -469,10 +469,10 @@ class Parser:
         return path, value
 
     def _parse_pipe(self) -> Expr:
-        expr = self._parse_comparison()
+        expr = self._parse_or()
         while self._check(TokenType.PIPE):
             self._advance()
-            rhs = self._parse_comparison()
+            rhs = self._parse_or()
             span = Span(expr.span.line_start, expr.span.col_start, rhs.span.line_end, rhs.span.col_end)
             if isinstance(rhs, CallExpr):
                 expr = CallExpr(rhs.callee, [expr] + rhs.args, span, named_args=rhs.named_args)
@@ -481,6 +481,29 @@ class Parser:
             else:
                 raise self._error("expected function name or call after '|>'")
         return expr
+
+    def _parse_or(self) -> Expr:
+        left = self._parse_and()
+        while self._check(TokenType.OR):
+            self._advance()
+            right = self._parse_and()
+            left = BinOp("or", left, right, Span(left.span.line_start, left.span.col_start, right.span.line_end, right.span.col_end))
+        return left
+
+    def _parse_and(self) -> Expr:
+        left = self._parse_not()
+        while self._check(TokenType.AND):
+            self._advance()
+            right = self._parse_not()
+            left = BinOp("and", left, right, Span(left.span.line_start, left.span.col_start, right.span.line_end, right.span.col_end))
+        return left
+
+    def _parse_not(self) -> Expr:
+        if self._check(TokenType.NOT):
+            start = self._advance()
+            operand = self._parse_not()  # right-associative: not not x
+            return UnaryOp("not", operand, self._span_from(start))
+        return self._parse_comparison()
 
     def _parse_comparison(self) -> Expr:
         left = self._parse_addition()
