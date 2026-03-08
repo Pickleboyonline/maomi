@@ -997,6 +997,46 @@ class TypeChecker:
             self._infer(arg, env)
             return ArrayType("i32", (arg.value,))
 
+        # zeros(d1, d2, ...) / ones(d1, d2, ...) — filled f32 arrays
+        if expr.callee in ("zeros", "ones"):
+            if len(expr.args) < 1:
+                self._error(f"{expr.callee} expects at least 1 dimension argument", expr.span.line_start, expr.span.col_start)
+                return None
+            dims: list[int] = []
+            for a in expr.args:
+                if not isinstance(a, IntLiteral):
+                    self._error(f"{expr.callee} dimension arguments must be integer literals", expr.span.line_start, expr.span.col_start)
+                    return None
+                if a.value <= 0:
+                    self._error(f"{expr.callee} dimensions must be positive", expr.span.line_start, expr.span.col_start)
+                    return None
+                self._infer(a, env)
+                dims.append(a.value)
+            return ArrayType("f32", tuple(dims))
+
+        # full(value, d1, d2, ...) — f32 array filled with value
+        if expr.callee == "full":
+            if len(expr.args) < 2:
+                self._error("full expects a value and at least 1 dimension argument", expr.span.line_start, expr.span.col_start)
+                return None
+            val_type = self._infer(expr.args[0], env)
+            if val_type is None:
+                return None
+            if not isinstance(val_type, ScalarType) or val_type.base != "f32":
+                self._error("full value must be f32 scalar", expr.span.line_start, expr.span.col_start)
+                return None
+            dims_f: list[int] = []
+            for a in expr.args[1:]:
+                if not isinstance(a, IntLiteral):
+                    self._error("full dimension arguments must be integer literals", expr.span.line_start, expr.span.col_start)
+                    return None
+                if a.value <= 0:
+                    self._error("full dimensions must be positive", expr.span.line_start, expr.span.col_start)
+                    return None
+                self._infer(a, env)
+                dims_f.append(a.value)
+            return ArrayType("f32", tuple(dims_f))
+
         # conv2d(input, kernel, ...) — 2D convolution
         if expr.callee == "conv2d":
             return self._check_conv2d(expr, env)

@@ -497,3 +497,116 @@ class TestArrayIndexAD:
         """
         mlir = _compile(src)
         assert '"stablehlo.scatter"' in mlir
+
+
+# ---------- zeros / ones / full tests ----------
+
+
+class TestZerosOnesFullTypeChecker:
+    def test_zeros_1d(self):
+        _, tc, errors = _check("fn f() -> f32[3] { zeros(3) }")
+        assert not errors
+
+    def test_zeros_2d(self):
+        _, tc, errors = _check("fn f() -> f32[3, 4] { zeros(3, 4) }")
+        assert not errors
+
+    def test_zeros_3d(self):
+        _, tc, errors = _check("fn f() -> f32[2, 3, 4] { zeros(2, 3, 4) }")
+        assert not errors
+
+    def test_ones_1d(self):
+        _, tc, errors = _check("fn f() -> f32[5] { ones(5) }")
+        assert not errors
+
+    def test_ones_2d(self):
+        _, tc, errors = _check("fn f() -> f32[3, 4] { ones(3, 4) }")
+        assert not errors
+
+    def test_full_2d(self):
+        _, tc, errors = _check("fn f() -> f32[3, 4] { full(0.5, 3, 4) }")
+        assert not errors
+
+    def test_full_with_expr(self):
+        _, tc, errors = _check("fn f(x: f32) -> f32[3] { full(x, 3) }")
+        assert not errors
+
+    def test_zeros_error_no_args(self):
+        _, tc, errors = _check("fn f() -> f32[1] { zeros() }")
+        assert len(errors) >= 1
+        assert any("at least 1" in e.message for e in errors)
+
+    def test_ones_error_non_literal(self):
+        _, tc, errors = _check("fn f(n: i32) -> f32[3] { ones(n) }")
+        assert len(errors) >= 1
+        assert any("integer literal" in e.message.lower() for e in errors)
+
+    def test_zeros_error_non_positive(self):
+        _, tc, errors = _check("fn f() -> f32[1] { zeros(0) }")
+        assert len(errors) >= 1
+        assert any("positive" in e.message for e in errors)
+
+    def test_full_error_no_dims(self):
+        _, tc, errors = _check("fn f() -> f32[1] { full(1.0) }")
+        assert len(errors) >= 1
+        assert any("at least 1 dimension" in e.message for e in errors)
+
+    def test_full_error_int_value(self):
+        _, tc, errors = _check("fn f() -> f32[3] { full(1, 3) }")
+        assert len(errors) >= 1
+        assert any("f32" in e.message for e in errors)
+
+
+class TestZerosOnesFullCodegen:
+    def test_zeros_emits_broadcast(self):
+        mlir = _compile("fn f() -> f32[3, 4] { zeros(3, 4) }")
+        assert "stablehlo.constant dense<0.000000e+00>" in mlir
+        assert "stablehlo.broadcast_in_dim" in mlir
+        assert "tensor<3x4xf32>" in mlir
+
+    def test_ones_emits_broadcast(self):
+        mlir = _compile("fn f() -> f32[3, 4] { ones(3, 4) }")
+        assert "stablehlo.constant dense<1.000000e+00>" in mlir
+        assert "stablehlo.broadcast_in_dim" in mlir
+        assert "tensor<3x4xf32>" in mlir
+
+    def test_full_emits_broadcast(self):
+        mlir = _compile("fn f() -> f32[3] { full(0.5, 3) }")
+        assert "stablehlo.broadcast_in_dim" in mlir
+        assert "tensor<3xf32>" in mlir
+
+    def test_zeros_plus_ones(self):
+        mlir = _compile("fn f() -> f32[3] { zeros(3) + ones(3) }")
+        assert "stablehlo.add" in mlir
+
+
+class TestZerosOnesFullAD:
+    def test_zeros_in_grad(self):
+        src = """
+        fn f(x: f32[3]) -> f32[3] {
+            let y: f32[3] = x + zeros(3);
+            grad(sum(y), x)
+        }
+        """
+        mlir = _compile(src)
+        assert mlir
+
+    def test_ones_in_grad(self):
+        src = """
+        fn f(x: f32[3]) -> f32[3] {
+            let y: f32[3] = x * ones(3);
+            grad(sum(y), x)
+        }
+        """
+        mlir = _compile(src)
+        assert mlir
+
+    def test_full_in_grad(self):
+        src = """
+        fn f(x: f32[3]) -> f32[3] {
+            let y: f32[3] = x * full(2.0, 3);
+            grad(sum(y), x)
+        }
+        """
+        mlir = _compile(src)
+        assert mlir
