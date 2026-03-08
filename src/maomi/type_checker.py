@@ -203,20 +203,14 @@ def _base_of(t: MaomiType) -> str:
     return t.base
 
 
-# -- Built-in functions --
+# -- Built-in functions (derived from central registry) --
 
-def _make_builtins() -> dict[str, FnSignature]:
-    builtins = {}
-    # Elementwise: scalar -> scalar (also works on arrays via type matching)
-    for name in ("exp", "log", "tanh", "sqrt", "abs", "cos", "sin"):
-        builtins[name] = FnSignature(["x"], [ScalarType("f32")], F32)
-    return builtins
+from .builtins import ELEMENTWISE as _EW_REGISTRY, COMPLEX as _CX_REGISTRY, ALL_NAMES as _ALL_BUILTIN_NAMES
 
-
-BUILTINS = _make_builtins()
-_ELEMENTWISE_BUILTINS = {"exp", "log", "tanh", "sqrt", "abs", "cos", "sin"}
-_CALLBACK_BUILTINS = {"callback"}
-_RNG_BUILTINS = {"random.key", "random.split", "random.uniform", "random.normal"}
+BUILTINS = {name: FnSignature(["x"], [ScalarType("f32")], F32) for name in _EW_REGISTRY}
+_ELEMENTWISE_BUILTINS = set(_EW_REGISTRY)
+_CALLBACK_BUILTINS = {n for n, b in _CX_REGISTRY.items() if b.category == "callback"}
+_RNG_BUILTINS = {n for n, b in _CX_REGISTRY.items() if b.category == "rng"}
 
 # Key type alias — compiler-level alias for i32[4]
 KEY_TYPE = ArrayType("i32", (4,))

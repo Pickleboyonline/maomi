@@ -187,6 +187,33 @@ class TestBuiltins:
     def test_exp(self):
         check_ok("fn f(x: f32) -> f32 { exp(x) }")
 
+    def test_sigmoid(self):
+        check_ok("fn f(x: f32) -> f32 { sigmoid(x) }")
+
+    def test_sigmoid_array(self):
+        check_ok("fn f(x: f32[4]) -> f32[4] { sigmoid(x) }")
+
+    def test_neg(self):
+        check_ok("fn f(x: f32) -> f32 { neg(x) }")
+
+    def test_rsqrt(self):
+        check_ok("fn f(x: f32) -> f32 { rsqrt(x) }")
+
+    def test_log2(self):
+        check_ok("fn f(x: f32) -> f32 { log2(x) }")
+
+    def test_floor(self):
+        check_ok("fn f(x: f32) -> f32 { floor(x) }")
+
+    def test_ceil(self):
+        check_ok("fn f(x: f32) -> f32 { ceil(x) }")
+
+    def test_sign(self):
+        check_ok("fn f(x: f32) -> f32 { sign(x) }")
+
+    def test_reciprocal(self):
+        check_ok("fn f(x: f32) -> f32 { reciprocal(x) }")
+
 
 class TestScan:
     def test_basic_scan(self):

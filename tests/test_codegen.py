@@ -99,6 +99,46 @@ class TestFunctionCalls:
         out = codegen("fn f(x: f32) -> f32 { tanh(x) }")
         assert "stablehlo.tanh" in out
 
+    def test_builtin_sigmoid(self):
+        out = codegen("fn f(x: f32) -> f32 { sigmoid(x) }")
+        assert "stablehlo.negate" in out
+        assert "stablehlo.exponential" in out
+        assert "stablehlo.divide" in out
+
+    def test_builtin_neg(self):
+        out = codegen("fn f(x: f32) -> f32 { neg(x) }")
+        assert "stablehlo.negate" in out
+
+    def test_builtin_rsqrt(self):
+        out = codegen("fn f(x: f32) -> f32 { rsqrt(x) }")
+        assert "stablehlo.rsqrt" in out
+
+    def test_builtin_log2(self):
+        out = codegen("fn f(x: f32) -> f32 { log2(x) }")
+        assert "stablehlo.log" in out
+        assert "stablehlo.divide" in out
+
+    def test_builtin_floor(self):
+        out = codegen("fn f(x: f32) -> f32 { floor(x) }")
+        assert "stablehlo.floor" in out
+
+    def test_builtin_ceil(self):
+        out = codegen("fn f(x: f32) -> f32 { ceil(x) }")
+        assert "stablehlo.ceil" in out
+
+    def test_builtin_sign(self):
+        out = codegen("fn f(x: f32) -> f32 { sign(x) }")
+        assert "stablehlo.sign" in out
+
+    def test_builtin_reciprocal(self):
+        out = codegen("fn f(x: f32) -> f32 { reciprocal(x) }")
+        assert "stablehlo.divide" in out
+
+    def test_builtin_sigmoid_array(self):
+        out = codegen("fn f(x: f32[4]) -> f32[4] { sigmoid(x) }")
+        assert "stablehlo.negate" in out
+        assert "tensor<4xf32>" in out
+
 
 class TestReductions:
     def test_mean(self):
