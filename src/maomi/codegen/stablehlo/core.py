@@ -639,6 +639,8 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
             return self._gen_max_pool(expr, env)
         if expr.callee == "avg_pool":
             return self._gen_avg_pool(expr, env)
+        if expr.callee in ("maximum", "minimum", "pow"):
+            return self._gen_two_arg_elementwise(expr, env)
 
         # User-defined function call
         if self._batch_depth > 0:
@@ -663,6 +665,28 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
         mlir_t = _mlir_type(result_type)
         var = self._fresh()
         self._emit(f"{var} = {op} {arg} : {mlir_t}")
+        return var
+
+    _TWO_ARG_EW_OPS = {
+        "maximum": "stablehlo.maximum",
+        "minimum": "stablehlo.minimum",
+        "pow": "stablehlo.power",
+    }
+
+    def _gen_two_arg_elementwise(self, expr: CallExpr, env: dict[str, str]) -> str:
+        """Emit stablehlo for two-arg elementwise ops: maximum, minimum, pow."""
+        op = self._TWO_ARG_EW_OPS[expr.callee]
+        x = self._gen_expr(expr.args[0], env)
+        y = self._gen_expr(expr.args[1], env)
+        x_type = self._type_of(expr.args[0])
+        y_type = self._type_of(expr.args[1])
+        result_type = self._type_of(expr)
+        # Broadcast if needed
+        x = self._maybe_broadcast(x, x_type, result_type)
+        y = self._maybe_broadcast(y, y_type, result_type)
+        mlir_t = _mlir_type(result_type)
+        var = self._fresh()
+        self._emit(f"{var} = {op} {x}, {y} : {mlir_t}")
         return var
 
     def _gen_struct_elementwise(self, op: str, arg_ssa: str, stype: StructType) -> str:

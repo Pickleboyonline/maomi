@@ -556,3 +556,74 @@ class TestMLPGrad:
         np.testing.assert_allclose(p.b1, np.array(jb1), atol=1e-5)
         np.testing.assert_allclose(p.w2, np.array(jw2), atol=1e-5)
         np.testing.assert_allclose(p.b2, np.array(jb2), atol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# Two-Arg Elementwise
+# ---------------------------------------------------------------------------
+
+class TestTwoArgElementwiseGrad:
+    def test_maximum_wrt_x(self):
+        x = np.array([1.0, 3.0, 2.0, 5.0], dtype=np.float32)
+        y = np.array([2.0, 1.0, 4.0, 3.0], dtype=np.float32)
+        _check(
+            "fn f(x: f32[4], y: f32[4]) -> f32 { sum(maximum(x, y)) }\n"
+            "fn grad_f(x: f32[4], y: f32[4]) -> f32[4] { grad(f(x, y), x) }",
+            [x, y],
+            jax.grad(lambda x, y: jnp.sum(jnp.maximum(x, y))),
+            [jnp.array(x), jnp.array(y)],
+        )
+
+    def test_maximum_wrt_y(self):
+        x = np.array([1.0, 3.0, 2.0, 5.0], dtype=np.float32)
+        y = np.array([2.0, 1.0, 4.0, 3.0], dtype=np.float32)
+        _check(
+            "fn f(x: f32[4], y: f32[4]) -> f32 { sum(maximum(x, y)) }\n"
+            "fn grad_f(x: f32[4], y: f32[4]) -> f32[4] { grad(f(x, y), y) }",
+            [x, y],
+            lambda x, y: jax.grad(lambda y, x: jnp.sum(jnp.maximum(x, y)))(y, x),
+            [jnp.array(x), jnp.array(y)],
+        )
+
+    def test_minimum_wrt_x(self):
+        x = np.array([1.0, 3.0, 2.0, 5.0], dtype=np.float32)
+        y = np.array([2.0, 1.0, 4.0, 3.0], dtype=np.float32)
+        _check(
+            "fn f(x: f32[4], y: f32[4]) -> f32 { sum(minimum(x, y)) }\n"
+            "fn grad_f(x: f32[4], y: f32[4]) -> f32[4] { grad(f(x, y), x) }",
+            [x, y],
+            jax.grad(lambda x, y: jnp.sum(jnp.minimum(x, y))),
+            [jnp.array(x), jnp.array(y)],
+        )
+
+    def test_pow_wrt_x(self):
+        x = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
+        y = np.array([2.0, 2.0, 2.0, 2.0], dtype=np.float32)
+        _check(
+            "fn f(x: f32[4], y: f32[4]) -> f32 { sum(pow(x, y)) }\n"
+            "fn grad_f(x: f32[4], y: f32[4]) -> f32[4] { grad(f(x, y), x) }",
+            [x, y],
+            jax.grad(lambda x, y: jnp.sum(jnp.power(x, y))),
+            [jnp.array(x), jnp.array(y)],
+        )
+
+    def test_pow_scalar_exponent(self):
+        x = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
+        _check(
+            "fn f(x: f32[4]) -> f32 { sum(pow(x, 2.0)) }\n"
+            "fn grad_f(x: f32[4]) -> f32[4] { grad(f(x), x) }",
+            [x],
+            jax.grad(lambda x: jnp.sum(jnp.power(x, 2.0))),
+            [jnp.array(x)],
+        )
+
+    def test_pow_wrt_y(self):
+        x = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
+        y = np.array([2.0, 3.0, 1.0, 0.5], dtype=np.float32)
+        _check(
+            "fn f(x: f32[4], y: f32[4]) -> f32 { sum(pow(x, y)) }\n"
+            "fn grad_f(x: f32[4], y: f32[4]) -> f32[4] { grad(f(x, y), y) }",
+            [x, y],
+            lambda x, y: jax.grad(lambda y, x: jnp.sum(jnp.power(x, y)))(y, x),
+            [jnp.array(x), jnp.array(y)],
+        )

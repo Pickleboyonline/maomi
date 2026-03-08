@@ -705,3 +705,37 @@ class TestStringCallbackAD:
             }
         """)
         assert "func.func @f" in mlir
+
+
+class TestTwoArgElementwiseAD:
+    def test_maximum_compiles(self):
+        mlir = ad_codegen("""
+            fn f(x: f32[4], y: f32[4]) -> f32[4] {
+                grad(sum(maximum(x, y)), x)
+            }
+        """)
+        assert "func.func @f" in mlir
+
+    def test_minimum_compiles(self):
+        mlir = ad_codegen("""
+            fn f(x: f32[4], y: f32[4]) -> f32[4] {
+                grad(sum(minimum(x, y)), x)
+            }
+        """)
+        assert "func.func @f" in mlir
+
+    def test_pow_compiles(self):
+        mlir = ad_codegen("""
+            fn f(x: f32[4], y: f32[4]) -> f32[4] {
+                grad(sum(pow(x, y)), x)
+            }
+        """)
+        assert "func.func @f" in mlir
+
+    def test_pow_scalar_exponent_compiles(self):
+        mlir = ad_codegen("""
+            fn f(x: f32[4]) -> f32[4] {
+                grad(sum(pow(x, 2.0)), x)
+            }
+        """)
+        assert "func.func @f" in mlir

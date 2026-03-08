@@ -571,3 +571,41 @@ class TestStringLiteral:
             'fn g(x: f32) -> f32 { x }\nfn f() -> f32 { g("hello") }',
             "string literals can only be used as callback arguments",
         )
+
+
+class TestTwoArgElementwise:
+    def test_maximum_scalars(self):
+        check_ok("fn f(x: f32, y: f32) -> f32 { maximum(x, y) }")
+
+    def test_maximum_arrays(self):
+        check_ok("fn f(x: f32[4], y: f32[4]) -> f32[4] { maximum(x, y) }")
+
+    def test_maximum_broadcast(self):
+        check_ok("fn f(x: f32[4], y: f32) -> f32[4] { maximum(x, y) }")
+
+    def test_minimum_scalars(self):
+        check_ok("fn f(x: f32, y: f32) -> f32 { minimum(x, y) }")
+
+    def test_minimum_arrays(self):
+        check_ok("fn f(x: f32[4], y: f32[4]) -> f32[4] { minimum(x, y) }")
+
+    def test_pow_scalars(self):
+        check_ok("fn f(x: f32, y: f32) -> f32 { pow(x, y) }")
+
+    def test_pow_arrays(self):
+        check_ok("fn f(x: f32[4], y: f32[4]) -> f32[4] { pow(x, y) }")
+
+    def test_pow_broadcast(self):
+        check_ok("fn f(x: f32[4], y: f32) -> f32[4] { pow(x, y) }")
+
+    def test_maximum_wrong_arity(self):
+        check_err("fn f(x: f32) -> f32 { maximum(x) }", "expects")
+
+    def test_minimum_wrong_arity(self):
+        check_err("fn f(x: f32) -> f32 { minimum(x, x, x) }", "expects")
+
+    def test_pow_int_rejected(self):
+        check_err("fn f(x: i32, y: i32) -> i32 { pow(x, y) }", "float")
+
+    def test_maximum_shape_mismatch(self):
+        check_err("fn f(x: f32[3], y: f32[4]) -> f32[4] { maximum(x, y) }", "compatible shapes")

@@ -638,3 +638,26 @@ class TestTransposeTypeErrors:
         errors = tc.check(prog)
         assert errors
         assert "out of range" in errors[0].message
+
+
+class TestTwoArgElementwise:
+    def test_maximum(self):
+        out = codegen("fn f(x: f32, y: f32) -> f32 { maximum(x, y) }")
+        assert "stablehlo.maximum" in out
+
+    def test_minimum(self):
+        out = codegen("fn f(x: f32, y: f32) -> f32 { minimum(x, y) }")
+        assert "stablehlo.minimum" in out
+
+    def test_pow(self):
+        out = codegen("fn f(x: f32, y: f32) -> f32 { pow(x, y) }")
+        assert "stablehlo.power" in out
+
+    def test_maximum_arrays(self):
+        out = codegen("fn f(x: f32[4], y: f32[4]) -> f32[4] { maximum(x, y) }")
+        assert "stablehlo.maximum" in out
+
+    def test_pow_broadcast(self):
+        out = codegen("fn f(x: f32[4], y: f32) -> f32[4] { pow(x, y) }")
+        assert "stablehlo.power" in out
+        assert "broadcast_in_dim" in out
