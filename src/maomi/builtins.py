@@ -480,6 +480,23 @@ COMPLEX: dict[str, ComplexBuiltin] = {
         "Host callback (no-op in compiled code). Useful for debugging.",
         ([], [], "void"),
     ),
+
+    # Two-arg elementwise
+    "maximum": ComplexBuiltin(
+        "maximum", "two_arg_elementwise", "has_rule",
+        "Element-wise maximum of two values.",
+        (["x", "y"], ["f32", "f32"], "f32"),
+    ),
+    "minimum": ComplexBuiltin(
+        "minimum", "two_arg_elementwise", "has_rule",
+        "Element-wise minimum of two values.",
+        (["x", "y"], ["f32", "f32"], "f32"),
+    ),
+    "pow": ComplexBuiltin(
+        "pow", "two_arg_elementwise", "has_rule",
+        "Element-wise power: x raised to the power y.",
+        (["x", "y"], ["f32", "f32"], "f32"),
+    ),
 }
 
 # ---------------------------------------------------------------------------

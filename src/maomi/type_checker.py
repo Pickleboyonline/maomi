@@ -1308,6 +1308,10 @@ class TypeChecker:
         if expr.callee in ("zeros_like", "ones_like"):
             return self._check_like(expr, env)
 
+        # maximum(x, y), minimum(x, y), pow(x, y) — two-arg elementwise
+        if expr.callee in ("maximum", "minimum", "pow"):
+            return self._check_two_arg_elementwise(expr, env)
+
         sig = self.fn_table.get(expr.callee)
         if sig is None:
             # Check for generic (wildcard) function
@@ -1566,6 +1570,47 @@ class TypeChecker:
             return arg_type
         self._error(f"{expr.callee} requires a float scalar or array, got {arg_type}", expr.span.line_start, expr.span.col_start)
         return None
+
+    def _check_two_arg_elementwise(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
+        """Check maximum(x, y), minimum(x, y), pow(x, y) — two-arg elementwise builtins."""
+        if len(expr.args) != 2:
+            self._error(
+                f"{expr.callee} expects exactly 2 arguments",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        x_type = self._infer(expr.args[0], env)
+        y_type = self._infer(expr.args[1], env)
+        if x_type is None or y_type is None:
+            return None
+
+        # Both must be float types
+        x_base = _base_of(x_type)
+        y_base = _base_of(y_type)
+        if x_base not in ("f32", "f64"):
+            self._error(
+                f"{expr.callee} arguments must be float, got {x_type}",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+        if y_base not in ("f32", "f64"):
+            self._error(
+                f"{expr.callee} arguments must be float, got {y_type}",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        # Broadcast types
+        result_type = self._broadcast(x_type, y_type)
+        if result_type is None:
+            self._error(
+                f"{expr.callee} arguments must have compatible shapes, got {x_type} and {y_type}",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        return result_type
 
     def _check_transpose(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
         if len(expr.args) < 1:

@@ -278,3 +278,61 @@ class SimpleGradRulesMixin:
                 self._accumulate(adjoints, arg_name, slice_expr)
 
             offset += size
+
+    def _backprop_two_arg_elementwise(self, callee: str, args: list[Expr], adj: Expr,
+                                       adjoints: dict[str, Expr], var_map: dict[int, str],
+                                       node: Expr):
+        """Backprop through maximum(x, y), minimum(x, y), pow(x, y)."""
+        x, y = args[0], args[1]
+        x_name = var_map[id(x)]
+        y_name = var_map[id(y)]
+        x_type = self._type_of(x)
+        y_type = self._type_of(y)
+        x_ref = self._make_ref(x_name, x_type)
+        y_ref = self._make_ref(y_name, y_type)
+        result_type = self._type_of(node)
+
+        if callee in ("maximum", "minimum"):
+            # maximum: grad_x = where(x >= y, adj, 0), grad_y = where(y > x, adj, 0)
+            # minimum: grad_x = where(x <= y, adj, 0), grad_y = where(y < x, adj, 0)
+            x_op, y_op = (">=", ">") if callee == "maximum" else ("<=", "<")
+            cmp_x = self._make_binop(x_op, x_ref, y_ref)
+            cmp_y = self._make_binop(y_op, y_ref, x_ref)
+
+            if isinstance(result_type, ArrayType):
+                bool_type = ArrayType("bool", result_type.dims)
+            else:
+                bool_type = ScalarType("bool")
+            self.type_map[id(cmp_x)] = bool_type
+            self.type_map[id(cmp_y)] = bool_type
+
+            zero = self._make_float(0.0)
+            if isinstance(result_type, ArrayType):
+                zero_bc = _BroadcastExpr(zero, tuple(result_type.dims), _DUMMY_SPAN)
+                self.type_map[id(zero_bc)] = result_type
+            else:
+                zero_bc = zero
+
+            grad_x = self._make_call("where", [cmp_x, adj, zero_bc])
+            self.type_map[id(grad_x)] = result_type
+            grad_y = self._make_call("where", [cmp_y, adj, zero_bc])
+            self.type_map[id(grad_y)] = result_type
+
+            self._accumulate(adjoints, x_name, self._reduce_broadcast(grad_x, x_type))
+            self._accumulate(adjoints, y_name, self._reduce_broadcast(grad_y, y_type))
+
+        elif callee == "pow":
+            # grad_x = adj * y * pow(x, y-1)
+            # grad_y = adj * pow(x, y) * log(x)
+            y_minus_1 = self._make_binop("-", y_ref, self._make_float(1.0))
+            pow_x_ym1 = self._make_call("pow", [x_ref, y_minus_1])
+            self.type_map[id(pow_x_ym1)] = result_type
+            grad_x = self._make_binop("*", adj, self._make_binop("*", y_ref, pow_x_ym1))
+
+            pow_xy = self._make_call("pow", [x_ref, y_ref])
+            self.type_map[id(pow_xy)] = result_type
+            log_x = self._make_call("log", [x_ref])
+            grad_y = self._make_binop("*", adj, self._make_binop("*", pow_xy, log_x))
+
+            self._accumulate(adjoints, x_name, self._reduce_broadcast(grad_x, x_type))
+            self._accumulate(adjoints, y_name, self._reduce_broadcast(grad_y, y_type))
