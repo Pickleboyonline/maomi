@@ -45,6 +45,7 @@ _CONV_POOL_BUILTINS = {n for n, b in _CX_REGISTRY.items() if b.category == "conv
 _RNG_BUILTINS = {n for n, b in _CX_REGISTRY.items() if b.category == "rng"}
 _STOP_GRAD_BUILTINS = {n for n, b in _CX_REGISTRY.items() if b.category == "stop_grad"}
 _WHERE_BUILTINS = {n for n, b in _CX_REGISTRY.items() if b.category == "where"}
+_CLIP_BUILTINS = {n for n, b in _CX_REGISTRY.items() if b.category == "clip"}
 _ARGMAX_BUILTINS = {n for n, b in _CX_REGISTRY.items() if b.category == "argmax"}
 _TWO_ARG_EW_BUILTINS = {n for n, b in _CX_REGISTRY.items() if b.category == "two_arg_elementwise"}
 _MAX_GRAD_DEPTH = 10

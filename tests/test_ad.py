@@ -739,3 +739,21 @@ class TestTwoArgElementwiseAD:
             }
         """)
         assert "func.func @f" in mlir
+class TestClipAD:
+    def test_clip_grad(self):
+        """Gradient through clip should use stablehlo.select (via where)."""
+        out = ad_codegen("""
+            fn f(x: f32[4]) -> f32[4] {
+                grad(sum(clip(x, 0.0, 1.0)), x)
+            }
+        """)
+        assert "stablehlo.select" in out
+
+    def test_clip_grad_scalar(self):
+        """Gradient through clip with scalar input."""
+        out = ad_codegen("""
+            fn f(x: f32) -> f32 {
+                grad(clip(x, 0.0, 1.0), x)
+            }
+        """)
+        assert "stablehlo.select" in out

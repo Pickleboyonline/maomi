@@ -435,6 +435,13 @@ COMPLEX: dict[str, ComplexBuiltin] = {
         (["cond", "x", "y"], ["bool", "f32", "f32"], "f32"),
     ),
 
+    # Clamp
+    "clip": ComplexBuiltin(
+        "clip", "clip", "has_rule",
+        "Clamp values to range [lo, hi]. Element-wise: max(lo, min(hi, x)).",
+        (["x", "lo", "hi"], ["f32", "f32", "f32"], "f32"),
+    ),
+
     # RNG
     "random.key": ComplexBuiltin(
         "random.key", "rng", "zero_grad",
