@@ -546,6 +546,21 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
         )
         return var
 
+    def _gen_clip(self, expr: CallExpr, env: dict[str, str]) -> str:
+        x = self._gen_expr(expr.args[0], env)
+        lo = self._gen_expr(expr.args[1], env)
+        hi = self._gen_expr(expr.args[2], env)
+        result_type = self._type_of(expr)
+        # Broadcast all to result type
+        x = self._maybe_broadcast(x, self._type_of(expr.args[0]), result_type)
+        lo = self._maybe_broadcast(lo, self._type_of(expr.args[1]), result_type)
+        hi = self._maybe_broadcast(hi, self._type_of(expr.args[2]), result_type)
+        mlir_t = _mlir_type(result_type)
+        var = self._fresh()
+        # stablehlo.clamp takes (min, operand, max) order
+        self._emit(f"{var} = stablehlo.clamp {lo}, {x}, {hi} : {mlir_t}")
+        return var
+
     _CALLBACK_BUILTINS = {"callback"}
     _RNG_BUILTINS = {"random.key", "random.split", "random.uniform", "random.normal"}
 
@@ -633,6 +648,8 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
             return self._gen_expr(expr.args[0], env)
         if expr.callee == "where":
             return self._gen_where(expr, env)
+        if expr.callee == "clip":
+            return self._gen_clip(expr, env)
         if expr.callee == "conv2d":
             return self._gen_conv2d(expr, env)
         if expr.callee == "max_pool":

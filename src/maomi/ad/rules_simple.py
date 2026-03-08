@@ -201,6 +201,107 @@ class SimpleGradRulesMixin:
             self.type_map[id(adj_y)] = self._type_of(y_arg)
             self._accumulate(adjoints, y_name, adj_y)
 
+    def _backprop_clip(self, args: list[Expr], adj: Expr,
+                        adjoints: dict[str, Expr], var_map: dict[int, str],
+                        node: Expr):
+        """Backprop through clip(x, lo, hi).
+
+        grad_x = adj * (lo < x && x < hi)  — gradient flows only in the unclamped region
+        grad_lo = adj * (x <= lo)           — gradient flows when clamped to lo
+        grad_hi = adj * (x >= hi)           — gradient flows when clamped to hi
+        """
+        x_arg = args[0]
+        lo_arg = args[1]
+        hi_arg = args[2]
+
+        x_type = self._type_of(x_arg)
+        zero = self._make_float(0.0)
+
+        # Refs for x, lo, hi (from tape)
+        if id(x_arg) in var_map:
+            x_name = var_map[id(x_arg)]
+            x_ref = self._make_ref(x_name, x_type)
+        else:
+            x_ref = x_arg
+
+        if id(lo_arg) in var_map:
+            lo_name = var_map[id(lo_arg)]
+            lo_ref = self._make_ref(lo_name, self._type_of(lo_arg))
+        else:
+            lo_ref = lo_arg
+
+        if id(hi_arg) in var_map:
+            hi_name = var_map[id(hi_arg)]
+            hi_ref = self._make_ref(hi_name, self._type_of(hi_arg))
+        else:
+            hi_ref = hi_arg
+
+        # Build bool comparisons manually (BinOp + type_map)
+        result_type = self._type_of(node) or x_type
+        if isinstance(result_type, ArrayType):
+            bool_type = ArrayType("bool", result_type.dims)
+        else:
+            bool_type = ScalarType("bool")
+
+        # cmp_gt_lo: x > lo
+        cmp_gt_lo = BinOp(">", x_ref, lo_ref, _DUMMY_SPAN)
+        self.type_map[id(cmp_gt_lo)] = bool_type
+
+        # cmp_lt_hi: x < hi
+        cmp_lt_hi = BinOp("<", x_ref, hi_ref, _DUMMY_SPAN)
+        self.type_map[id(cmp_lt_hi)] = bool_type
+
+        # grad_x = where(x > lo, where(x < hi, adj, 0.0), 0.0)
+        if id(x_arg) in var_map:
+            if isinstance(result_type, ArrayType):
+                zero_bc = _BroadcastExpr(zero, tuple(result_type.dims), _DUMMY_SPAN)
+                self.type_map[id(zero_bc)] = result_type
+                inner = CallExpr("where", [cmp_lt_hi, adj, zero_bc], _DUMMY_SPAN)
+                self.type_map[id(inner)] = result_type
+                zero_bc2 = _BroadcastExpr(self._make_float(0.0), tuple(result_type.dims), _DUMMY_SPAN)
+                self.type_map[id(zero_bc2)] = result_type
+                outer = CallExpr("where", [cmp_gt_lo, inner, zero_bc2], _DUMMY_SPAN)
+            else:
+                inner = CallExpr("where", [cmp_lt_hi, adj, zero], _DUMMY_SPAN)
+                self.type_map[id(inner)] = result_type
+                outer = CallExpr("where", [cmp_gt_lo, inner, self._make_float(0.0)], _DUMMY_SPAN)
+            self.type_map[id(outer)] = result_type
+            self._accumulate(adjoints, var_map[id(x_arg)], outer)
+
+        # grad_lo = where(x <= lo, adj, 0.0)
+        if id(lo_arg) in var_map:
+            cmp_le_lo = BinOp("<=", x_ref, lo_ref, _DUMMY_SPAN)
+            self.type_map[id(cmp_le_lo)] = bool_type
+            lo_type = self._type_of(lo_arg)
+            if isinstance(result_type, ArrayType):
+                zero_bc = _BroadcastExpr(self._make_float(0.0), tuple(result_type.dims), _DUMMY_SPAN)
+                self.type_map[id(zero_bc)] = result_type
+                grad_lo = CallExpr("where", [cmp_le_lo, adj, zero_bc], _DUMMY_SPAN)
+            else:
+                grad_lo = CallExpr("where", [cmp_le_lo, adj, self._make_float(0.0)], _DUMMY_SPAN)
+            self.type_map[id(grad_lo)] = result_type
+            # Reduce broadcast if lo had smaller shape
+            if lo_type and lo_type != result_type:
+                grad_lo = self._reduce_broadcast(grad_lo, lo_type)
+            self._accumulate(adjoints, var_map[id(lo_arg)], grad_lo)
+
+        # grad_hi = where(x >= hi, adj, 0.0)
+        if id(hi_arg) in var_map:
+            cmp_ge_hi = BinOp(">=", x_ref, hi_ref, _DUMMY_SPAN)
+            self.type_map[id(cmp_ge_hi)] = bool_type
+            hi_type = self._type_of(hi_arg)
+            if isinstance(result_type, ArrayType):
+                zero_bc = _BroadcastExpr(self._make_float(0.0), tuple(result_type.dims), _DUMMY_SPAN)
+                self.type_map[id(zero_bc)] = result_type
+                grad_hi = CallExpr("where", [cmp_ge_hi, adj, zero_bc], _DUMMY_SPAN)
+            else:
+                grad_hi = CallExpr("where", [cmp_ge_hi, adj, self._make_float(0.0)], _DUMMY_SPAN)
+            self.type_map[id(grad_hi)] = result_type
+            # Reduce broadcast if hi had smaller shape
+            if hi_type and hi_type != result_type:
+                grad_hi = self._reduce_broadcast(grad_hi, hi_type)
+            self._accumulate(adjoints, var_map[id(hi_arg)], grad_hi)
+
     def _backprop_reshape(self, args: list[Expr], adj: Expr,
                            adjoints: dict[str, Expr], var_map: dict[int, str]):
         """Backprop through reshape: reshape adjoint back to original shape."""

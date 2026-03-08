@@ -556,3 +556,39 @@ class TestMLPGrad:
         np.testing.assert_allclose(p.b1, np.array(jb1), atol=1e-5)
         np.testing.assert_allclose(p.w2, np.array(jw2), atol=1e-5)
         np.testing.assert_allclose(p.b2, np.array(jb2), atol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# Clip
+# ---------------------------------------------------------------------------
+
+class TestClipGrad:
+    def test_clip_basic(self):
+        x = np.array([-1.0, 0.5, 1.5, 3.0], dtype=np.float32)
+        _check(
+            "fn f(x: f32[4]) -> f32 { sum(clip(x, 0.0, 2.0)) }\n"
+            "fn grad_f(x: f32[4]) -> f32[4] { grad(f(x), x) }",
+            [x],
+            jax.grad(lambda x: jnp.sum(jnp.clip(x, 0.0, 2.0))),
+            [jnp.array(x)],
+        )
+
+    def test_clip_all_inside(self):
+        x = np.array([0.5, 1.0, 1.5], dtype=np.float32)
+        _check(
+            "fn f(x: f32[3]) -> f32 { sum(clip(x, 0.0, 2.0)) }\n"
+            "fn grad_f(x: f32[3]) -> f32[3] { grad(f(x), x) }",
+            [x],
+            jax.grad(lambda x: jnp.sum(jnp.clip(x, 0.0, 2.0))),
+            [jnp.array(x)],
+        )
+
+    def test_clip_scalar(self):
+        x = np.float32(0.5)
+        _check(
+            "fn f(x: f32) -> f32 { clip(x, 0.0, 1.0) }\n"
+            "fn grad_f(x: f32) -> f32 { grad(f(x), x) }",
+            [x],
+            jax.grad(lambda x: jnp.clip(x, 0.0, 1.0)),
+            [jnp.float32(x)],
+        )

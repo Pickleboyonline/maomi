@@ -1296,6 +1296,10 @@ class TypeChecker:
         if expr.callee == "where":
             return self._check_where(expr, env)
 
+        # clip(x, lo, hi) — clamp values to range
+        if expr.callee == "clip":
+            return self._check_clip(expr, env)
+
         # transpose(matrix) — swap dims of a 2D array
         if expr.callee == "transpose":
             return self._check_transpose(expr, env)
@@ -1524,6 +1528,47 @@ class TypeChecker:
         if result_type is None:
             self._error(
                 f"where branches must be compatible types, got {x_type} and {y_type}",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        return result_type
+
+    def _check_clip(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
+        if len(expr.args) != 3:
+            self._error(
+                "clip expects exactly 3 arguments: clip(x, lo, hi)",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+        x_type = self._infer(expr.args[0], env)
+        lo_type = self._infer(expr.args[1], env)
+        hi_type = self._infer(expr.args[2], env)
+        if x_type is None or lo_type is None or hi_type is None:
+            return None
+
+        # All three must be float
+        for arg_type, name in [(x_type, "x"), (lo_type, "lo"), (hi_type, "hi")]:
+            base = _base_of(arg_type) if arg_type else None
+            if base not in ("f32", "f64"):
+                self._error(
+                    f"clip argument '{name}' must be float type, got {arg_type}",
+                    expr.span.line_start, expr.span.col_start,
+                )
+                return None
+
+        # Broadcast all three together
+        result_type = self._broadcast(x_type, lo_type)
+        if result_type is None:
+            self._error(
+                f"clip arguments must be broadcastable, got {x_type} and {lo_type}",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+        result_type = self._broadcast(result_type, hi_type)
+        if result_type is None:
+            self._error(
+                f"clip arguments must be broadcastable, got incompatible shapes",
                 expr.span.line_start, expr.span.col_start,
             )
             return None

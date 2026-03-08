@@ -571,3 +571,23 @@ class TestStringLiteral:
             'fn g(x: f32) -> f32 { x }\nfn f() -> f32 { g("hello") }',
             "string literals can only be used as callback arguments",
         )
+
+
+class TestClip:
+    def test_clip_scalars(self):
+        check_ok("fn f(x: f32) -> f32 { clip(x, 0.0, 1.0) }")
+
+    def test_clip_array(self):
+        check_ok("fn f(x: f32[4]) -> f32[4] { clip(x, 0.0, 1.0) }")
+
+    def test_clip_all_arrays(self):
+        check_ok("fn f(x: f32[4], lo: f32[4], hi: f32[4]) -> f32[4] { clip(x, lo, hi) }")
+
+    def test_clip_broadcast_scalar_bounds(self):
+        check_ok("fn f(x: f32[4], lo: f32, hi: f32) -> f32[4] { clip(x, lo, hi) }")
+
+    def test_clip_wrong_arity(self):
+        check_err("fn f(x: f32) -> f32 { clip(x, 0.0) }", "expects")
+
+    def test_clip_wrong_type(self):
+        check_err("fn f(x: i32) -> i32 { clip(x, 0, 1) }", "float")

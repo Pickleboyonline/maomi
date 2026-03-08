@@ -638,3 +638,18 @@ class TestTransposeTypeErrors:
         errors = tc.check(prog)
         assert errors
         assert "out of range" in errors[0].message
+
+
+class TestClipCodegen:
+    def test_clip_scalar(self):
+        out = codegen("fn f(x: f32) -> f32 { clip(x, 0.0, 1.0) }")
+        assert "stablehlo.clamp" in out
+
+    def test_clip_array(self):
+        out = codegen("fn f(x: f32[4]) -> f32[4] { clip(x, 0.0, 1.0) }")
+        assert "stablehlo.clamp" in out
+
+    def test_clip_broadcast(self):
+        out = codegen("fn f(x: f32[4], lo: f32, hi: f32) -> f32[4] { clip(x, lo, hi) }")
+        assert "stablehlo.clamp" in out
+        assert "broadcast_in_dim" in out  # scalar lo/hi broadcast to array
