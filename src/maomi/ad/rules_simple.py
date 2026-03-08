@@ -483,6 +483,21 @@ class SimpleGradRulesMixin:
 
             self._accumulate(adjoints, x_name, self._reduce_broadcast(grad_x, x_type))
             self._accumulate(adjoints, y_name, self._reduce_broadcast(grad_y, y_type))
+
+        elif callee == "atan2":
+            # atan2(y, x): d/dy = x / (x^2 + y^2), d/dx = -y / (x^2 + y^2)
+            # JAX: d/d(arg1) = arg2 / (arg1^2 + arg2^2)
+            #      d/d(arg2) = -arg1 / (arg1^2 + arg2^2)
+            x_sq = self._make_binop("*", x_ref, x_ref)
+            y_sq = self._make_binop("*", y_ref, y_ref)
+            denom = self._make_binop("+", x_sq, y_sq)
+
+            grad_x = self._make_binop("*", adj, self._make_binop("/", y_ref, denom))
+            neg_x_ref = self._make_unary("-", x_ref)
+            grad_y = self._make_binop("*", adj, self._make_binop("/", neg_x_ref, denom))
+
+            self._accumulate(adjoints, x_name, self._reduce_broadcast(grad_x, x_type))
+            self._accumulate(adjoints, y_name, self._reduce_broadcast(grad_y, y_type))
     def _backprop_stack(self, args: list[Expr], adj: Expr,
                          adjoints: dict[str, Expr], var_map: dict[int, str]):
         """Backprop through stack: slice adj along the stack axis, reshape to remove the extra dim."""

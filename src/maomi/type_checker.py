@@ -1010,6 +1010,11 @@ class TypeChecker:
             return t
         if op == "-" and isinstance(t, StructType) and _struct_has_numeric_leaves(t):
             return t
+        if op == "not":
+            if t == BOOL or (isinstance(t, ArrayType) and t.base == "bool"):
+                return t
+            self._error(f"'not' requires bool operand, got {t}", expr.span.line_start, expr.span.col_start)
+            return None
         self._error(f"invalid unary {op} on type {t}", expr.span.line_start, expr.span.col_start)
         return None
 
@@ -1021,6 +1026,24 @@ class TypeChecker:
 
         if op == "@":
             return self._check_matmul(lt, rt, expr)
+
+        if op in ("and", "or"):
+            lt_bool = (lt == BOOL or (isinstance(lt, ArrayType) and lt.base == "bool"))
+            rt_bool = (rt == BOOL or (isinstance(rt, ArrayType) and rt.base == "bool"))
+            if not lt_bool or not rt_bool:
+                self._error(
+                    f"'{op}' requires bool operands, got {lt} and {rt}",
+                    expr.span.line_start, expr.span.col_start,
+                )
+                return None
+            result = self._broadcast(lt, rt)
+            if result is None:
+                self._error(
+                    f"'{op}': mismatched shapes {lt} and {rt}",
+                    expr.span.line_start, expr.span.col_start,
+                )
+                return None
+            return result
 
         if op in COMPARISON_OPS:
             result_shape = self._broadcast(lt, rt)
@@ -1328,8 +1351,8 @@ class TypeChecker:
         if expr.callee in ("zeros_like", "ones_like"):
             return self._check_like(expr, env)
 
-        # maximum(x, y), minimum(x, y), pow(x, y) — two-arg elementwise
-        if expr.callee in ("maximum", "minimum", "pow"):
+        # maximum(x, y), minimum(x, y), pow(x, y), atan2(y, x) — two-arg elementwise
+        if expr.callee in ("maximum", "minimum", "pow", "atan2"):
             return self._check_two_arg_elementwise(expr, env)
         # stack(a, b, ..., axis) — stack arrays along new axis
         if expr.callee == "stack":
@@ -1341,6 +1364,14 @@ class TypeChecker:
         # einsum("spec", a, b) — Einstein summation
         if expr.callee == "einsum":
             return self._check_einsum(expr, env)
+
+        # cumsum(x, axis=N), cumprod(x, axis=N) — cumulative reductions
+        if expr.callee in ("cumsum", "cumprod"):
+            return self._check_cumulative(expr, env)
+
+        # sort(x), sort(x, axis=N), argsort(x), argsort(x, axis=N)
+        if expr.callee in ("sort", "argsort"):
+            return self._check_sort(expr, env)
 
         sig = self.fn_table.get(expr.callee)
         if sig is None:
@@ -1797,6 +1828,115 @@ class TypeChecker:
         if len(output_dims) == 0:
             return ScalarType(base_type)
         return ArrayType(base_type, output_dims)
+
+    def _check_cumulative(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
+        """Check cumsum(x, axis=N), cumprod(x, axis=N)."""
+        name = expr.callee
+        self._resolve_named_args(expr, ["x", "axis"])
+        args = expr.args
+        if len(args) != 2:
+            self._error(
+                f"{name} expects 2 arguments: {name}(x, axis=N)",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        x_type = self._infer(args[0], env)
+        if x_type is None:
+            return None
+        if not isinstance(x_type, ArrayType):
+            self._error(
+                f"{name} requires an array argument, got {x_type}",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+        if x_type.base not in ("f32", "f64"):
+            self._error(
+                f"{name} requires float array, got {x_type}",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        axis_node = args[1]
+        self._infer(axis_node, env)
+        if isinstance(axis_node, IntLiteral):
+            axis_val = axis_node.value
+        else:
+            neg = _try_negative_literal(axis_node)
+            if neg is not None:
+                axis_val = neg
+            else:
+                self._error(
+                    f"{name}: axis must be an integer literal",
+                    expr.span.line_start, expr.span.col_start,
+                )
+                return None
+        ndim = len(x_type.dims)
+        if axis_val < 0:
+            axis_val += ndim
+        if axis_val < 0 or axis_val >= ndim:
+            self._error(
+                f"{name}: axis {axis_val} out of range for {ndim}-D array",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        return x_type  # Same shape as input
+
+    def _check_sort(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
+        """Check sort(x), sort(x, axis=N), argsort(x), argsort(x, axis=N)."""
+        name = expr.callee
+        self._resolve_named_args(expr, ["x", "axis"])
+        args = expr.args
+        if len(args) < 1 or len(args) > 2:
+            self._error(
+                f"{name} expects 1-2 arguments: {name}(x) or {name}(x, axis=N)",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        x_type = self._infer(args[0], env)
+        if x_type is None:
+            return None
+        if not isinstance(x_type, ArrayType):
+            self._error(
+                f"{name} requires an array argument, got {x_type}",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        # Determine axis (default: last axis)
+        ndim = len(x_type.dims)
+        if len(args) == 2:
+            axis_node = args[1]
+            self._infer(axis_node, env)
+            if isinstance(axis_node, IntLiteral):
+                axis_val = axis_node.value
+            else:
+                neg = _try_negative_literal(axis_node)
+                if neg is not None:
+                    axis_val = neg
+                else:
+                    self._error(
+                        f"{name}: axis must be an integer literal",
+                        expr.span.line_start, expr.span.col_start,
+                    )
+                    return None
+        else:
+            axis_val = -1  # default: last axis
+
+        if axis_val < 0:
+            axis_val += ndim
+        if axis_val < 0 or axis_val >= ndim:
+            self._error(
+                f"{name}: axis {axis_val} out of range for {ndim}-D array",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        if name == "argsort":
+            return ArrayType("i32", x_type.dims)
+        return x_type  # Same shape and type as input
 
     def _check_transpose(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
         if len(expr.args) < 1:

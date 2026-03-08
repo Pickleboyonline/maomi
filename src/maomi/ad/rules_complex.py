@@ -4,6 +4,7 @@ from ..ast_nodes import (
     Identifier,
     IntLiteral,
     FloatLiteral,
+    CallExpr,
     Block,
     IfExpr,
     ScanExpr,
@@ -15,6 +16,8 @@ from ..ast_nodes import (
     _AvgPoolGrad,
     _FoldGrad,
     _ReduceSum,
+    _CumsumGrad,
+    _SortGrad,
     Expr,
 )
 from ..types import MaomiType, ScalarType, ArrayType
@@ -553,3 +556,84 @@ class ComplexGradRulesMixin:
             if seq_type is not None:
                 self.type_map[id(grad_seq)] = seq_type
             self._accumulate(adjoints, seq_name, grad_seq)
+
+    def _backprop_cumulative(self, callee: str, args: list[Expr], adj: Expr,
+                              adjoints: dict[str, Expr], var_map: dict[int, str],
+                              node: Expr):
+        """Backprop through cumsum/cumprod.
+
+        cumsum backward: reverse_cumsum(adj) = reverse(cumsum(reverse(adj)))
+        cumprod backward: reverse_cumsum(adj * cumprod(x)) / x
+        """
+        x_expr = args[0]
+        if id(x_expr) not in var_map:
+            return
+        x_name = var_map[id(x_expr)]
+        x_type = self._type_of(x_expr)
+
+        # Extract axis
+        from ..ast_nodes import IntLiteral as _IL, UnaryOp as _UO
+        axis_node = args[1]
+        if isinstance(axis_node, _IL):
+            axis_val = axis_node.value
+        elif isinstance(axis_node, _UO) and axis_node.op == "-" and isinstance(axis_node.operand, _IL):
+            axis_val = -axis_node.operand.value
+        else:
+            axis_val = 0
+
+        # Normalize negative axis
+        if isinstance(x_type, ArrayType) and axis_val < 0:
+            axis_val += len(x_type.dims)
+
+        grad_node = _CumsumGrad(
+            input_expr=x_expr,
+            adj=adj,
+            axis=axis_val,
+            op=callee,
+            span=_DUMMY_SPAN,
+        )
+        if x_type is not None:
+            self.type_map[id(grad_node)] = x_type
+        self._accumulate(adjoints, x_name, grad_node)
+
+    def _backprop_sort(self, args: list[Expr], adj: Expr,
+                        adjoints: dict[str, Expr], var_map: dict[int, str],
+                        node: Expr):
+        """Backprop through sort: use inverse permutation to scatter adjoint back.
+
+        Forward: sorted = sort(x, axis)
+        Backward: grad_x[i] = adj[argsort(argsort(x))[i]]
+          i.e., gather adj by the inverse permutation of sort.
+        """
+        x_expr = args[0]
+        if id(x_expr) not in var_map:
+            return
+        x_name = var_map[id(x_expr)]
+        x_type = self._type_of(x_expr)
+
+        # Extract axis
+        from ..ast_nodes import IntLiteral as _IL, UnaryOp as _UO
+        if len(args) >= 2:
+            axis_node = args[1]
+            if isinstance(axis_node, _IL):
+                axis_val = axis_node.value
+            elif isinstance(axis_node, _UO) and axis_node.op == "-" and isinstance(axis_node.operand, _IL):
+                axis_val = -axis_node.operand.value
+            else:
+                axis_val = -1
+        else:
+            axis_val = -1
+
+        # Normalize negative axis
+        if isinstance(x_type, ArrayType) and axis_val < 0:
+            axis_val += len(x_type.dims)
+
+        grad_node = _SortGrad(
+            input_expr=x_expr,
+            adj=adj,
+            axis=axis_val,
+            span=_DUMMY_SPAN,
+        )
+        if x_type is not None:
+            self.type_map[id(grad_node)] = x_type
+        self._accumulate(adjoints, x_name, grad_node)

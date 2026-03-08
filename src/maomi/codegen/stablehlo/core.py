@@ -35,6 +35,8 @@ from ...ast_nodes import (
     _FoldGrad,
     _BroadcastExpr,
     _ReduceSum,
+    _CumsumGrad,
+    _SortGrad,
     Expr,
 )
 from ...types import MaomiType, ScalarType, ArrayType, StructType, FLOAT_BASES
@@ -271,6 +273,10 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
                 return self._gen_broadcast_expr(expr, env)
             case _ReduceSum():
                 return self._gen_reduce_sum_axes(expr, env)
+            case _CumsumGrad():
+                return self._gen_cumsum_grad(expr, env)
+            case _SortGrad():
+                return self._gen_sort_grad(expr, env)
             case _:
                 raise MaomiError(
                     f"codegen: unsupported expression type {type(expr).__name__}",
@@ -298,6 +304,8 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
         var = self._fresh()
         if op == "-":
             self._emit(f"{var} = stablehlo.negate {val} : {mlir_t}")
+        elif op == "not":
+            self._emit(f"{var} = stablehlo.not {val} : {mlir_t}")
         return var
 
     def _gen_struct_negate(self, val: str, stype: 'StructType') -> str:
@@ -336,6 +344,13 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
         mlir_result = _mlir_type(result_type)
 
         var = self._fresh()
+
+        if op in ("and", "or"):
+            lhs = self._maybe_broadcast(lhs, lt, result_type)
+            rhs = self._maybe_broadcast(rhs, rt, result_type)
+            stablehlo_op = "stablehlo.and" if op == "and" else "stablehlo.or"
+            self._emit(f"{var} = {stablehlo_op} {lhs}, {rhs} : {mlir_result}")
+            return var
 
         if op in _COMPARISON_MAP:
             cmp = _COMPARISON_MAP[op]
@@ -678,10 +693,14 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
             return self._gen_max_pool(expr, env)
         if expr.callee == "avg_pool":
             return self._gen_avg_pool(expr, env)
-        if expr.callee in ("maximum", "minimum", "pow"):
+        if expr.callee in ("maximum", "minimum", "pow", "atan2"):
             return self._gen_two_arg_elementwise(expr, env)
         if expr.callee == "einsum":
             return self._gen_einsum(expr, env)
+        if expr.callee in ("cumsum", "cumprod"):
+            return self._gen_cumulative(expr, env)
+        if expr.callee in ("sort", "argsort"):
+            return self._gen_sort(expr, env)
 
         # User-defined function call
         if self._batch_depth > 0:
@@ -712,6 +731,7 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
         "maximum": "stablehlo.maximum",
         "minimum": "stablehlo.minimum",
         "pow": "stablehlo.power",
+        "atan2": "stablehlo.atan2",
     }
 
     def _gen_two_arg_elementwise(self, expr: CallExpr, env: dict[str, str]) -> str:
@@ -1776,3 +1796,432 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
         self._emit("}")
         self._indent -= 1
         return var
+
+    # ------------------------------------------------------------------
+    # Cumulative reductions (cumsum, cumprod)
+    # ------------------------------------------------------------------
+
+    def _gen_cumulative(self, expr: CallExpr, env: dict[str, str]) -> str:
+        """Emit cumsum/cumprod via Hillis-Steele parallel prefix scan."""
+        name = expr.callee
+        x_ssa = self._gen_expr(expr.args[0], env)
+        x_type = self._type_of(expr.args[0])
+        assert isinstance(x_type, ArrayType)
+        ndim = len(x_type.dims)
+
+        # Resolve axis
+        axis_val = self._extract_axis(expr.args[1])
+        if axis_val < 0:
+            axis_val += ndim
+
+        combine_op = "stablehlo.add" if name == "cumsum" else "stablehlo.multiply"
+        pad_val = "0.000000e+00" if name == "cumsum" else "1.000000e+00"
+
+        return self._hillis_steele(x_ssa, x_type, axis_val, combine_op, pad_val)
+
+    def _extract_axis(self, node) -> int:
+        """Extract integer literal from an AST node."""
+        from ...ast_nodes import IntLiteral, UnaryOp
+        if isinstance(node, IntLiteral):
+            return node.value
+        if isinstance(node, UnaryOp) and node.op == "-" and isinstance(node.operand, IntLiteral):
+            return -node.operand.value
+        raise MaomiError("expected integer literal for axis", "<codegen>", node.span.line_start, node.span.col_start)
+
+    # ------------------------------------------------------------------
+    # Sorting (sort, argsort)
+    # ------------------------------------------------------------------
+
+    def _gen_sort(self, expr: CallExpr, env: dict[str, str]) -> str:
+        """Emit stablehlo.sort for sort(x) / argsort(x)."""
+        name = expr.callee
+        x_ssa = self._gen_expr(expr.args[0], env)
+        x_type = self._type_of(expr.args[0])
+        assert isinstance(x_type, ArrayType)
+        ndim = len(x_type.dims)
+
+        # Resolve axis (default: last)
+        if len(expr.args) >= 2:
+            axis_val = self._extract_axis(expr.args[1])
+        else:
+            axis_val = -1
+        if axis_val < 0:
+            axis_val += ndim
+
+        mlir_x = _mlir_type(x_type)
+        scalar_x = _mlir_type(ScalarType(x_type.base))
+
+        if name == "sort":
+            # Simple sort: single operand
+            result = self._fresh()
+            self._emit(
+                f'{result} = "stablehlo.sort"({x_ssa}) ({{')
+            self._indent += 1
+            lhs_arg = self._fresh()
+            rhs_arg = self._fresh()
+            self._emit(f"^bb0({lhs_arg}: {scalar_x}, {rhs_arg}: {scalar_x}):")
+            self._indent += 1
+            cmp = self._fresh()
+            bool_scalar = "tensor<i1>"
+            self._emit(
+                f"{cmp} = stablehlo.compare LT, {lhs_arg}, {rhs_arg} "
+                f": ({scalar_x}, {scalar_x}) -> {bool_scalar}"
+            )
+            self._emit(f"stablehlo.return {cmp} : {bool_scalar}")
+            self._indent -= 1
+            self._indent -= 1
+            self._emit(
+                f"}}) {{dimension = {axis_val} : i64, is_stable = true}} "
+                f": ({mlir_x}) -> {mlir_x}"
+            )
+            return result
+
+        else:
+            # argsort: co-sort with iota indices
+            result_type = self._type_of(expr)
+            mlir_idx = _mlir_type(result_type)
+            scalar_idx = _mlir_type(ScalarType("i32"))
+
+            # Create iota indices along sort axis
+            iota_var = self._fresh()
+            self._emit(
+                f"{iota_var} = stablehlo.iota dim = {axis_val} : {mlir_idx}"
+            )
+
+            # Co-sort: keys=values, payload=indices
+            sorted_vals = self._fresh()
+            sorted_idxs = self._fresh()
+            self._emit(
+                f'{sorted_vals}, {sorted_idxs} = "stablehlo.sort"({x_ssa}, {iota_var}) ({{')
+            self._indent += 1
+            lhs_val = self._fresh()
+            rhs_val = self._fresh()
+            lhs_idx = self._fresh()
+            rhs_idx = self._fresh()
+            self._emit(f"^bb0({lhs_val}: {scalar_x}, {rhs_val}: {scalar_x}, {lhs_idx}: {scalar_idx}, {rhs_idx}: {scalar_idx}):")
+            self._indent += 1
+            cmp = self._fresh()
+            bool_scalar = "tensor<i1>"
+            self._emit(
+                f"{cmp} = stablehlo.compare LT, {lhs_val}, {rhs_val} "
+                f": ({scalar_x}, {scalar_x}) -> {bool_scalar}"
+            )
+            self._emit(f"stablehlo.return {cmp} : {bool_scalar}")
+            self._indent -= 1
+            self._indent -= 1
+            self._emit(
+                f"}}) {{dimension = {axis_val} : i64, is_stable = true}} "
+                f": ({mlir_x}, {mlir_idx}) -> ({mlir_x}, {mlir_idx})"
+            )
+            return sorted_idxs
+
+    # ------------------------------------------------------------------
+    # Cumsum/cumprod backward (_CumsumGrad)
+    # ------------------------------------------------------------------
+
+    def _gen_cumsum_grad(self, expr: _CumsumGrad, env: dict[str, str]) -> str:
+        """Emit backward of cumsum/cumprod.
+
+        cumsum backward: reverse(cumsum(reverse(adj, axis), axis), axis)
+        cumprod backward: reverse(cumsum(reverse(adj * cumprod(x), axis), axis), axis) / x
+        """
+        import math as _math
+        adj_ssa = self._gen_expr(expr.adj, env)
+        x_type = self._type_of(expr.input_expr)
+        assert isinstance(x_type, ArrayType)
+        axis = expr.axis
+        ndim = len(x_type.dims)
+        N = x_type.dims[axis]
+        mlir_t = _mlir_type(x_type)
+
+        if expr.op == "cumsum":
+            # reverse(cumsum(reverse(adj)))
+            operand = adj_ssa
+        else:
+            # cumprod: need adj * cumprod(x), then reverse-cumsum, then / x
+            x_ssa = self._gen_expr(expr.input_expr, env)
+            # Compute cumprod(x) via Hillis-Steele
+            cumprod_result = self._hillis_steele(x_ssa, x_type, axis, "stablehlo.multiply", "1.000000e+00")
+            # adj * cumprod(x)
+            scaled = self._fresh()
+            self._emit(f"{scaled} = stablehlo.multiply {adj_ssa}, {cumprod_result} : {mlir_t}")
+            operand = scaled
+
+        # Step 1: reverse along axis
+        rev1 = self._emit_reverse(operand, mlir_t, axis)
+
+        # Step 2: cumsum (Hillis-Steele) on the reversed tensor
+        cumsum_rev = self._hillis_steele(rev1, x_type, axis, "stablehlo.add", "0.000000e+00")
+
+        # Step 3: reverse again
+        result = self._emit_reverse(cumsum_rev, mlir_t, axis)
+
+        if expr.op == "cumprod":
+            # Divide by x
+            x_ssa2 = self._gen_expr(expr.input_expr, env)
+            div_result = self._fresh()
+            self._emit(f"{div_result} = stablehlo.divide {result}, {x_ssa2} : {mlir_t}")
+            result = div_result
+
+        return result
+
+    def _emit_reverse(self, operand: str, mlir_type: str, axis: int) -> str:
+        """Emit stablehlo.reverse along a single axis."""
+        result = self._fresh()
+        self._emit(f"{result} = stablehlo.reverse {operand}, dims = [{axis}] : {mlir_type}")
+        return result
+
+    def _hillis_steele(self, x_ssa: str, x_type: ArrayType, axis: int,
+                       combine_op: str, pad_val: str) -> str:
+        """Emit Hillis-Steele parallel prefix scan (shared by cumsum/cumprod and their grads)."""
+        import math as _math
+        ndim = len(x_type.dims)
+        N = x_type.dims[axis]
+        mlir_t = _mlir_type(x_type)
+
+        result = x_ssa
+        steps = int(_math.ceil(_math.log2(max(N, 2))))
+        d = 1
+        for _ in range(steps):
+            if d >= N:
+                break
+
+            # Slice [0 : N-d] along axis
+            starts = [0] * ndim
+            limits = list(x_type.dims)
+            limits[axis] = N - d
+            strides = [1] * ndim
+
+            sliced_dims = list(x_type.dims)
+            sliced_dims[axis] = N - d
+            sliced_type = ArrayType(x_type.base, sliced_dims)
+            mlir_sliced = _mlir_type(sliced_type)
+
+            sliced = self._fresh()
+            self._emit(
+                f"{sliced} = stablehlo.slice {result} "
+                f"[{', '.join(str(s) for s in starts)}] [{', '.join(str(s) for s in limits)}] [{', '.join(str(s) for s in strides)}] "
+                f": ({mlir_t}) -> {mlir_sliced}"
+            )
+
+            # Pad with identity value: [d, 0] along axis
+            pad_init = self._fresh()
+            scalar_type = ScalarType(x_type.base)
+            mlir_scalar = _mlir_type(scalar_type)
+            self._emit(f"{pad_init} = stablehlo.constant dense<{pad_val}> : {mlir_scalar}")
+
+            lo = [0] * ndim
+            hi = [0] * ndim
+            interior = [0] * ndim
+            lo[axis] = d
+
+            padded = self._fresh()
+            self._emit(
+                f"{padded} = stablehlo.pad {sliced}, {pad_init}, "
+                f"low = [{', '.join(str(v) for v in lo)}], high = [{', '.join(str(v) for v in hi)}], interior = [{', '.join(str(v) for v in interior)}] "
+                f": ({mlir_sliced}, {mlir_scalar}) -> {mlir_t}"
+            )
+
+            combined = self._fresh()
+            self._emit(f"{combined} = {combine_op} {result}, {padded} : {mlir_t}")
+            result = combined
+            d *= 2
+
+        return result
+
+    # ------------------------------------------------------------------
+    # Sort backward (_SortGrad)
+    # ------------------------------------------------------------------
+
+    def _gen_sort_grad(self, expr: _SortGrad, env: dict[str, str]) -> str:
+        """Emit backward of sort: gather adj by inverse permutation.
+
+        inverse_perm = argsort(argsort(x, axis), axis)
+        grad_x = gather(adj, inverse_perm, axis)
+        """
+        x_ssa = self._gen_expr(expr.input_expr, env)
+        adj_ssa = self._gen_expr(expr.adj, env)
+        x_type = self._type_of(expr.input_expr)
+        assert isinstance(x_type, ArrayType)
+        axis = expr.axis
+        ndim = len(x_type.dims)
+        mlir_x = _mlir_type(x_type)
+        scalar_x = _mlir_type(ScalarType(x_type.base))
+
+        # Build i32 index type (same shape but i32)
+        idx_type = ArrayType("i32", x_type.dims)
+        mlir_idx = _mlir_type(idx_type)
+        scalar_idx = _mlir_type(ScalarType("i32"))
+        bool_scalar = "tensor<i1>"
+
+        # Step 1: argsort(x) — co-sort x with iota to get sort permutation
+        sort_perm = self._emit_argsort(x_ssa, mlir_x, scalar_x, mlir_idx, scalar_idx, bool_scalar, axis)
+
+        # Step 2: argsort(sort_perm) — argsort the indices to get inverse permutation
+        inv_perm = self._emit_argsort_i32(sort_perm, mlir_idx, scalar_idx, bool_scalar, axis)
+
+        # Step 3: gather adj by inv_perm along axis
+        # Use stablehlo.gather to index adj[inv_perm] along the sort axis
+        result = self._emit_axis_gather(adj_ssa, inv_perm, x_type, idx_type, axis)
+        return result
+
+    def _emit_argsort(self, x_ssa: str, mlir_x: str, scalar_x: str,
+                       mlir_idx: str, scalar_idx: str, bool_scalar: str,
+                       axis: int) -> str:
+        """Emit argsort of float array: co-sort values with iota indices, return indices."""
+        iota_var = self._fresh()
+        self._emit(f"{iota_var} = stablehlo.iota dim = {axis} : {mlir_idx}")
+
+        sorted_vals = self._fresh()
+        sorted_idxs = self._fresh()
+        self._emit(f'{sorted_vals}, {sorted_idxs} = "stablehlo.sort"({x_ssa}, {iota_var}) ({{')
+        self._indent += 1
+        lhs_val = self._fresh()
+        rhs_val = self._fresh()
+        lhs_idx = self._fresh()
+        rhs_idx = self._fresh()
+        self._emit(f"^bb0({lhs_val}: {scalar_x}, {rhs_val}: {scalar_x}, {lhs_idx}: {scalar_idx}, {rhs_idx}: {scalar_idx}):")
+        self._indent += 1
+        cmp = self._fresh()
+        self._emit(f"{cmp} = stablehlo.compare LT, {lhs_val}, {rhs_val} : ({scalar_x}, {scalar_x}) -> {bool_scalar}")
+        self._emit(f"stablehlo.return {cmp} : {bool_scalar}")
+        self._indent -= 1
+        self._indent -= 1
+        self._emit(f"}}) {{dimension = {axis} : i64, is_stable = true}} : ({mlir_x}, {mlir_idx}) -> ({mlir_x}, {mlir_idx})")
+        return sorted_idxs
+
+    def _emit_argsort_i32(self, idx_ssa: str, mlir_idx: str, scalar_idx: str,
+                           bool_scalar: str, axis: int) -> str:
+        """Emit argsort of i32 array: co-sort values with iota indices, return indices."""
+        iota_var = self._fresh()
+        self._emit(f"{iota_var} = stablehlo.iota dim = {axis} : {mlir_idx}")
+
+        sorted_vals = self._fresh()
+        sorted_idxs = self._fresh()
+        self._emit(f'{sorted_vals}, {sorted_idxs} = "stablehlo.sort"({idx_ssa}, {iota_var}) ({{')
+        self._indent += 1
+        lhs_val = self._fresh()
+        rhs_val = self._fresh()
+        lhs_idx = self._fresh()
+        rhs_idx = self._fresh()
+        self._emit(f"^bb0({lhs_val}: {scalar_idx}, {rhs_val}: {scalar_idx}, {lhs_idx}: {scalar_idx}, {rhs_idx}: {scalar_idx}):")
+        self._indent += 1
+        cmp = self._fresh()
+        self._emit(f"{cmp} = stablehlo.compare LT, {lhs_val}, {rhs_val} : ({scalar_idx}, {scalar_idx}) -> {bool_scalar}")
+        self._emit(f"stablehlo.return {cmp} : {bool_scalar}")
+        self._indent -= 1
+        self._indent -= 1
+        self._emit(f"}}) {{dimension = {axis} : i64, is_stable = true}} : ({mlir_idx}, {mlir_idx}) -> ({mlir_idx}, {mlir_idx})")
+        return sorted_idxs
+
+    def _emit_axis_gather(self, data_ssa: str, indices_ssa: str,
+                           data_type: ArrayType, idx_type: ArrayType,
+                           axis: int) -> str:
+        """Emit gather of data by indices along a specific axis.
+
+        Equivalent to: result[...i...] = data[...indices[i]...] along axis.
+        Uses torch.gather / np.take_along_axis semantics.
+        """
+        # For 1D case: simple gather
+        # For ND case: use stablehlo.gather with appropriate offset_dims and start_index_map
+        ndim = len(data_type.dims)
+        mlir_data = _mlir_type(data_type)
+        mlir_idx = _mlir_type(idx_type)
+
+        if ndim == 1:
+            # 1D: straightforward gather
+            # Reshape indices to [N, 1] for gather
+            N = data_type.dims[0]
+            idx_reshaped = self._fresh()
+            self._emit(f"{idx_reshaped} = stablehlo.reshape {indices_ssa} : ({mlir_idx}) -> tensor<{N}x1xi32>")
+
+            result = self._fresh()
+            self._emit(
+                f'{result} = "stablehlo.gather"({data_ssa}, {idx_reshaped}) {{'
+                f'dimension_numbers = #stablehlo.gather<'
+                f'collapsed_slice_dims = [0], '
+                f'start_index_map = [0], '
+                f'index_vector_dim = 1>, '
+                f'slice_sizes = array<i64: 1>, '
+                f'indices_are_sorted = false'
+                f'}} : ({mlir_data}, tensor<{N}x1xi32>) -> {mlir_data}'
+            )
+            return result
+        else:
+            # ND gather along axis using a loop of slice+dynamic_update
+            # Simpler approach: flatten-gather-reshape via iota + scatter-based indexing
+            # Actually, the simplest correct approach for ND: use a concatenated index array
+            # with stablehlo.gather.
+            #
+            # For axis=k with shape [..., N_k, ...]:
+            # We need indices for all axes. For axes != k, use iota. For axis k, use our indices.
+            # Then gather with all-collapsed slice dims.
+
+            # Build the full index tensor: shape [*data_type.dims, ndim] where the last dim
+            # contains [i0, i1, ..., indices[...], ..., i_{n-1}]
+            total_elems = 1
+            for d in data_type.dims:
+                total_elems *= d
+
+            # Create iota indices for each axis
+            flat_shape = list(data_type.dims)
+            index_components = []
+            for ax in range(ndim):
+                iota_ax = self._fresh()
+                self._emit(f"{iota_ax} = stablehlo.iota dim = {ax} : {mlir_idx}")
+                if ax == axis:
+                    index_components.append(indices_ssa)
+                else:
+                    index_components.append(iota_ax)
+
+            # Reshape each component to [..., 1] and concatenate along last dim
+            reshaped_components = []
+            expanded_dims = list(data_type.dims) + [1]
+            expanded_mlir = "tensor<" + "x".join(str(d) for d in expanded_dims) + "xi32>"
+            for comp in index_components:
+                reshaped = self._fresh()
+                self._emit(f"{reshaped} = stablehlo.reshape {comp} : ({mlir_idx}) -> {expanded_mlir}")
+                reshaped_components.append(reshaped)
+
+            # Concatenate along last dim to get [..., ndim]
+            index_dims = list(data_type.dims) + [ndim]
+            index_mlir = "tensor<" + "x".join(str(d) for d in index_dims) + "xi32>"
+            if len(reshaped_components) == 1:
+                full_indices = reshaped_components[0]
+            else:
+                current = reshaped_components[0]
+                for comp in reshaped_components[1:]:
+                    concat = self._fresh()
+                    # Concat two [..., k] tensors along last dim
+                    current_last_dim = index_dims[-1]  # will be wrong for intermediate
+                    # Actually, build iteratively
+                    pass
+                # Simpler: use stablehlo.concatenate for all at once
+                all_args = ", ".join(reshaped_components)
+                cat_dim = ndim  # last dim index
+                full_indices = self._fresh()
+                self._emit(
+                    f"{full_indices} = stablehlo.concatenate {all_args}, dim = {cat_dim} "
+                    f": ({', '.join([expanded_mlir] * ndim)}) -> {index_mlir}"
+                )
+
+            # Gather with full index
+            slice_sizes = [1] * ndim
+            slice_sizes_str = ", ".join(str(s) for s in slice_sizes)
+            collapsed = list(range(ndim))
+            collapsed_str = ", ".join(str(c) for c in collapsed)
+            start_index_map = list(range(ndim))
+            start_index_map_str = ", ".join(str(s) for s in start_index_map)
+
+            result = self._fresh()
+            self._emit(
+                f'{result} = "stablehlo.gather"({data_ssa}, {full_indices}) {{'
+                f'dimension_numbers = #stablehlo.gather<'
+                f'collapsed_slice_dims = [{collapsed_str}], '
+                f'start_index_map = [{start_index_map_str}], '
+                f'index_vector_dim = {ndim}>, '
+                f'slice_sizes = array<i64: {slice_sizes_str}>, '
+                f'indices_are_sorted = false'
+                f'}} : ({mlir_data}, {index_mlir}) -> {mlir_data}'
+            )
+            return result

@@ -232,6 +232,98 @@ def _grad_gelu(ctx: Any, arg_ref: Expr, adj: Expr) -> Expr:
     return ctx._make_binop("*", adj, grad_val)
 
 
+def _grad_expm1(ctx: Any, arg_ref: Expr, adj: Expr) -> Expr:
+    # d/dx expm1(x) = exp(x) * dz  (same as exp)
+    exp_x = ctx._make_call("exp", [arg_ref])
+    return ctx._make_binop("*", adj, exp_x)
+
+
+# -- Trig/math builtins --
+
+def _grad_tan(ctx: Any, arg_ref: Expr, adj: Expr) -> Expr:
+    # d/dx tan(x) = (1 + tan(x)^2) * dz  (JAX: g*(1+ans^2))
+    tan_x = ctx._make_call("tan", [arg_ref])
+    tan_sq = ctx._make_binop("*", tan_x, tan_x)
+    sec_sq = ctx._make_binop("+", ctx._make_float(1.0), tan_sq)
+    return ctx._make_binop("*", adj, sec_sq)
+
+
+def _grad_sinh(ctx: Any, arg_ref: Expr, adj: Expr) -> Expr:
+    # d/dx sinh(x) = cosh(x) * dz
+    cosh_x = ctx._make_call("cosh", [arg_ref])
+    return ctx._make_binop("*", adj, cosh_x)
+
+
+def _grad_cosh(ctx: Any, arg_ref: Expr, adj: Expr) -> Expr:
+    # d/dx cosh(x) = sinh(x) * dz
+    sinh_x = ctx._make_call("sinh", [arg_ref])
+    return ctx._make_binop("*", adj, sinh_x)
+
+
+def _grad_asin(ctx: Any, arg_ref: Expr, adj: Expr) -> Expr:
+    # d/dx asin(x) = dz * rsqrt(1 - x^2)  (JAX uses rsqrt)
+    x_sq = ctx._make_binop("*", arg_ref, arg_ref)
+    one_minus_xsq = ctx._make_binop("-", ctx._make_float(1.0), x_sq)
+    inv_denom = ctx._make_call("rsqrt", [one_minus_xsq])
+    return ctx._make_binop("*", adj, inv_denom)
+
+
+def _grad_acos(ctx: Any, arg_ref: Expr, adj: Expr) -> Expr:
+    # d/dx acos(x) = -dz * rsqrt(1 - x^2)
+    x_sq = ctx._make_binop("*", arg_ref, arg_ref)
+    one_minus_xsq = ctx._make_binop("-", ctx._make_float(1.0), x_sq)
+    inv_denom = ctx._make_call("rsqrt", [one_minus_xsq])
+    neg_inv = ctx._make_unary("-", inv_denom)
+    return ctx._make_binop("*", adj, neg_inv)
+
+
+def _grad_atan(ctx: Any, arg_ref: Expr, adj: Expr) -> Expr:
+    # d/dx atan(x) = dz / (1 + x^2)
+    x_sq = ctx._make_binop("*", arg_ref, arg_ref)
+    denom = ctx._make_binop("+", ctx._make_float(1.0), x_sq)
+    return ctx._make_binop("/", adj, denom)
+
+
+def _grad_asinh(ctx: Any, arg_ref: Expr, adj: Expr) -> Expr:
+    # d/dx asinh(x) = dz * rsqrt(x^2 + 1)
+    x_sq = ctx._make_binop("*", arg_ref, arg_ref)
+    xsq_plus_1 = ctx._make_binop("+", x_sq, ctx._make_float(1.0))
+    inv_denom = ctx._make_call("rsqrt", [xsq_plus_1])
+    return ctx._make_binop("*", adj, inv_denom)
+
+
+def _grad_acosh(ctx: Any, arg_ref: Expr, adj: Expr) -> Expr:
+    # d/dx acosh(x) = dz * rsqrt(x^2 - 1)  (JAX uses x^2-1, domain x>=1)
+    x_sq = ctx._make_binop("*", arg_ref, arg_ref)
+    xsq_minus_1 = ctx._make_binop("-", x_sq, ctx._make_float(1.0))
+    inv_denom = ctx._make_call("rsqrt", [xsq_minus_1])
+    return ctx._make_binop("*", adj, inv_denom)
+
+
+def _grad_atanh(ctx: Any, arg_ref: Expr, adj: Expr) -> Expr:
+    # d/dx atanh(x) = dz / (1 - x^2)
+    # JAX factors as reciprocal(1+x) * (g / (1-x)) for stability
+    one_plus_x = ctx._make_binop("+", ctx._make_float(1.0), arg_ref)
+    one_minus_x = ctx._make_binop("-", ctx._make_float(1.0), arg_ref)
+    recip_1px = ctx._make_call("reciprocal", [one_plus_x])
+    adj_over_1mx = ctx._make_binop("/", adj, one_minus_x)
+    return ctx._make_binop("*", recip_1px, adj_over_1mx)
+
+
+def _grad_exp2(ctx: Any, arg_ref: Expr, adj: Expr) -> Expr:
+    # d/dx 2^x = ln(2) * 2^x * dz  (JAX: log(2)*g*ans)
+    exp2_x = ctx._make_call("exp2", [arg_ref])
+    ln2 = ctx._make_float(0.6931471805599453)
+    return ctx._make_binop("*", adj, ctx._make_binop("*", ln2, exp2_x))
+
+
+def _grad_log10(ctx: Any, arg_ref: Expr, adj: Expr) -> Expr:
+    # d/dx log10(x) = dz / (x * ln(10))
+    ln10 = ctx._make_float(2.302585092994046)
+    x_ln10 = ctx._make_binop("*", arg_ref, ln10)
+    return ctx._make_binop("/", adj, x_ln10)
+
+
 # ---------------------------------------------------------------------------
 # Compound elementwise codegen functions
 # ---------------------------------------------------------------------------
@@ -398,6 +490,189 @@ def _codegen_gelu_inner(codegen: Any, arg_ssa: str, mlir_t: str) -> str:
 _codegen_gelu = _compound_codegen("gelu", _codegen_gelu_inner)
 
 
+# -- Trig/math compound codegen --
+
+def _codegen_tan_inner(codegen: Any, arg_ssa: str, mlir_t: str) -> str:
+    # tan(x) = sin(x) / cos(x)
+    sin_x = codegen._fresh()
+    codegen._emit(f"{sin_x} = stablehlo.sine {arg_ssa} : {mlir_t}")
+    cos_x = codegen._fresh()
+    codegen._emit(f"{cos_x} = stablehlo.cosine {arg_ssa} : {mlir_t}")
+    result = codegen._fresh()
+    codegen._emit(f"{result} = stablehlo.divide {sin_x}, {cos_x} : {mlir_t}")
+    return result
+
+_codegen_tan = _compound_codegen("tan", _codegen_tan_inner)
+
+
+def _codegen_sinh_inner(codegen: Any, arg_ssa: str, mlir_t: str) -> str:
+    # sinh(x) = (exp(x) - exp(-x)) / 2
+    exp_x = codegen._fresh()
+    codegen._emit(f"{exp_x} = stablehlo.exponential {arg_ssa} : {mlir_t}")
+    neg_x = codegen._fresh()
+    codegen._emit(f"{neg_x} = stablehlo.negate {arg_ssa} : {mlir_t}")
+    exp_neg = codegen._fresh()
+    codegen._emit(f"{exp_neg} = stablehlo.exponential {neg_x} : {mlir_t}")
+    diff = codegen._fresh()
+    codegen._emit(f"{diff} = stablehlo.subtract {exp_x}, {exp_neg} : {mlir_t}")
+    two = codegen._fresh()
+    codegen._emit(f"{two} = stablehlo.constant dense<2.000000e+00> : {mlir_t}")
+    result = codegen._fresh()
+    codegen._emit(f"{result} = stablehlo.divide {diff}, {two} : {mlir_t}")
+    return result
+
+_codegen_sinh = _compound_codegen("sinh", _codegen_sinh_inner)
+
+
+def _codegen_cosh_inner(codegen: Any, arg_ssa: str, mlir_t: str) -> str:
+    # cosh(x) = (exp(x) + exp(-x)) / 2
+    exp_x = codegen._fresh()
+    codegen._emit(f"{exp_x} = stablehlo.exponential {arg_ssa} : {mlir_t}")
+    neg_x = codegen._fresh()
+    codegen._emit(f"{neg_x} = stablehlo.negate {arg_ssa} : {mlir_t}")
+    exp_neg = codegen._fresh()
+    codegen._emit(f"{exp_neg} = stablehlo.exponential {neg_x} : {mlir_t}")
+    sum_val = codegen._fresh()
+    codegen._emit(f"{sum_val} = stablehlo.add {exp_x}, {exp_neg} : {mlir_t}")
+    two = codegen._fresh()
+    codegen._emit(f"{two} = stablehlo.constant dense<2.000000e+00> : {mlir_t}")
+    result = codegen._fresh()
+    codegen._emit(f"{result} = stablehlo.divide {sum_val}, {two} : {mlir_t}")
+    return result
+
+_codegen_cosh = _compound_codegen("cosh", _codegen_cosh_inner)
+
+
+def _codegen_asin_inner(codegen: Any, arg_ssa: str, mlir_t: str) -> str:
+    # asin(x) = atan2(x, sqrt(1 - x^2))
+    x_sq = codegen._fresh()
+    codegen._emit(f"{x_sq} = stablehlo.multiply {arg_ssa}, {arg_ssa} : {mlir_t}")
+    one = codegen._fresh()
+    codegen._emit(f"{one} = stablehlo.constant dense<1.000000e+00> : {mlir_t}")
+    one_minus = codegen._fresh()
+    codegen._emit(f"{one_minus} = stablehlo.subtract {one}, {x_sq} : {mlir_t}")
+    sqrt_val = codegen._fresh()
+    codegen._emit(f"{sqrt_val} = stablehlo.sqrt {one_minus} : {mlir_t}")
+    result = codegen._fresh()
+    codegen._emit(f"{result} = stablehlo.atan2 {arg_ssa}, {sqrt_val} : {mlir_t}")
+    return result
+
+_codegen_asin = _compound_codegen("asin", _codegen_asin_inner)
+
+
+def _codegen_acos_inner(codegen: Any, arg_ssa: str, mlir_t: str) -> str:
+    # acos(x) = atan2(sqrt(1 - x^2), x)
+    x_sq = codegen._fresh()
+    codegen._emit(f"{x_sq} = stablehlo.multiply {arg_ssa}, {arg_ssa} : {mlir_t}")
+    one = codegen._fresh()
+    codegen._emit(f"{one} = stablehlo.constant dense<1.000000e+00> : {mlir_t}")
+    one_minus = codegen._fresh()
+    codegen._emit(f"{one_minus} = stablehlo.subtract {one}, {x_sq} : {mlir_t}")
+    sqrt_val = codegen._fresh()
+    codegen._emit(f"{sqrt_val} = stablehlo.sqrt {one_minus} : {mlir_t}")
+    result = codegen._fresh()
+    codegen._emit(f"{result} = stablehlo.atan2 {sqrt_val}, {arg_ssa} : {mlir_t}")
+    return result
+
+_codegen_acos = _compound_codegen("acos", _codegen_acos_inner)
+
+
+def _codegen_atan_inner(codegen: Any, arg_ssa: str, mlir_t: str) -> str:
+    # atan(x) = atan2(x, 1)
+    one = codegen._fresh()
+    codegen._emit(f"{one} = stablehlo.constant dense<1.000000e+00> : {mlir_t}")
+    result = codegen._fresh()
+    codegen._emit(f"{result} = stablehlo.atan2 {arg_ssa}, {one} : {mlir_t}")
+    return result
+
+_codegen_atan = _compound_codegen("atan", _codegen_atan_inner)
+
+
+def _codegen_asinh_inner(codegen: Any, arg_ssa: str, mlir_t: str) -> str:
+    # asinh(x) = log(x + sqrt(x^2 + 1))
+    x_sq = codegen._fresh()
+    codegen._emit(f"{x_sq} = stablehlo.multiply {arg_ssa}, {arg_ssa} : {mlir_t}")
+    one = codegen._fresh()
+    codegen._emit(f"{one} = stablehlo.constant dense<1.000000e+00> : {mlir_t}")
+    xsq_p1 = codegen._fresh()
+    codegen._emit(f"{xsq_p1} = stablehlo.add {x_sq}, {one} : {mlir_t}")
+    sqrt_val = codegen._fresh()
+    codegen._emit(f"{sqrt_val} = stablehlo.sqrt {xsq_p1} : {mlir_t}")
+    x_plus = codegen._fresh()
+    codegen._emit(f"{x_plus} = stablehlo.add {arg_ssa}, {sqrt_val} : {mlir_t}")
+    result = codegen._fresh()
+    codegen._emit(f"{result} = stablehlo.log {x_plus} : {mlir_t}")
+    return result
+
+_codegen_asinh = _compound_codegen("asinh", _codegen_asinh_inner)
+
+
+def _codegen_acosh_inner(codegen: Any, arg_ssa: str, mlir_t: str) -> str:
+    # acosh(x) = log(x + sqrt(x^2 - 1))
+    x_sq = codegen._fresh()
+    codegen._emit(f"{x_sq} = stablehlo.multiply {arg_ssa}, {arg_ssa} : {mlir_t}")
+    one = codegen._fresh()
+    codegen._emit(f"{one} = stablehlo.constant dense<1.000000e+00> : {mlir_t}")
+    xsq_m1 = codegen._fresh()
+    codegen._emit(f"{xsq_m1} = stablehlo.subtract {x_sq}, {one} : {mlir_t}")
+    sqrt_val = codegen._fresh()
+    codegen._emit(f"{sqrt_val} = stablehlo.sqrt {xsq_m1} : {mlir_t}")
+    x_plus = codegen._fresh()
+    codegen._emit(f"{x_plus} = stablehlo.add {arg_ssa}, {sqrt_val} : {mlir_t}")
+    result = codegen._fresh()
+    codegen._emit(f"{result} = stablehlo.log {x_plus} : {mlir_t}")
+    return result
+
+_codegen_acosh = _compound_codegen("acosh", _codegen_acosh_inner)
+
+
+def _codegen_atanh_inner(codegen: Any, arg_ssa: str, mlir_t: str) -> str:
+    # atanh(x) = 0.5 * log((1+x) / (1-x))
+    one = codegen._fresh()
+    codegen._emit(f"{one} = stablehlo.constant dense<1.000000e+00> : {mlir_t}")
+    half = codegen._fresh()
+    codegen._emit(f"{half} = stablehlo.constant dense<5.000000e-01> : {mlir_t}")
+    one_plus = codegen._fresh()
+    codegen._emit(f"{one_plus} = stablehlo.add {one}, {arg_ssa} : {mlir_t}")
+    one_minus = codegen._fresh()
+    codegen._emit(f"{one_minus} = stablehlo.subtract {one}, {arg_ssa} : {mlir_t}")
+    ratio = codegen._fresh()
+    codegen._emit(f"{ratio} = stablehlo.divide {one_plus}, {one_minus} : {mlir_t}")
+    log_val = codegen._fresh()
+    codegen._emit(f"{log_val} = stablehlo.log {ratio} : {mlir_t}")
+    result = codegen._fresh()
+    codegen._emit(f"{result} = stablehlo.multiply {half}, {log_val} : {mlir_t}")
+    return result
+
+_codegen_atanh = _compound_codegen("atanh", _codegen_atanh_inner)
+
+
+def _codegen_exp2_inner(codegen: Any, arg_ssa: str, mlir_t: str) -> str:
+    # exp2(x) = exp(x * ln(2))
+    ln2 = codegen._fresh()
+    codegen._emit(f"{ln2} = stablehlo.constant dense<6.931472e-01> : {mlir_t}")
+    x_ln2 = codegen._fresh()
+    codegen._emit(f"{x_ln2} = stablehlo.multiply {arg_ssa}, {ln2} : {mlir_t}")
+    result = codegen._fresh()
+    codegen._emit(f"{result} = stablehlo.exponential {x_ln2} : {mlir_t}")
+    return result
+
+_codegen_exp2 = _compound_codegen("exp2", _codegen_exp2_inner)
+
+
+def _codegen_log10_inner(codegen: Any, arg_ssa: str, mlir_t: str) -> str:
+    # log10(x) = log(x) / ln(10)
+    log_x = codegen._fresh()
+    codegen._emit(f"{log_x} = stablehlo.log {arg_ssa} : {mlir_t}")
+    ln10 = codegen._fresh()
+    codegen._emit(f"{ln10} = stablehlo.constant dense<2.302585e+00> : {mlir_t}")
+    result = codegen._fresh()
+    codegen._emit(f"{result} = stablehlo.divide {log_x}, {ln10} : {mlir_t}")
+    return result
+
+_codegen_log10 = _compound_codegen("log10", _codegen_log10_inner)
+
+
 # ---------------------------------------------------------------------------
 # Elementwise builtin registry
 # ---------------------------------------------------------------------------
@@ -474,7 +749,7 @@ ELEMENTWISE: dict[str, ElementwiseBuiltin] = {
         "Compute element-wise log(1 + x), accurate for small x.",
     ),
     "expm1": ElementwiseBuiltin(
-        "expm1", "stablehlo.exponential_minus_one", _grad_exp,  # d/dx(exp(x)-1) = exp(x), same as exp
+        "expm1", "stablehlo.exponential_minus_one", _grad_expm1,
         "Compute element-wise exp(x) - 1, accurate for small x.",
     ),
 
@@ -503,6 +778,63 @@ ELEMENTWISE: dict[str, ElementwiseBuiltin] = {
         "gelu", None, _grad_gelu,
         "Compute element-wise GELU (Gaussian Error Linear Unit, tanh approximation).",
         codegen_fn=_codegen_gelu,
+    ),
+
+    # -- Trig/math builtins --
+    "tan": ElementwiseBuiltin(
+        "tan", None, _grad_tan,
+        "Compute element-wise tangent.",
+        codegen_fn=_codegen_tan,
+    ),
+    "sinh": ElementwiseBuiltin(
+        "sinh", None, _grad_sinh,
+        "Compute element-wise hyperbolic sine.",
+        codegen_fn=_codegen_sinh,
+    ),
+    "cosh": ElementwiseBuiltin(
+        "cosh", None, _grad_cosh,
+        "Compute element-wise hyperbolic cosine.",
+        codegen_fn=_codegen_cosh,
+    ),
+    "asin": ElementwiseBuiltin(
+        "asin", None, _grad_asin,
+        "Compute element-wise arcsine (inverse sine).",
+        codegen_fn=_codegen_asin,
+    ),
+    "acos": ElementwiseBuiltin(
+        "acos", None, _grad_acos,
+        "Compute element-wise arccosine (inverse cosine).",
+        codegen_fn=_codegen_acos,
+    ),
+    "atan": ElementwiseBuiltin(
+        "atan", None, _grad_atan,
+        "Compute element-wise arctangent (inverse tangent).",
+        codegen_fn=_codegen_atan,
+    ),
+    "asinh": ElementwiseBuiltin(
+        "asinh", None, _grad_asinh,
+        "Compute element-wise inverse hyperbolic sine.",
+        codegen_fn=_codegen_asinh,
+    ),
+    "acosh": ElementwiseBuiltin(
+        "acosh", None, _grad_acosh,
+        "Compute element-wise inverse hyperbolic cosine (domain x >= 1).",
+        codegen_fn=_codegen_acosh,
+    ),
+    "atanh": ElementwiseBuiltin(
+        "atanh", None, _grad_atanh,
+        "Compute element-wise inverse hyperbolic tangent (domain |x| < 1).",
+        codegen_fn=_codegen_atanh,
+    ),
+    "exp2": ElementwiseBuiltin(
+        "exp2", None, _grad_exp2,
+        "Compute element-wise base-2 exponential (2^x).",
+        codegen_fn=_codegen_exp2,
+    ),
+    "log10": ElementwiseBuiltin(
+        "log10", None, _grad_log10,
+        "Compute element-wise base-10 logarithm.",
+        codegen_fn=_codegen_log10,
     ),
 }
 
@@ -733,6 +1065,37 @@ COMPLEX: dict[str, ComplexBuiltin] = {
         "Element-wise power: x raised to the power y.",
         (["x", "y"], ["f32", "f32"], "f32"),
     ),
+    # Cumulative reductions
+    "cumsum": ComplexBuiltin(
+        "cumsum", "cumulative", "has_rule",
+        "Cumulative sum along an axis. `cumsum(x, axis=0)` computes running totals.",
+        (["x", "axis"], ["f32[...]", "int"], "f32[...]"),
+    ),
+    "cumprod": ComplexBuiltin(
+        "cumprod", "cumulative", "has_rule",
+        "Cumulative product along an axis. `cumprod(x, axis=0)` computes running products.",
+        (["x", "axis"], ["f32[...]", "int"], "f32[...]"),
+    ),
+
+    # Sorting
+    "sort": ComplexBuiltin(
+        "sort", "sorting", "has_rule",
+        "Sort array along an axis (ascending). `sort(x)` along last axis, `sort(x, axis=0)` along axis 0.",
+        (["x", "axis"], ["f32[...]", "int"], "f32[...]"),
+    ),
+    "argsort": ComplexBuiltin(
+        "argsort", "sorting", "zero_grad",
+        "Return indices that would sort the array. `argsort(x)` along last axis. Returns i32.",
+        (["x", "axis"], ["f32[...]", "int"], "i32[...]"),
+    ),
+
+    # Two-arg math
+    "atan2": ComplexBuiltin(
+        "atan2", "two_arg_elementwise", "has_rule",
+        "Element-wise two-argument arctangent: atan2(y, x) = arctan(y/x) with correct quadrant.",
+        (["y", "x"], ["f32", "f32"], "f32"),
+    ),
+
     # Einsum
     "einsum": ComplexBuiltin(
         "einsum", "einsum", "has_rule",
