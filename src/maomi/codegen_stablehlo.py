@@ -693,6 +693,10 @@ class StableHLOCodegen:
         if expr.callee == "iota":
             return self._gen_iota(expr, env)
 
+        # zeros/ones/full → constant + broadcast
+        if expr.callee in ("zeros", "ones", "full"):
+            return self._gen_fill(expr, env)
+
         # RNG builtins
         if expr.callee in self._RNG_BUILTINS:
             return self._gen_rng(expr, env)
@@ -943,6 +947,21 @@ class StableHLOCodegen:
         var = self._fresh()
         self._emit(f"{var} = stablehlo.iota dim = 0 : {mlir_t}")
         return var
+
+    def _gen_fill(self, expr: CallExpr, env: dict[str, str]) -> str:
+        result_type = self._type_of(expr)
+        mlir_t = _mlir_type(result_type)
+        if expr.callee == "zeros":
+            scalar = self._fresh()
+            self._emit(f"{scalar} = stablehlo.constant dense<0.000000e+00> : tensor<f32>")
+        elif expr.callee == "ones":
+            scalar = self._fresh()
+            self._emit(f"{scalar} = stablehlo.constant dense<1.000000e+00> : tensor<f32>")
+        else:  # full
+            scalar = self._gen_expr(expr.args[0], env)
+        result = self._fresh()
+        self._emit(f"{result} = stablehlo.broadcast_in_dim {scalar}, dims = [] : (tensor<f32>) -> {mlir_t}")
+        return result
 
     def _gen_mean(self, expr: CallExpr, env: dict[str, str]) -> str:
         arg = self._gen_expr(expr.args[0], env)
