@@ -2,7 +2,23 @@
 
 A pure functional ML language that compiles to XLA via StableHLO. **If it compiles, it's fast.**
 
-LLMs can write working JAX, but getting fully transform-friendly, performance-correct code still often takes review. Maomi narrows the language so the fast, compilable path is also the natural path.
+I made this so I can vibe code fast jittable jax code in 1 shot. In my experience, LLMs can typically write working JAX, but getting fully transform-friendly, performance-correct code still often takes review. Maomi narrows the language so the fast, compilable path is also the natural path and only algorithmic performance is left for review.
+
+Also, if you like Jax but want a Rust like language for it instead of dealing with Python/Jax boundaries -- this project is for you.
+
+Maomi also supports bounded AD while loops:
+
+```maomi
+fn converge_diff(x: f32) -> f32 {
+    let result = while s in x limit 100 { s > 0.01 } do {
+        s * 0.5
+    };
+    grad(result, x)
+}
+```
+
+Memory is still preallocated for gradients like a jax's `scan`, but you can early stop computation with compiled AD. 
+
 
 **[Getting Started](docs/getting-started.md)** · **[Language Reference](docs/reference.md)**
 
