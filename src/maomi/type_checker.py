@@ -20,6 +20,7 @@ from .ast_nodes import (
     WhileExpr,
     MapExpr,
     GradExpr,
+    ValueAndGradExpr,
     CastExpr,
     FoldExpr,
     ArrayLiteral,
@@ -55,6 +56,8 @@ def _substitute_comptime(block: Block, subst: dict[str, IntLiteral]) -> None:
             walk_block(expr.then_block)
             walk_block(expr.else_block)
         elif isinstance(expr, GradExpr):
+            expr.expr = walk_expr(expr.expr)
+        elif isinstance(expr, ValueAndGradExpr):
             expr.expr = walk_expr(expr.expr)
         elif isinstance(expr, CastExpr):
             expr.expr = walk_expr(expr.expr)
@@ -484,6 +487,8 @@ class TypeChecker:
                 return self._check_map(expr, env)
             case GradExpr():
                 return self._check_grad(expr, env)
+            case ValueAndGradExpr():
+                return self._check_value_and_grad(expr, env)
             case CastExpr():
                 return self._check_cast(expr, env)
             case FoldExpr():
@@ -661,6 +666,30 @@ class TypeChecker:
             return None
 
         return wrt_type
+
+    def _check_value_and_grad(self, expr: ValueAndGradExpr, env: TypeEnv) -> MaomiType | None:
+        wrt_type = env.lookup(expr.wrt)
+        if wrt_type is None:
+            self._error(
+                f"value_and_grad: undefined variable '{expr.wrt}'",
+                expr.span.line_start,
+                expr.span.col_start,
+            )
+            return None
+
+        expr_type = self._infer(expr.expr, env)
+        if expr_type is None:
+            return None
+
+        if not isinstance(expr_type, ScalarType):
+            self._error(
+                f"value_and_grad: expression must be scalar, got {expr_type}",
+                expr.expr.span.line_start,
+                expr.expr.span.col_start,
+            )
+            return None
+
+        return StructType("_ValueAndGrad", (("value", expr_type), ("gradient", wrt_type)))
 
     _CAST_BASES = {"f32", "f64", "bf16", "i32", "i64", "bool"}
 

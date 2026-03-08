@@ -3,7 +3,7 @@ from __future__ import annotations
 from ..builtins import ELEMENTWISE as _EW_REGISTRY, COMPLEX as _CX_REGISTRY
 
 _KEYWORDS = [
-    "fn", "let", "if", "else", "scan", "map", "grad", "cast", "fold",
+    "fn", "let", "if", "else", "scan", "map", "grad", "value_and_grad", "cast", "fold",
     "struct", "with", "import", "from", "in", "true", "false",
     "while", "do", "limit",
 ]

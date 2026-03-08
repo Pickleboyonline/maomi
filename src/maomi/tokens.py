@@ -20,6 +20,7 @@ class TokenType(StrEnum):
     SCAN = auto()
     MAP = auto()
     GRAD = auto()
+    VALUE_AND_GRAD = auto()
     IN = auto()
     WHILE = auto()
     DO = auto()
@@ -107,6 +108,7 @@ KEYWORDS: dict[str, TokenType] = {
     "scan": TokenType.SCAN,
     "map": TokenType.MAP,
     "grad": TokenType.GRAD,
+    "value_and_grad": TokenType.VALUE_AND_GRAD,
     "in": TokenType.IN,
     "import": TokenType.IMPORT,
     "from": TokenType.FROM,

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .tokens import Token, TokenType
+from .tokens import Token, TokenType, KEYWORDS
 from .ast_nodes import (
     Span,
     Program,
@@ -25,6 +25,7 @@ from .ast_nodes import (
     WhileExpr,
     MapExpr,
     GradExpr,
+    ValueAndGradExpr,
     CastExpr,
     FoldExpr,
     ArrayLiteral,
@@ -44,12 +45,16 @@ ADDITION_OPS = {TokenType.PLUS, TokenType.MINUS}
 MULTIPLICATION_OPS = {TokenType.STAR, TokenType.SLASH}
 BASE_TYPES = {TokenType.F32, TokenType.F64, TokenType.BF16, TokenType.I32, TokenType.I64, TokenType.BOOL_TYPE}
 
+# All keyword token types — valid as struct field names after '.'
+_KEYWORD_FIELD_TOKENS = frozenset(KEYWORDS.values())
+
 
 class Parser:
     def __init__(self, tokens: list[Token], filename: str = "<stdin>"):
         self.tokens = tokens
         self.filename = filename
         self.pos = 0
+        self._destruct_counter = 0
 
     # -- Helpers --
 
@@ -250,7 +255,11 @@ class Parser:
 
         while not self._check(TokenType.RBRACE):
             if self._check(TokenType.LET):
-                stmts.append(self._parse_let_stmt())
+                result = self._parse_let_stmt()
+                if isinstance(result, list):
+                    stmts.extend(result)
+                else:
+                    stmts.append(result)
             else:
                 expr = self._parse_expr()
                 if self._match(TokenType.SEMICOLON):
@@ -265,8 +274,10 @@ class Parser:
 
     # -- Statements --
 
-    def _parse_let_stmt(self) -> LetStmt:
+    def _parse_let_stmt(self) -> LetStmt | list[LetStmt]:
         start = self._expect(TokenType.LET)
+        if self._check(TokenType.LBRACE):
+            return self._parse_destructure_let(start)
         name = self._expect(TokenType.IDENT).value
         type_ann = None
         if self._match(TokenType.COLON):
@@ -275,6 +286,49 @@ class Parser:
         value = self._parse_expr()
         self._expect(TokenType.SEMICOLON)
         return LetStmt(name, type_ann, value, self._span_from(start))
+
+    def _fresh_name(self, prefix: str) -> str:
+        name = f"{prefix}{self._destruct_counter}"
+        self._destruct_counter += 1
+        return name
+
+    def _expect_field_name(self) -> Token:
+        """Expect an identifier or keyword usable as a field/binding name."""
+        tok = self._current()
+        if tok.type == TokenType.IDENT or tok.type in _KEYWORD_FIELD_TOKENS:
+            return self._advance()
+        raise self._error(f"expected field name, got {tok.type.value} ({tok.value!r})")
+
+    def _parse_destructure_let(self, start: Token) -> list[LetStmt]:
+        self._expect(TokenType.LBRACE)
+        bindings: list[tuple[str, str]] = []  # (field_name, bind_name)
+        if not self._check(TokenType.RBRACE):
+            field = self._expect_field_name().value
+            if self._match(TokenType.COLON):
+                alias = self._expect(TokenType.IDENT).value
+                bindings.append((field, alias))
+            else:
+                bindings.append((field, field))
+            while self._match(TokenType.COMMA):
+                if self._check(TokenType.RBRACE):
+                    break  # trailing comma
+                field = self._expect_field_name().value
+                if self._match(TokenType.COLON):
+                    alias = self._expect(TokenType.IDENT).value
+                    bindings.append((field, alias))
+                else:
+                    bindings.append((field, field))
+        self._expect(TokenType.RBRACE)
+        self._expect(TokenType.ASSIGN)
+        value = self._parse_expr()
+        self._expect(TokenType.SEMICOLON)
+        span = self._span_from(start)
+        tmp_name = self._fresh_name("__maomi_destruct_")
+        stmts: list[LetStmt] = [LetStmt(tmp_name, None, value, span)]
+        for field_name, bind_name in bindings:
+            access = FieldAccess(Identifier(tmp_name, span), field_name, span)
+            stmts.append(LetStmt(bind_name, None, access, span))
+        return stmts
 
     # -- Expressions (precedence climbing) --
 
@@ -287,6 +341,8 @@ class Parser:
             return self._parse_map()
         if self._check(TokenType.GRAD):
             return self._parse_grad()
+        if self._check(TokenType.VALUE_AND_GRAD):
+            return self._parse_value_and_grad()
         if self._check(TokenType.CAST):
             return self._parse_cast()
         if self._check(TokenType.FOLD):
@@ -366,6 +422,15 @@ class Parser:
         wrt = self._expect(TokenType.IDENT).value
         self._expect(TokenType.RPAREN)
         return GradExpr(expr, wrt, self._span_from(start))
+
+    def _parse_value_and_grad(self) -> ValueAndGradExpr:
+        start = self._expect(TokenType.VALUE_AND_GRAD)
+        self._expect(TokenType.LPAREN)
+        expr = self._parse_expr()
+        self._expect(TokenType.COMMA)
+        wrt = self._expect(TokenType.IDENT).value
+        self._expect(TokenType.RPAREN)
+        return ValueAndGradExpr(expr, wrt, self._span_from(start))
 
     _CAST_TYPE_TOKENS = {
         TokenType.F32: "f32", TokenType.F64: "f64", TokenType.BF16: "bf16",
@@ -570,7 +635,12 @@ class Parser:
             elif self._check(TokenType.DOT):
                 # DOT: either module-qualified name (math.relu(...)) or struct field access (point.x)
                 self._advance()
-                field_tok = self._expect(TokenType.IDENT)
+                # Accept identifiers and keywords as field names (e.g., .grad, .value)
+                field_tok = self._current()
+                if field_tok.type == TokenType.IDENT or field_tok.type in _KEYWORD_FIELD_TOKENS:
+                    self._advance()
+                else:
+                    raise self._error(f"expected field name after '.', got {field_tok.type.value}")
                 if isinstance(expr, Identifier) and self._check(TokenType.LPAREN):
                     # Module-qualified call: math.relu(...) — flatten to qualified identifier
                     qualified = f"{expr.name}.{field_tok.value}"

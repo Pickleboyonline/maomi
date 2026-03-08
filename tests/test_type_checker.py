@@ -363,6 +363,108 @@ class TestGrad:
         )
 
 
+class TestValueAndGrad:
+    def test_basic(self):
+        check_ok("""
+            fn f(x: f32, w: f32) -> f32 {
+                let vg = value_and_grad(x * w, w);
+                vg.value
+            }
+        """)
+
+    def test_returns_struct_with_gradient_field(self):
+        check_ok("""
+            fn f(x: f32, w: f32) -> f32 {
+                let vg = value_and_grad(x * w, w);
+                vg.gradient
+            }
+        """)
+
+    def test_array_wrt(self):
+        check_ok("""
+            fn f(x: f32[4], w: f32[4, 2]) -> f32[4, 2] {
+                let loss = mean((x @ w) ** 2.0);
+                let vg = value_and_grad(loss, w);
+                vg.gradient
+            }
+        """)
+
+    def test_non_scalar_expr(self):
+        check_err("""
+            fn f(x: f32[4], w: f32[4]) -> f32[4] {
+                value_and_grad(x + w, w)
+            }
+        """, "must be scalar")
+
+    def test_undefined_var(self):
+        check_err(
+            "fn f(x: f32) -> f32 { value_and_grad(x, y) }",
+            "undefined variable",
+        )
+
+
+class TestDestructure:
+    def test_basic_struct(self):
+        check_ok("""
+            struct S { x: f32, y: f32 }
+            fn f() -> f32 {
+                let { x, y } = S { x: 1.0, y: 2.0 };
+                x + y
+            }
+        """)
+
+    def test_rebind(self):
+        check_ok("""
+            struct S { x: f32, y: f32 }
+            fn f() -> f32 {
+                let { x: a, y: b } = S { x: 1.0, y: 2.0 };
+                a + b
+            }
+        """)
+
+    def test_partial(self):
+        check_ok("""
+            struct S { x: f32, y: f32 }
+            fn f() -> f32 {
+                let { x } = S { x: 1.0, y: 2.0 };
+                x
+            }
+        """)
+
+    def test_invalid_field(self):
+        check_err("""
+            struct S { x: f32, y: f32 }
+            fn f() -> f32 {
+                let { z } = S { x: 1.0, y: 2.0 };
+                z
+            }
+        """, "no field")
+
+    def test_non_struct(self):
+        check_err("""
+            fn f(x: f32) -> f32 {
+                let { y } = x;
+                y
+            }
+        """, "non-struct")
+
+    def test_with_value_and_grad(self):
+        check_ok("""
+            fn f(x: f32, w: f32) -> f32 {
+                let { value, gradient } = value_and_grad(x * w, w);
+                value + gradient
+            }
+        """)
+
+    def test_with_value_and_grad_rebind(self):
+        check_ok("""
+            fn f(x: f32, w: f32) -> f32 {
+                let { value: v, gradient: g } = value_and_grad(x * w, w);
+                v + g
+            }
+        """)
+
+
 class TestCallback:
     def test_callback_any_args(self):
         check_ok("""

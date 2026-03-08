@@ -4,7 +4,7 @@ from lsprotocol import types
 
 from ..ast_nodes import (
     FnDef, Block, LetStmt, ExprStmt, Param,
-    CallExpr, GradExpr,
+    CallExpr, GradExpr, ValueAndGradExpr,
     Identifier, StructLiteral, StructDef,
 )
 from ._core import server, _cache, _local_functions
@@ -27,6 +27,8 @@ def _refs_walk_node(node, name, kind, spans):
         if isinstance(node, Identifier) and node.name == name:
             spans.append(node.span)
         if isinstance(node, GradExpr) and node.wrt == name:
+            spans.append(node.span)
+        if isinstance(node, ValueAndGradExpr) and node.wrt == name:
             spans.append(node.span)
     elif kind == "struct":
         if isinstance(node, StructLiteral) and node.name == name:
