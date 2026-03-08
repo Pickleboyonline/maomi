@@ -15,6 +15,7 @@ from maomi.types import ScalarType, StructType
 
 jax = pytest.importorskip("jax")
 jnp = jax.numpy
+from jax.scipy.special import logsumexp as jax_logsumexp
 
 
 # ---------------------------------------------------------------------------
@@ -733,4 +734,33 @@ class TestClipGrad:
             [x],
             jax.grad(lambda x: jnp.clip(x, 0.0, 1.0)),
             [jnp.float32(x)],
+# Logsumexp
+# ---------------------------------------------------------------------------
+
+class TestLogsumexpGrad:
+    def test_logsumexp_all(self):
+        x = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.float32)
+        _check(
+            "fn f(x: f32[2, 3]) -> f32 { logsumexp(x) }\n"
+            "fn grad_f(x: f32[2, 3]) -> f32[2, 3] { grad(f(x), x) }",
+            [x],
+            jax.grad(lambda x: jax_logsumexp(x)), [jnp.array(x)],
+        )
+
+    def test_logsumexp_axis(self):
+        x = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.float32)
+        _check(
+            "fn f(x: f32[2, 3]) -> f32 { mean(logsumexp(x, axis=1)) }\n"
+            "fn grad_f(x: f32[2, 3]) -> f32[2, 3] { grad(f(x), x) }",
+            [x],
+            jax.grad(lambda x: jnp.mean(jax_logsumexp(x, axis=1))), [jnp.array(x)],
+        )
+
+    def test_logsumexp_1d(self):
+        x = np.array([0.5, 1.0, 1.5, 2.0], dtype=np.float32)
+        _check(
+            "fn f(x: f32[4]) -> f32 { logsumexp(x) }\n"
+            "fn grad_f(x: f32[4]) -> f32[4] { grad(f(x), x) }",
+            [x],
+            jax.grad(lambda x: jax_logsumexp(x)), [jnp.array(x)],
         )

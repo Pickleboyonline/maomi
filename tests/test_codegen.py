@@ -772,3 +772,20 @@ class TestOneHot:
         assert "stablehlo.iota" in out
         assert "dim = 2" in out
         assert "tensor<3x4x5xf32>" in out
+class TestLogsumexp:
+    def test_logsumexp_basic(self):
+        out = codegen("fn f(x: f32[4]) -> f32 { logsumexp(x) }")
+        assert "stablehlo.exponential" in out
+        assert "stablehlo.log" in out
+
+    def test_logsumexp_axis(self):
+        out = codegen("fn f(x: f32[3, 4]) -> f32[3] { logsumexp(x, axis=1) }")
+        assert "stablehlo.exponential" in out
+        assert "stablehlo.log" in out
+        assert "stablehlo.subtract" in out
+
+    def test_logsumexp_keepdims(self):
+        out = codegen("fn f(x: f32[3, 4]) -> f32[3, 1] { logsumexp(x, axis=1, keepdims=true) }")
+        assert "stablehlo.exponential" in out
+        assert "stablehlo.log" in out
+        assert "stablehlo.reshape" in out

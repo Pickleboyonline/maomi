@@ -1207,7 +1207,7 @@ class TypeChecker:
             return self._check_rng_call(expr, env)
 
         # sum/mean/max/min — reduction with optional axis
-        if expr.callee in ("sum", "mean", "max", "min"):
+        if expr.callee in ("sum", "mean", "max", "min", "logsumexp"):
             return self._check_reduction(expr, env)
 
         # argmax/argmin — returns i32 index

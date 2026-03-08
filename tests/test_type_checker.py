@@ -721,3 +721,24 @@ class TestOneHot:
 
     def test_one_hot_wrong_arg_count(self):
         check_err("fn f(x: i32) -> f32[5] { one_hot(x) }", "2 arguments")
+class TestLogsumexp:
+    def test_logsumexp_all(self):
+        check_ok("fn f(x: f32[3, 4]) -> f32 { logsumexp(x) }")
+
+    def test_logsumexp_axis(self):
+        check_ok("fn f(x: f32[3, 4]) -> f32[3] { logsumexp(x, axis=1) }")
+
+    def test_logsumexp_keepdims(self):
+        check_ok("fn f(x: f32[3, 4]) -> f32[3, 1] { logsumexp(x, axis=1, keepdims=true) }")
+
+    def test_logsumexp_axis0(self):
+        check_ok("fn f(x: f32[3, 4]) -> f32[4] { logsumexp(x, axis=0) }")
+
+    def test_logsumexp_1d(self):
+        check_ok("fn f(x: f32[5]) -> f32 { logsumexp(x) }")
+
+    def test_logsumexp_axis_error(self):
+        check_err(
+            "fn f(x: f32[3, 4]) -> f32[3] { logsumexp(x, axis=2) }",
+            "axis 2 out of range",
+        )

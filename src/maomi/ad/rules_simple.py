@@ -164,6 +164,51 @@ class SimpleGradRulesMixin:
             self.type_map[id(grad)] = arg_type
             self._accumulate(adjoints, arg_name, grad)
 
+        elif callee == "logsumexp":
+            if not isinstance(arg_type, ArrayType):
+                self._accumulate(adjoints, arg_name, adj)
+                return
+
+            # d/dx logsumexp(x, axis) = softmax(x, axis) * adj
+            #                         = exp(x - broadcast(logsumexp_result)) * broadcast(adj)
+            tape_name = var_map.get(id(node))
+            node_ref = self._make_ref(tape_name, self._type_of(node)) if tape_name else node
+            arg_ref = self._make_ref(arg_name, arg_type)
+            ndim = len(arg_type.dims)
+
+            # Broadcast logsumexp result back to input shape
+            if has_axis:
+                if keepdims:
+                    result_bc = _BroadcastExpr(node_ref, tuple(arg_type.dims), _DUMMY_SPAN)
+                else:
+                    broadcast_dims = tuple(i for i in range(ndim) if i != axis)
+                    result_bc = _BroadcastExpr(node_ref, tuple(arg_type.dims), _DUMMY_SPAN, broadcast_dims=broadcast_dims)
+            else:
+                result_bc = _BroadcastExpr(node_ref, tuple(arg_type.dims), _DUMMY_SPAN)
+            self.type_map[id(result_bc)] = arg_type
+
+            # softmax = exp(x - logsumexp_result_broadcast)
+            shifted = BinOp("-", arg_ref, result_bc, _DUMMY_SPAN)
+            self.type_map[id(shifted)] = arg_type
+            softmax = CallExpr("exp", [shifted], _DUMMY_SPAN)
+            self.type_map[id(softmax)] = arg_type
+
+            # Broadcast adj back to input shape
+            if has_axis:
+                if keepdims:
+                    adj_bc = _BroadcastExpr(adj, tuple(arg_type.dims), _DUMMY_SPAN)
+                else:
+                    broadcast_dims = tuple(i for i in range(ndim) if i != axis)
+                    adj_bc = _BroadcastExpr(adj, tuple(arg_type.dims), _DUMMY_SPAN, broadcast_dims=broadcast_dims)
+            else:
+                adj_bc = _BroadcastExpr(adj, tuple(arg_type.dims), _DUMMY_SPAN)
+            self.type_map[id(adj_bc)] = arg_type
+
+            # grad = softmax * adj_broadcast
+            grad = BinOp("*", softmax, adj_bc, _DUMMY_SPAN)
+            self.type_map[id(grad)] = arg_type
+            self._accumulate(adjoints, arg_name, grad)
+
     def _backprop_where(self, args: list[Expr], adj: Expr,
                          adjoints: dict[str, Expr], var_map: dict[int, str],
                          node: Expr):
