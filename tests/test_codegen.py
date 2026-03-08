@@ -638,3 +638,38 @@ class TestTransposeTypeErrors:
         errors = tc.check(prog)
         assert errors
         assert "out of range" in errors[0].message
+
+
+class TestBF16:
+    def test_bf16_identity(self):
+        out = codegen("fn f(x: bf16) -> bf16 { x }")
+        assert "bf16" in out
+
+    def test_bf16_array(self):
+        out = codegen("fn f(x: bf16[4]) -> bf16[4] { x }")
+        assert "tensor<4xbf16>" in out
+
+    def test_cast_f32_to_bf16(self):
+        out = codegen("fn f(x: f32) -> bf16 { cast(x, bf16) }")
+        assert "stablehlo.convert" in out
+        assert "bf16" in out
+
+    def test_cast_bf16_to_f32(self):
+        out = codegen("fn f(x: bf16) -> f32 { cast(x, f32) }")
+        assert "stablehlo.convert" in out
+        assert "f32" in out
+
+    def test_bf16_add(self):
+        out = codegen("fn f(x: bf16, y: bf16) -> bf16 { x + y }")
+        assert "stablehlo.add" in out
+        assert "bf16" in out
+
+    def test_bf16_array_add(self):
+        out = codegen("fn f(x: bf16[4], y: bf16[4]) -> bf16[4] { x + y }")
+        assert "stablehlo.add" in out
+        assert "tensor<4xbf16>" in out
+
+    def test_bf16_mul(self):
+        out = codegen("fn f(x: bf16, y: bf16) -> bf16 { x * y }")
+        assert "stablehlo.multiply" in out
+        assert "bf16" in out

@@ -35,6 +35,7 @@ class TokenType(StrEnum):
     # Type keywords
     F32 = auto()
     F64 = auto()
+    BF16 = auto()
     I32 = auto()
     I64 = auto()
     BOOL_TYPE = auto()
@@ -99,6 +100,7 @@ KEYWORDS: dict[str, TokenType] = {
     "false": TokenType.FALSE,
     "f32": TokenType.F32,
     "f64": TokenType.F64,
+    "bf16": TokenType.BF16,
     "i32": TokenType.I32,
     "i64": TokenType.I64,
     "bool": TokenType.BOOL_TYPE,

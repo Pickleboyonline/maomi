@@ -35,6 +35,7 @@ from ...builtins import ELEMENTWISE as _EW_REGISTRY
 _MLIR_ETYPE = {
     "f32": "f32",
     "f64": "f64",
+    "bf16": "bf16",
     "i32": "i32",
     "i64": "i64",
     "bool": "i1",

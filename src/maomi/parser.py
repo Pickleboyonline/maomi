@@ -42,7 +42,7 @@ from .errors import ParseError
 COMPARISON_OPS = {TokenType.EQ, TokenType.NEQ, TokenType.LT, TokenType.GT, TokenType.LEQ, TokenType.GEQ}
 ADDITION_OPS = {TokenType.PLUS, TokenType.MINUS}
 MULTIPLICATION_OPS = {TokenType.STAR, TokenType.SLASH}
-BASE_TYPES = {TokenType.F32, TokenType.F64, TokenType.I32, TokenType.I64, TokenType.BOOL_TYPE}
+BASE_TYPES = {TokenType.F32, TokenType.F64, TokenType.BF16, TokenType.I32, TokenType.I64, TokenType.BOOL_TYPE}
 
 
 class Parser:
@@ -368,7 +368,7 @@ class Parser:
         return GradExpr(expr, wrt, self._span_from(start))
 
     _CAST_TYPE_TOKENS = {
-        TokenType.F32: "f32", TokenType.F64: "f64",
+        TokenType.F32: "f32", TokenType.F64: "f64", TokenType.BF16: "bf16",
         TokenType.I32: "i32", TokenType.I64: "i64",
         TokenType.BOOL_TYPE: "bool",
     }
@@ -395,7 +395,7 @@ class Parser:
         self._expect(TokenType.COMMA)
         tok = self._advance()
         if tok.type not in self._CAST_TYPE_TOKENS:
-            self._error(f"cast: expected a type (f32, f64, i32, i64, bool), got '{tok.value}'")
+            self._error(f"cast: expected a type (f32, f64, bf16, i32, i64, bool), got '{tok.value}'")
         target = self._CAST_TYPE_TOKENS[tok.type]
         self._expect(TokenType.RPAREN)
         return CastExpr(expr, target, self._span_from(start))

@@ -8,7 +8,7 @@ _KEYWORDS = [
     "while", "do", "limit",
 ]
 
-_TYPE_NAMES = ["f32", "f64", "i32", "i64", "bool"]
+_TYPE_NAMES = ["f32", "f64", "bf16", "i32", "i64", "bool"]
 
 # Derive from central registry — stays in sync automatically
 _BUILTINS = sorted(set(_EW_REGISTRY.keys()) | set(_CX_REGISTRY.keys()))

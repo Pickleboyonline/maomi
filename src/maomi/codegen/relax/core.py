@@ -165,6 +165,7 @@ def _make_bits_to_uniform_prim(n: int):
 _TVM_DTYPE = {
     "f32": "float32",
     "f64": "float64",
+    "bf16": "bfloat16",
     "i32": "int32",
     "i64": "int64",
     "bool": "bool",
@@ -213,7 +214,7 @@ class RelaxCodegen:
         return self._resolve_annotation_type(param.type_annotation)
 
     def _resolve_annotation_type(self, ta) -> MaomiType:
-        if ta.base in ("f32", "f64", "i32", "i64", "bool"):
+        if ta.base in ("f32", "f64", "bf16", "i32", "i64", "bool"):
             if ta.dims is None:
                 return ScalarType(ta.base)
             return ArrayType(ta.base, tuple(d.value for d in ta.dims))
