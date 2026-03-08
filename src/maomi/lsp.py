@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from pygls.lsp.server import LanguageServer
@@ -483,6 +484,18 @@ def _complete_general(result: AnalysisResult | None, position: types.Position):
         ))
 
     if result and result.program:
+        # Imported module names (e.g., "nn" from "nn.relu")
+        modules_seen: set[str] = set()
+        for name in result.fn_table:
+            if "." in name and name not in _BUILTIN_SET:
+                mod = name.split(".", 1)[0]
+                if mod not in _BUILTIN_NAMESPACES and mod not in modules_seen:
+                    modules_seen.add(mod)
+                    items.append(types.CompletionItem(
+                        label=mod, kind=types.CompletionItemKind.Module,
+                        detail="imported module",
+                    ))
+
         # Build fn doc lookup
         fn_docs = {f.name: f.doc for f in result.program.functions if f.doc}
         # User-defined functions
@@ -667,7 +680,10 @@ def _goto_find_binding(name, fn, line, col):
 
 
 def _goto_find_definition(node, fn, result):
-    """Find the definition span for the given node."""
+    """Find the definition span and source file for the given node.
+
+    Returns (span, source_file) or None. source_file is None for local definitions.
+    """
     program = result.program
     if program is None:
         return None
@@ -675,16 +691,19 @@ def _goto_find_definition(node, fn, result):
     if isinstance(node, CallExpr):
         for fndef in program.functions:
             if fndef.name == node.callee:
-                return fndef.span
+                return fndef.span, fndef.source_file
         return None
 
     if isinstance(node, Identifier):
-        return _goto_find_binding(node.name, fn, node.span.line_start, node.span.col_start)
+        binding = _goto_find_binding(node.name, fn, node.span.line_start, node.span.col_start)
+        if binding is not None:
+            return binding, None
+        return None
 
     if isinstance(node, StructLiteral):
         for sdef in program.struct_defs:
             if sdef.name == node.name:
-                return sdef.span
+                return sdef.span, None
         return None
 
     if isinstance(node, FieldAccess):
@@ -692,7 +711,7 @@ def _goto_find_definition(node, fn, result):
         if isinstance(typ, StructType):
             for sdef in program.struct_defs:
                 if sdef.name == typ.name:
-                    return sdef.span
+                    return sdef.span, None
         return None
 
     return None
@@ -709,9 +728,14 @@ def goto_definition(ls, params: types.DefinitionParams):
     for fn in _local_functions(result.program):
         node = _find_node_at(fn, line, col)
         if node is not None:
-            defn_span = _goto_find_definition(node, fn, result)
-            if defn_span is not None:
-                return types.Location(uri=uri, range=_span_to_range(defn_span))
+            found = _goto_find_definition(node, fn, result)
+            if found is not None:
+                defn_span, source_file = found
+                if source_file is not None:
+                    target_uri = Path(source_file).as_uri()
+                else:
+                    target_uri = uri
+                return types.Location(uri=target_uri, range=_span_to_range(defn_span))
     return None
 
 

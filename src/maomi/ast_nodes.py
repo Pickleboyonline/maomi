@@ -57,6 +57,7 @@ class FnDef:
     body: Block
     span: Span
     doc: str | None = field(default=None, compare=False)
+    source_file: str | None = field(default=None, compare=False)
 
 
 # ---------- Blocks ----------
