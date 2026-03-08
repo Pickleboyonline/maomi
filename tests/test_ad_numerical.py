@@ -214,6 +214,26 @@ class TestElementwiseGrad:
             jax.grad(lambda x: jnp.mean(1.0 / x)), [jnp.array(x)],
         )
 
+    def test_log1p(self):
+        x = np.array([0.1, 0.5, 1.0, 2.0], dtype=np.float32)
+        _check(
+            "fn f(x: f32[4]) -> f32 { sum(log1p(x)) }\n"
+            "fn grad_f(x: f32[4]) -> f32[4] { grad(f(x), x) }",
+            [x],
+            jax.grad(lambda x: jnp.sum(jnp.log1p(x))),
+            [jnp.array(x)],
+        )
+
+    def test_expm1(self):
+        x = np.array([0.1, 0.5, 1.0, -0.5], dtype=np.float32)
+        _check(
+            "fn f(x: f32[4]) -> f32 { sum(expm1(x)) }\n"
+            "fn grad_f(x: f32[4]) -> f32[4] { grad(f(x), x) }",
+            [x],
+            jax.grad(lambda x: jnp.sum(jnp.expm1(x))),
+            [jnp.array(x)],
+        )
+
 
 # ---------------------------------------------------------------------------
 # Matmul

@@ -134,6 +134,22 @@ class TestFunctionCalls:
         out = codegen("fn f(x: f32) -> f32 { reciprocal(x) }")
         assert "stablehlo.divide" in out
 
+    def test_log1p(self):
+        out = codegen("fn f(x: f32) -> f32 { log1p(x) }")
+        assert "stablehlo.log_plus_one" in out
+
+    def test_log1p_array(self):
+        out = codegen("fn f(x: f32[4]) -> f32[4] { log1p(x) }")
+        assert "stablehlo.log_plus_one" in out
+
+    def test_expm1(self):
+        out = codegen("fn f(x: f32) -> f32 { expm1(x) }")
+        assert "stablehlo.exponential_minus_one" in out
+
+    def test_expm1_array(self):
+        out = codegen("fn f(x: f32[4]) -> f32[4] { expm1(x) }")
+        assert "stablehlo.exponential_minus_one" in out
+
     def test_builtin_sigmoid_array(self):
         out = codegen("fn f(x: f32[4]) -> f32[4] { sigmoid(x) }")
         assert "stablehlo.negate" in out
