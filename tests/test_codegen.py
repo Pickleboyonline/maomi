@@ -654,3 +654,35 @@ class TestTransposeTypeErrors:
         errors = tc.check(prog)
         assert errors
         assert "out of range" in errors[0].message
+
+
+class TestUtilityBuiltins:
+    def test_isfinite_scalar(self):
+        out = codegen("fn f(x: f32) -> bool { isfinite(x) }")
+        assert "is_finite" in out
+
+    def test_isfinite_array(self):
+        out = codegen("fn f(x: f32[4]) -> bool[4] { isfinite(x) }")
+        assert "is_finite" in out
+
+    def test_zeros_like_scalar(self):
+        out = codegen("fn f(x: f32) -> f32 { zeros_like(x) }")
+        assert "stablehlo.constant" in out
+        assert "0.000000e+00" in out
+
+    def test_zeros_like_array(self):
+        out = codegen("fn f(x: f32[4]) -> f32[4] { zeros_like(x) }")
+        assert "stablehlo.constant" in out
+        assert "0.000000e+00" in out
+        assert "broadcast_in_dim" in out
+
+    def test_ones_like_scalar(self):
+        out = codegen("fn f(x: f32) -> f32 { ones_like(x) }")
+        assert "stablehlo.constant" in out
+        assert "1.000000e+00" in out
+
+    def test_ones_like_array(self):
+        out = codegen("fn f(x: f32[4]) -> f32[4] { ones_like(x) }")
+        assert "stablehlo.constant" in out
+        assert "1.000000e+00" in out
+        assert "broadcast_in_dim" in out
