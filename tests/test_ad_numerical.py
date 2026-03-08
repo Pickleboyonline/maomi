@@ -169,6 +169,51 @@ class TestElementwiseGrad:
             jax.grad(lambda x: jnp.mean(jnp.abs(x))), [jnp.array(x)],
         )
 
+    def test_sigmoid(self):
+        x = np.array([0., 0.5, 1., -0.5], dtype=np.float32)
+        _check(
+            "fn f(x: f32[4]) -> f32 { mean(sigmoid(x)) }\n"
+            "fn grad_f(x: f32[4]) -> f32[4] { grad(f(x), x) }",
+            [x],
+            jax.grad(lambda x: jnp.mean(jax.nn.sigmoid(x))), [jnp.array(x)],
+        )
+
+    def test_neg(self):
+        x = np.array([1., -2., 3., -4.], dtype=np.float32)
+        _check(
+            "fn f(x: f32[4]) -> f32 { mean(neg(x)) }\n"
+            "fn grad_f(x: f32[4]) -> f32[4] { grad(f(x), x) }",
+            [x],
+            jax.grad(lambda x: jnp.mean(-x)), [jnp.array(x)],
+        )
+
+    def test_log2(self):
+        x = np.array([1., 2., 4., 8.], dtype=np.float32)
+        _check(
+            "fn f(x: f32[4]) -> f32 { mean(log2(x)) }\n"
+            "fn grad_f(x: f32[4]) -> f32[4] { grad(f(x), x) }",
+            [x],
+            jax.grad(lambda x: jnp.mean(jnp.log2(x))), [jnp.array(x)],
+        )
+
+    def test_rsqrt(self):
+        x = np.array([1., 4., 9., 16.], dtype=np.float32)
+        _check(
+            "fn f(x: f32[4]) -> f32 { mean(rsqrt(x)) }\n"
+            "fn grad_f(x: f32[4]) -> f32[4] { grad(f(x), x) }",
+            [x],
+            jax.grad(lambda x: jnp.mean(jax.lax.rsqrt(x))), [jnp.array(x)],
+        )
+
+    def test_reciprocal(self):
+        x = np.array([1., 2., 4., 8.], dtype=np.float32)
+        _check(
+            "fn f(x: f32[4]) -> f32 { mean(reciprocal(x)) }\n"
+            "fn grad_f(x: f32[4]) -> f32[4] { grad(f(x), x) }",
+            [x],
+            jax.grad(lambda x: jnp.mean(1.0 / x)), [jnp.array(x)],
+        )
+
 
 # ---------------------------------------------------------------------------
 # Matmul

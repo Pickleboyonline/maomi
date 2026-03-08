@@ -1164,67 +1164,18 @@ def rename(ls: LanguageServer, params: types.RenameParams):
 # Signature Help
 # ---------------------------------------------------------------------------
 
-_BUILTIN_SIGNATURES: dict[str, tuple[list[str], list[str], str]] = {
-    "exp": (["x"], ["f32"], "f32"),
-    "log": (["x"], ["f32"], "f32"),
-    "tanh": (["x"], ["f32"], "f32"),
-    "sqrt": (["x"], ["f32"], "f32"),
-    "abs": (["x"], ["f32"], "f32"),
-    "cos": (["x"], ["f32"], "f32"),
-    "sin": (["x"], ["f32"], "f32"),
-    "mean": (["x", "axis", "keepdims"], ["f32[...]", "int", "bool"], "f32"),
-    "sum": (["x", "axis", "keepdims"], ["f32[...]", "int", "bool"], "f32"),
-    "max": (["x", "axis", "keepdims"], ["f32[...]", "int", "bool"], "f32"),
-    "min": (["x", "axis", "keepdims"], ["f32[...]", "int", "bool"], "f32"),
-    "argmax": (["x"], ["f32[...]"], "i32"),
-    "argmin": (["x"], ["f32[...]"], "i32"),
-    "reshape": (["x", "dims..."], ["f32[...]", "int..."], "f32[...]"),
-    "concat": (["arrays...", "axis"], ["f32[...]...", "int"], "f32[...]"),
-    "iota": (["n"], ["int"], "i32[n]"),
-    "zeros": (["dims..."], ["int..."], "f32[...]"),
-    "ones": (["dims..."], ["int..."], "f32[...]"),
-    "full": (["value", "dims..."], ["f32", "int..."], "f32[...]"),
-    "random.key": (["seed"], ["i32"], "Key"),
-    "random.split": (["key", "n"], ["Key", "int"], "Key[n]"),
-    "random.uniform": (["key", "low", "high", "dims..."], ["Key", "f32", "f32", "int..."], "f32[...]"),
-    "random.normal": (["key", "mean", "std", "dims..."], ["Key", "f32", "f32", "int..."], "f32[...]"),
-    "conv2d": (["input", "kernel", "strides", "padding"], ["f32[N,C,H,W]", "f32[O,C,kH,kW]", "(sH,sW)", "str"], "f32[...]"),
-    "max_pool": (["input", "window", "strides", "padding"], ["f32[N,C,H,W]", "(wH,wW)", "(sH,sW)", "str"], "f32[...]"),
-    "avg_pool": (["input", "window", "strides", "padding"], ["f32[N,C,H,W]", "(wH,wW)", "(sH,sW)", "str"], "f32[...]"),
-}
+# Derived from central builtin registry
+from .builtins import ELEMENTWISE as _EW_REGISTRY, COMPLEX as _CX_REGISTRY
 
-_BUILTIN_DOCS: dict[str, str] = {
-    "exp": "Compute element-wise exponential (e^x).",
-    "log": "Compute element-wise natural logarithm (ln x).",
-    "tanh": "Compute element-wise hyperbolic tangent.",
-    "sqrt": "Compute element-wise square root.",
-    "abs": "Compute element-wise absolute value.",
-    "cos": "Compute element-wise cosine.",
-    "sin": "Compute element-wise sine.",
-    "mean": "Compute the mean. `mean(x)` over all elements, `mean(x, axis=1)` along an axis, `mean(x, axis=1, keepdims=true)` to keep reduced dim as size 1.",
-    "sum": "Compute the sum. `sum(x)` over all elements, `sum(x, axis=1)` along an axis, `sum(x, axis=1, keepdims=true)` to keep reduced dim as size 1.",
-    "max": "Reduce-max. `max(x)` over all elements, `max(x, axis=1)` along an axis, `max(x, axis=1, keepdims=true)` to keep reduced dim as size 1.",
-    "min": "Reduce-min. `min(x)` over all elements, `min(x, axis=1)` along an axis, `min(x, axis=1, keepdims=true)` to keep reduced dim as size 1.",
-    "argmax": "Index of maximum element. `argmax(x)` over all elements, `argmax(x, axis)` along an axis. Returns i32.",
-    "argmin": "Index of minimum element. `argmin(x)` over all elements, `argmin(x, axis)` along an axis. Returns i32.",
-    "stop_gradient": "Identity function that blocks gradient flow backward.",
-    "where": "Element-wise conditional: `where(cond, x, y)`. Fully differentiable.",
-    "reshape": "Reshape an array to the given dimensions.\n\nTotal element count must be preserved.",
-    "concat": "Concatenate arrays along the given axis.",
-    "iota": "Generate an integer sequence `[0, 1, ..., n-1]` as `i32[n]`.",
-    "zeros": "Create an array of zeros with the given shape. `zeros(3, 4)` → `f32[3, 4]`.",
-    "ones": "Create an array of ones with the given shape. `ones(3, 4)` → `f32[3, 4]`.",
-    "full": "Create an array filled with a scalar value. `full(0.5, 3, 4)` → `f32[3, 4]`.",
-    "transpose": "Permute array axes. transpose(x) swaps 2D; transpose(x, 0, 2, 1, 3) for general permutation.",
-    "callback": "Host callback (no-op in compiled code). Useful for debugging.",
-    "random.key": "Create a PRNG key from an integer seed.",
-    "random.split": "Split a PRNG key into `n` independent subkeys.",
-    "random.uniform": "Sample uniform random values in `[low, high)`.",
-    "random.normal": "Sample normal random values with given mean and std (Box-Muller).",
-    "conv2d": "2D convolution.\n\nInput: `[N, C, H, W]`, Kernel: `[O, C, kH, kW]`.\nPadding: `\"valid\"` or `\"same\"`.",
-    "max_pool": "2D max pooling.\n\nInput: `[N, C, H, W]`. Reduces spatial dims by window size.",
-    "avg_pool": "2D average pooling.\n\nInput: `[N, C, H, W]`. Reduces spatial dims by window size.",
-}
+_BUILTIN_SIGNATURES: dict[str, tuple[list[str], list[str], str]] = {}
+_BUILTIN_DOCS: dict[str, str] = {}
+
+for _name, _b in _EW_REGISTRY.items():
+    _BUILTIN_SIGNATURES[_name] = (["x"], ["f32"], "f32")
+    _BUILTIN_DOCS[_name] = _b.doc
+for _name, _b in _CX_REGISTRY.items():
+    _BUILTIN_SIGNATURES[_name] = _b.lsp_params
+    _BUILTIN_DOCS[_name] = _b.doc
 
 
 def _sig_parse_call_context(source: str, position: types.Position) -> tuple[str | None, int]:

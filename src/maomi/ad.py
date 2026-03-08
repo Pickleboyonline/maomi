@@ -71,16 +71,19 @@ from .errors import MaomiError
 
 _DUMMY_SPAN = Span(0, 0, 0, 0)
 
-_ELEMENTWISE_BUILTINS = {"exp", "log", "tanh", "sqrt", "abs", "cos", "sin"}
-_REDUCTION_BUILTINS = {"mean", "sum", "max", "min"}
-_SHAPE_BUILTINS = {"reshape", "concat"}
-_NONDIFF_BUILTINS = {"callback"}
-_IOTA_BUILTINS = {"iota", "zeros", "ones", "full"}
-_CONV_POOL_BUILTINS = {"conv2d", "max_pool", "avg_pool"}
-_RNG_BUILTINS = {"random.key", "random.split", "random.uniform", "random.normal"}
-_STOP_GRAD_BUILTINS = {"stop_gradient"}
-_WHERE_BUILTINS = {"where"}
-_ARGMAX_BUILTINS = {"argmax", "argmin"}
+# Builtin sets derived from central registry
+from .builtins import ELEMENTWISE as _EW_REGISTRY, COMPLEX as _CX_REGISTRY, ALL_NAMES as _ALL_BUILTIN_NAMES
+
+_ELEMENTWISE_BUILTINS = set(_EW_REGISTRY)
+_REDUCTION_BUILTINS = {n for n, b in _CX_REGISTRY.items() if b.category == "reduction"}
+_SHAPE_BUILTINS = {n for n, b in _CX_REGISTRY.items() if b.category == "shape"}
+_NONDIFF_BUILTINS = {n for n, b in _CX_REGISTRY.items() if b.ad_behavior == "nondiff"}
+_IOTA_BUILTINS = {n for n, b in _CX_REGISTRY.items() if b.category == "construction"}
+_CONV_POOL_BUILTINS = {n for n, b in _CX_REGISTRY.items() if b.category == "conv_pool"}
+_RNG_BUILTINS = {n for n, b in _CX_REGISTRY.items() if b.category == "rng"}
+_STOP_GRAD_BUILTINS = {n for n, b in _CX_REGISTRY.items() if b.category == "stop_grad"}
+_WHERE_BUILTINS = {n for n, b in _CX_REGISTRY.items() if b.category == "where"}
+_ARGMAX_BUILTINS = {n for n, b in _CX_REGISTRY.items() if b.category == "argmax"}
 _MAX_GRAD_DEPTH = 10
 
 
@@ -1238,49 +1241,12 @@ class ADTransform:
     def _backprop_elementwise(self, callee: str, args: list[Expr], adj: Expr,
                                adjoints: dict[str, Expr], var_map: dict[int, str],
                                node: Expr):
+        descriptor = _EW_REGISTRY[callee]
         arg = args[0]
         arg_name = var_map[id(arg)]
         arg_ref = self._make_ref(arg_name, self._type_of(arg))
-
-        if callee == "exp":
-            # d/dx exp(x) = exp(x) * dz
-            exp_x = self._make_call("exp", [arg_ref])
-            self._accumulate(adjoints, arg_name, self._make_binop("*", adj, exp_x))
-
-        elif callee == "log":
-            # d/dx log(x) = dz / x
-            self._accumulate(adjoints, arg_name, self._make_binop("/", adj, arg_ref))
-
-        elif callee == "tanh":
-            # d/dx tanh(x) = dz * (1 - tanh(x)^2)
-            tanh_x = self._make_call("tanh", [arg_ref])
-            tanh_sq = self._make_binop("*", tanh_x, tanh_x)
-            one_minus = self._make_binop("-", self._make_float(1.0), tanh_sq)
-            self._accumulate(adjoints, arg_name, self._make_binop("*", adj, one_minus))
-
-        elif callee == "sqrt":
-            # d/dx sqrt(x) = dz / (2 * sqrt(x))
-            sqrt_x = self._make_call("sqrt", [arg_ref])
-            two_sqrt = self._make_binop("*", self._make_float(2.0), sqrt_x)
-            self._accumulate(adjoints, arg_name, self._make_binop("/", adj, two_sqrt))
-
-        elif callee == "abs":
-            # d/dx |x| = dz * sign(x) — approximate as x / |x|
-            abs_x = self._make_call("abs", [arg_ref])
-            sign = self._make_binop("/", arg_ref, abs_x)
-            self._accumulate(adjoints, arg_name, self._make_binop("*", adj, sign))
-
-        elif callee == "cos":
-            # d/dx cos(x) = -sin(x) * dz
-            sin_x = self._make_call("sin", [arg_ref])
-            neg_sin = UnaryOp("-", sin_x, _DUMMY_SPAN)
-            self.type_map[id(neg_sin)] = self._type_of(arg)
-            self._accumulate(adjoints, arg_name, self._make_binop("*", adj, neg_sin))
-
-        elif callee == "sin":
-            # d/dx sin(x) = cos(x) * dz
-            cos_x = self._make_call("cos", [arg_ref])
-            self._accumulate(adjoints, arg_name, self._make_binop("*", adj, cos_x))
+        grad_expr = descriptor.grad_rule(self, arg_ref, adj)
+        self._accumulate(adjoints, arg_name, grad_expr)
 
     def _backprop_reduction(self, callee: str, args: list[Expr], adj: Expr,
                              adjoints: dict[str, Expr], var_map: dict[int, str],

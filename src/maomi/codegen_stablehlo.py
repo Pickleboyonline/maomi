@@ -123,15 +123,10 @@ _COMPARISON_MAP = {
     ">=": "GE",
 }
 
-_BUILTIN_OPS = {
-    "exp": "stablehlo.exponential",
-    "log": "stablehlo.log",
-    "tanh": "stablehlo.tanh",
-    "sqrt": "stablehlo.sqrt",
-    "abs": "stablehlo.abs",
-    "cos": "stablehlo.cosine",
-    "sin": "stablehlo.sine",
-}
+# Derived from central registry — maps builtin name to StableHLO op
+from .builtins import ELEMENTWISE as _EW_REGISTRY
+
+_BUILTIN_OPS = {n: b.stablehlo_op for n, b in _EW_REGISTRY.items() if b.stablehlo_op}
 
 
 def _mlir_type(t: MaomiType) -> str:
@@ -792,9 +787,11 @@ class StableHLOCodegen:
         if expr.callee in self._RNG_BUILTINS:
             return self._gen_rng(expr, env)
 
-        # Handle builtins
+        # Handle builtins — elementwise (single op or compound)
         if expr.callee in _BUILTIN_OPS:
             return self._gen_elementwise_builtin(expr, env)
+        if expr.callee in _EW_REGISTRY and _EW_REGISTRY[expr.callee].codegen_fn:
+            return _EW_REGISTRY[expr.callee].codegen_fn(self, expr, env)
         if expr.callee == "mean":
             return self._gen_mean(expr, env)
         if expr.callee == "sum":
@@ -1047,6 +1044,25 @@ class StableHLOCodegen:
                 result = self._fresh()
                 self._emit(f"{result} = {op} {extracted} : {mlir_ft}")
                 field_ssas.append(result)
+        var = self._fresh()
+        types_str = ", ".join(_mlir_type(ft) for _, ft in stype.fields)
+        self._emit(f"{var} = stablehlo.tuple {', '.join(field_ssas)} : tuple<{types_str}>")
+        return var
+
+    def _gen_struct_compound_elementwise(self, name: str, inner_fn, arg_ssa: str, stype: StructType) -> str:
+        """Apply a compound elementwise builtin to each field of a struct.
+
+        inner_fn: (codegen, arg_ssa, mlir_type_str) -> result_ssa
+        """
+        field_ssas = []
+        for i, (fname, ftype) in enumerate(stype.fields):
+            mlir_ft = _mlir_type(ftype)
+            extracted = self._fresh()
+            self._emit(f"{extracted} = stablehlo.get_tuple_element {arg_ssa}[{i}] : ({_mlir_type(stype)}) -> {mlir_ft}")
+            if isinstance(ftype, StructType):
+                field_ssas.append(self._gen_struct_compound_elementwise(name, inner_fn, extracted, ftype))
+            else:
+                field_ssas.append(inner_fn(self, extracted, mlir_ft))
         var = self._fresh()
         types_str = ", ".join(_mlir_type(ft) for _, ft in stype.fields)
         self._emit(f"{var} = stablehlo.tuple {', '.join(field_ssas)} : tuple<{types_str}>")
