@@ -44,6 +44,7 @@ from ..ast_nodes import (
     WhileExpr,
     MapExpr,
     GradExpr,
+    ValueAndGradExpr,
     CastExpr,
     FoldExpr,
     ArrayLiteral,
@@ -145,14 +146,18 @@ class ADTransform(SimpleGradRulesMixin, ComplexGradRulesMixin):
         match expr:
             case GradExpr(expr=inner, wrt=wrt):
                 return self._differentiate(inner, wrt, expr, let_env)
+            case ValueAndGradExpr(expr=inner, wrt=wrt):
+                return self._differentiate_value_and_grad(inner, wrt, expr, let_env)
             case _:
                 return self._transform_expr(expr)
 
     def _transform_expr(self, expr: Expr) -> Expr:
-        """Recursively transform, replacing GradExpr nodes."""
+        """Recursively transform, replacing GradExpr and ValueAndGradExpr nodes."""
         match expr:
             case GradExpr(expr=inner, wrt=wrt):
                 return self._differentiate(inner, wrt, expr, {})
+            case ValueAndGradExpr(expr=inner, wrt=wrt):
+                return self._differentiate_value_and_grad(inner, wrt, expr, {})
             case BinOp(op=op, left=left, right=right):
                 new_left = self._transform_expr(left)
                 new_right = self._transform_expr(right)
@@ -302,6 +307,67 @@ class ADTransform(SimpleGradRulesMixin, ComplexGradRulesMixin):
         # Register the result type in type_map
         if result_type is not None:
             self.type_map[id(result)] = result_type
+
+        return result
+
+    def _differentiate_value_and_grad(self, expr: Expr, wrt: str,
+                                       vag_expr: ValueAndGradExpr,
+                                       let_env: dict[str, Expr]) -> Expr:
+        """Compute both the forward value and d(expr)/d(wrt)."""
+        # Collect the computation into a tape
+        tape: list[tuple[str, Expr]] = []
+        var_map: dict[int, str] = {}
+        self._linearize(expr, tape, var_map, let_env)
+
+        self._tape_exprs = {name: node for name, node in tape}
+
+        output_name = var_map[id(expr)]
+
+        # Get the forward value
+        forward_value = self._make_ref(output_name, self._type_of(expr))
+
+        # Run backprop to get gradient
+        adjoints: dict[str, Expr] = {}
+        vag_type = self._type_of(vag_expr)
+        # Get the grad type from the synthesized struct
+        grad_type: MaomiType | None = None
+        expr_type: MaomiType | None = None
+        if isinstance(vag_type, StructType):
+            for fname, ftype in vag_type.fields:
+                if fname == "gradient":
+                    grad_type = ftype
+                elif fname == "value":
+                    expr_type = ftype
+
+        adjoints[output_name] = self._make_float(1.0)
+
+        for name, node in reversed(tape):
+            if name not in adjoints:
+                continue
+            adj = adjoints[name]
+            self._backprop(name, node, adj, adjoints, var_map)
+
+        if wrt in adjoints:
+            grad_result = adjoints[wrt]
+        else:
+            if grad_type is not None:
+                grad_result = self._make_zero(grad_type)
+            else:
+                grad_result = self._make_float(0.0)
+
+        if grad_type is not None:
+            self.type_map[id(grad_result)] = grad_type
+        if expr_type is not None:
+            self.type_map[id(forward_value)] = expr_type
+
+        # Build struct literal with both
+        result = StructLiteral(
+            "_ValueAndGrad",
+            [("value", forward_value), ("gradient", grad_result)],
+            vag_expr.span,
+        )
+        if vag_type is not None:
+            self.type_map[id(result)] = vag_type
 
         return result
 
@@ -522,6 +588,21 @@ class ADTransform(SimpleGradRulesMixin, ComplexGradRulesMixin):
                     self._grad_depth -= 1
                 self._linearize(inner_result, tape, var_map, let_env)
                 var_map[id(expr)] = var_map[id(inner_result)]
+            case ValueAndGradExpr(expr=inner_expr, wrt=inner_wrt):
+                self._grad_depth += 1
+                if self._grad_depth > _MAX_GRAD_DEPTH:
+                    raise MaomiError(
+                        f"value_and_grad: maximum nesting depth exceeded (limit: {_MAX_GRAD_DEPTH})",
+                        "<ad>", expr.span.line_start, expr.span.col_start,
+                    )
+                saved_tape_exprs = self._tape_exprs
+                try:
+                    inner_result = self._differentiate_value_and_grad(inner_expr, inner_wrt, expr, let_env)
+                finally:
+                    self._tape_exprs = saved_tape_exprs
+                    self._grad_depth -= 1
+                self._linearize(inner_result, tape, var_map, let_env)
+                var_map[id(expr)] = var_map[id(inner_result)]
             case _:
                 raise MaomiError(
                     f"grad: unsupported expression type {type(expr).__name__} inside grad",
@@ -675,6 +756,11 @@ class ADTransform(SimpleGradRulesMixin, ComplexGradRulesMixin):
             case GradExpr(expr=inner_expr, wrt=wrt):
                 new_inner = self._substitute(inner_expr, subst)
                 node = GradExpr(new_inner, wrt, expr.span)
+                self._copy_type(expr, node)
+                return node
+            case ValueAndGradExpr(expr=inner_expr, wrt=wrt):
+                new_inner = self._substitute(inner_expr, subst)
+                node = ValueAndGradExpr(new_inner, wrt, expr.span)
                 self._copy_type(expr, node)
                 return node
             case _Conv2dGrad():

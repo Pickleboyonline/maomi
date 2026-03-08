@@ -824,3 +824,83 @@ class TestShapeOpsGrad:
             jax.grad(lambda x: jnp.sum(jnp.broadcast_to(x, (3, 4)))),
             [jnp.float32(2.0)],
         )
+
+
+# ---------------------------------------------------------------------------
+# value_and_grad
+# ---------------------------------------------------------------------------
+
+class TestValueAndGradNumerical:
+    def test_value_and_grad_scalar(self):
+        """value_and_grad returns correct gradient."""
+        src = """
+            fn f(x: f32) -> f32 {
+                let vg = value_and_grad(x * x * x, x);
+                vg.gradient
+            }
+        """
+        x = np.float32(3.0)
+        mod = maomi.compile(src)
+        result = mod.f(x)
+        # grad of x^3 = 3x^2 = 27
+        np.testing.assert_allclose(float(result), 27.0, atol=1e-5)
+
+    def test_value_and_grad_value_field(self):
+        """value_and_grad .value field matches forward evaluation."""
+        src = """
+            fn f(x: f32) -> f32 {
+                let vg = value_and_grad(x * x, x);
+                vg.value
+            }
+        """
+        x = np.float32(5.0)
+        mod = maomi.compile(src)
+        result = mod.f(x)
+        # value of x^2 at x=5 is 25
+        np.testing.assert_allclose(float(result), 25.0, atol=1e-5)
+
+    def test_value_and_grad_matches_grad(self):
+        """value_and_grad .gradient matches standalone grad output."""
+        src_vag = """
+            fn f(x: f32) -> f32 {
+                let vg = value_and_grad(exp(x) + x * x, x);
+                vg.gradient
+            }
+        """
+        src_grad = """
+            fn f(x: f32) -> f32 {
+                grad(exp(x) + x * x, x)
+            }
+        """
+        x = np.float32(2.0)
+        vag_result = float(maomi.compile(src_vag).f(x))
+        grad_result = float(maomi.compile(src_grad).f(x))
+        np.testing.assert_allclose(vag_result, grad_result, atol=1e-6)
+
+    def test_value_and_grad_array_wrt(self):
+        """value_and_grad works with array wrt variable."""
+        src = """
+            fn f(w: f32[3]) -> f32 {
+                let vg = value_and_grad(sum(w * w), w);
+                sum(vg.gradient)
+            }
+        """
+        w = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+        mod = maomi.compile(src)
+        result = float(mod.f(w))
+        # grad of sum(w^2) w.r.t. w = 2w, sum(2w) = 2*(1+2+3) = 12
+        np.testing.assert_allclose(result, 12.0, atol=1e-5)
+
+    def test_destructure_value_and_grad(self):
+        """Destructuring syntax works with value_and_grad."""
+        src = """
+            fn f(x: f32) -> f32 {
+                let { value, gradient } = value_and_grad(x * x, x);
+                value + gradient
+            }
+        """
+        x = np.float32(3.0)
+        mod = maomi.compile(src)
+        result = float(mod.f(x))
+        # value = 9, gradient = 6, sum = 15
+        np.testing.assert_allclose(result, 15.0, atol=1e-5)

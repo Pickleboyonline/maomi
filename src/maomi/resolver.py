@@ -18,6 +18,7 @@ from .ast_nodes import (
     MapExpr,
     IfExpr,
     GradExpr,
+    ValueAndGradExpr,
     UnaryOp,
     BinOp,
     IndexExpr,
@@ -216,6 +217,8 @@ def _rewrite_expr(expr: Expr, rename_map: dict[str, str]) -> Expr:
             return MapExpr(expr.elem_var, new_seq, new_body, expr.span)
         case GradExpr():
             return GradExpr(_rewrite_expr(expr.expr, rename_map), expr.wrt, expr.span)
+        case ValueAndGradExpr():
+            return ValueAndGradExpr(_rewrite_expr(expr.expr, rename_map), expr.wrt, expr.span)
         case IndexExpr(base=base, indices=indices, span=span):
             new_base = _rewrite_expr(base, rename_map)
             new_indices = [

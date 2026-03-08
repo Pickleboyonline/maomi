@@ -822,3 +822,93 @@ class TestBF16:
         out = codegen("fn f(x: bf16, y: bf16) -> bf16 { x * y }")
         assert "stablehlo.multiply" in out
         assert "bf16" in out
+
+
+class TestValueAndGrad:
+    def _codegen_with_ad(self, source: str) -> str:
+        from maomi.ad import transform_grad
+        tokens = Lexer(source).tokenize()
+        prog = Parser(tokens).parse()
+        tc = TypeChecker()
+        errors = tc.check(prog)
+        assert not errors, f"Type errors: {[e.message for e in errors]}"
+        prog = transform_grad(prog, tc.type_map)
+        return StableHLOCodegen(prog, tc.type_map).generate()
+
+    def test_value_and_grad_produces_tuple(self):
+        out = self._codegen_with_ad("""
+            fn f(x: f32) -> f32 {
+                let vg = value_and_grad(x * x, x);
+                vg.value
+            }
+        """)
+        assert "stablehlo.tuple" in out
+
+    def test_value_and_grad_get_gradient(self):
+        out = self._codegen_with_ad("""
+            fn f(x: f32) -> f32 {
+                let vg = value_and_grad(x * x, x);
+                vg.gradient
+            }
+        """)
+        assert "get_tuple_element" in out
+
+    def test_value_and_grad_both_fields(self):
+        out = self._codegen_with_ad("""
+            fn f(x: f32) -> f32 {
+                let vg = value_and_grad(x * x, x);
+                vg.value + vg.gradient
+            }
+        """)
+        assert "stablehlo.tuple" in out
+        assert "stablehlo.add" in out
+
+    def test_destructure_value_and_grad(self):
+        out = self._codegen_with_ad("""
+            fn f(x: f32) -> f32 {
+                let { value, gradient } = value_and_grad(x * x, x);
+                value + gradient
+            }
+        """)
+        assert "stablehlo.tuple" in out
+        assert "stablehlo.add" in out
+
+    def test_destructure_rebind(self):
+        out = self._codegen_with_ad("""
+            fn f(x: f32) -> f32 {
+                let { value: v, gradient: g } = value_and_grad(x * x, x);
+                v + g
+            }
+        """)
+        assert "stablehlo.tuple" in out
+
+    def test_destructure_partial(self):
+        out = self._codegen_with_ad("""
+            fn f(x: f32) -> f32 {
+                let { gradient } = value_and_grad(x * x, x);
+                gradient
+            }
+        """)
+        assert "get_tuple_element" in out
+
+
+class TestDestructureStruct:
+    def test_basic(self):
+        out = codegen("""
+            struct S { x: f32, y: f32 }
+            fn f() -> f32 {
+                let { x, y } = S { x: 1.0, y: 2.0 };
+                x + y
+            }
+        """)
+        assert "stablehlo.add" in out
+
+    def test_rebind(self):
+        out = codegen("""
+            struct S { x: f32, y: f32 }
+            fn f() -> f32 {
+                let { x: a, y: b } = S { x: 1.0, y: 2.0 };
+                a + b
+            }
+        """)
+        assert "stablehlo.add" in out

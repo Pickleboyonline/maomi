@@ -189,6 +189,13 @@ class GradExpr:
 
 
 @dataclass
+class ValueAndGradExpr:
+    expr: Expr
+    wrt: str  # variable name to differentiate with respect to
+    span: Span
+
+
+@dataclass
 class CastExpr:
     expr: Expr
     target_type: str  # "f32", "f64", "bf16", "i32", "i64", "bool"
@@ -382,7 +389,7 @@ class _SortGrad:
 
 
 # Union types for convenience
-Expr = IntLiteral | FloatLiteral | BoolLiteral | StringLiteral | Identifier | UnaryOp | BinOp | IfExpr | CallExpr | ScanExpr | WhileExpr | MapExpr | GradExpr | CastExpr | FoldExpr | ArrayLiteral | StructLiteral | FieldAccess | WithExpr | IndexExpr | _ScanGrad | _WhileGrad | _IndexGrad | _GatherGrad | _Conv2dGrad | _MaxPoolGrad | _AvgPoolGrad | _FoldGrad | _BroadcastExpr | _CumsumGrad | _SortGrad
+Expr = IntLiteral | FloatLiteral | BoolLiteral | StringLiteral | Identifier | UnaryOp | BinOp | IfExpr | CallExpr | ScanExpr | WhileExpr | MapExpr | GradExpr | ValueAndGradExpr | CastExpr | FoldExpr | ArrayLiteral | StructLiteral | FieldAccess | WithExpr | IndexExpr | _ScanGrad | _WhileGrad | _IndexGrad | _GatherGrad | _Conv2dGrad | _MaxPoolGrad | _AvgPoolGrad | _FoldGrad | _BroadcastExpr | _CumsumGrad | _SortGrad
 Stmt = LetStmt | ExprStmt
 
 

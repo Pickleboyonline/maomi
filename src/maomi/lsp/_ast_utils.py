@@ -5,7 +5,7 @@ from lsprotocol import types
 from ..ast_nodes import (
     FnDef, Block, LetStmt, ExprStmt, Param,
     BinOp, UnaryOp, IfExpr, CallExpr, ScanExpr, WhileExpr, MapExpr,
-    GradExpr, CastExpr, FoldExpr,
+    GradExpr, ValueAndGradExpr, CastExpr, FoldExpr,
     Identifier, StructLiteral, FieldAccess, WithExpr, IndexExpr, StructDef,
 )
 
@@ -52,6 +52,8 @@ def _children_of(node):
             yield seq
             yield body
         case GradExpr(expr=e):
+            yield e
+        case ValueAndGradExpr(expr=e):
             yield e
         case StructLiteral(fields=fields):
             for _, expr in fields:
