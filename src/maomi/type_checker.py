@@ -1222,6 +1222,18 @@ class TypeChecker:
         if expr.callee == "concat":
             return self._check_concat(expr, env)
 
+        # expand_dims(x, axis) — insert size-1 dim
+        if expr.callee == "expand_dims":
+            return self._check_expand_dims(expr, env)
+
+        # squeeze(x, axis) — remove size-1 dim
+        if expr.callee == "squeeze":
+            return self._check_squeeze(expr, env)
+
+        # broadcast_to(x, d1, d2, ...) — broadcast to target shape
+        if expr.callee == "broadcast_to":
+            return self._check_broadcast_to(expr, env)
+
         # iota(N) — returns i32[N], N must be a positive integer literal
         if expr.callee == "iota":
             if len(expr.args) != 1:
@@ -1649,6 +1661,167 @@ class TypeChecker:
             return None
 
         return ArrayType(arg_type.base, tuple(target_dims))
+
+    def _check_expand_dims(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
+        if len(expr.args) != 2:
+            self._error(
+                "expand_dims requires exactly 2 arguments: array and axis",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        arg_type = self._infer(expr.args[0], env)
+        if arg_type is None:
+            return None
+
+        # Determine current dims (scalars have no dims)
+        if isinstance(arg_type, ScalarType):
+            current_dims: tuple[int, ...] = ()
+            base = arg_type.base
+        elif isinstance(arg_type, ArrayType):
+            current_dims = arg_type.dims
+            base = arg_type.base
+        else:
+            self._error(
+                "expand_dims: first argument must be a scalar or array",
+                expr.args[0].span.line_start, expr.args[0].span.col_start,
+            )
+            return None
+
+        axis_arg = expr.args[1]
+        self._infer(axis_arg, env)
+        if not isinstance(axis_arg, IntLiteral):
+            self._error(
+                "expand_dims: axis must be an integer literal",
+                axis_arg.span.line_start, axis_arg.span.col_start,
+            )
+            return None
+
+        ndim = len(current_dims)
+        axis = axis_arg.value
+        if axis < 0 or axis > ndim:
+            self._error(
+                f"expand_dims: axis {axis} out of range for {ndim}D array (must be in [0, {ndim}])",
+                axis_arg.span.line_start, axis_arg.span.col_start,
+            )
+            return None
+
+        new_dims = current_dims[:axis] + (1,) + current_dims[axis:]
+        return ArrayType(base, new_dims)
+
+    def _check_squeeze(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
+        if len(expr.args) != 2:
+            self._error(
+                "squeeze requires exactly 2 arguments: array and axis",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        arg_type = self._infer(expr.args[0], env)
+        if arg_type is None:
+            return None
+        if not isinstance(arg_type, ArrayType):
+            self._error(
+                "squeeze: first argument must be an array",
+                expr.args[0].span.line_start, expr.args[0].span.col_start,
+            )
+            return None
+
+        axis_arg = expr.args[1]
+        self._infer(axis_arg, env)
+        if not isinstance(axis_arg, IntLiteral):
+            self._error(
+                "squeeze: axis must be an integer literal",
+                axis_arg.span.line_start, axis_arg.span.col_start,
+            )
+            return None
+
+        ndim = len(arg_type.dims)
+        axis = axis_arg.value
+        if axis < 0 or axis >= ndim:
+            self._error(
+                f"squeeze: axis {axis} out of range for {ndim}D array (must be in [0, {ndim - 1}])",
+                axis_arg.span.line_start, axis_arg.span.col_start,
+            )
+            return None
+
+        if arg_type.dims[axis] != 1:
+            self._error(
+                f"squeeze: dimension at axis {axis} has size {arg_type.dims[axis]}, must be size 1",
+                axis_arg.span.line_start, axis_arg.span.col_start,
+            )
+            return None
+
+        new_dims = arg_type.dims[:axis] + arg_type.dims[axis + 1:]
+        if len(new_dims) == 0:
+            return ScalarType(arg_type.base)
+        return ArrayType(arg_type.base, new_dims)
+
+    def _check_broadcast_to(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
+        if len(expr.args) < 2:
+            self._error(
+                "broadcast_to requires at least 2 arguments: array and target dimensions",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        arg_type = self._infer(expr.args[0], env)
+        if arg_type is None:
+            return None
+
+        if isinstance(arg_type, ScalarType):
+            src_dims: tuple[int, ...] = ()
+            base = arg_type.base
+        elif isinstance(arg_type, ArrayType):
+            src_dims = arg_type.dims
+            base = arg_type.base
+        else:
+            self._error(
+                "broadcast_to: first argument must be a scalar or array",
+                expr.args[0].span.line_start, expr.args[0].span.col_start,
+            )
+            return None
+
+        # Remaining args must be positive integer literals
+        target_dims: list[int] = []
+        for dim_arg in expr.args[1:]:
+            self._infer(dim_arg, env)
+            if not isinstance(dim_arg, IntLiteral):
+                self._error(
+                    "broadcast_to: dimension arguments must be integer literals",
+                    dim_arg.span.line_start, dim_arg.span.col_start,
+                )
+                return None
+            if dim_arg.value <= 0:
+                self._error(
+                    "broadcast_to: dimensions must be positive",
+                    dim_arg.span.line_start, dim_arg.span.col_start,
+                )
+                return None
+            target_dims.append(dim_arg.value)
+
+        # Validate broadcast compatibility
+        target_rank = len(target_dims)
+        src_rank = len(src_dims)
+        if src_rank > target_rank:
+            self._error(
+                f"broadcast_to: source has rank {src_rank} but target has rank {target_rank}",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        # Right-align src_dims with target_dims and check compatibility
+        offset = target_rank - src_rank
+        for i, sd in enumerate(src_dims):
+            td = target_dims[offset + i]
+            if sd != 1 and sd != td:
+                self._error(
+                    f"broadcast_to: source dimension {sd} at axis {i} is not compatible with target dimension {td}",
+                    expr.span.line_start, expr.span.col_start,
+                )
+                return None
+
+        return ArrayType(base, tuple(target_dims))
 
     def _check_concat(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
         if len(expr.args) < 2:
