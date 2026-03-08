@@ -6,7 +6,7 @@ from ...ast_nodes import (
     _MaxPoolGrad,
     _AvgPoolGrad,
 )
-from ...types import MaomiType, ScalarType, ArrayType
+from ...types import MaomiType, ScalarType, ArrayType, FLOAT_BASES
 from ...errors import MaomiError
 from .utils import _mlir_type
 
@@ -106,8 +106,13 @@ class ConvCodegenMixin:
         sh, sw = expr.args[3].value, expr.args[4].value
 
         base = input_type.base
-        if base in ("f32", "f64"):
-            init = "0xFF800000" if base == "f32" else "0xFFF0000000000000"
+        if base in FLOAT_BASES:
+            if base == "f64":
+                init = "0xFFF0000000000000"
+            elif base == "bf16":
+                init = "0xFF80"
+            else:
+                init = "0xFF800000"
         else:
             init = str(-(2**31)) if base == "i32" else str(-(2**63))
 

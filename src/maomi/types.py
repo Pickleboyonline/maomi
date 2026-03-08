@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class ScalarType:
-    base: str  # "f32", "f64", "i32", "i64", "bool"
+    base: str  # "f32", "f64", "bf16", "i32", "i64", "bool"
 
     def __str__(self) -> str:
         return self.base
@@ -58,7 +58,12 @@ MaomiType = ScalarType | ArrayType | StructType | WildcardArrayType | StringType
 # Convenience constants
 F32 = ScalarType("f32")
 F64 = ScalarType("f64")
+BF16 = ScalarType("bf16")
 I32 = ScalarType("i32")
 I64 = ScalarType("i64")
 BOOL = ScalarType("bool")
 STRING = StringType()
+
+# Base type sets — single source of truth for type classification
+FLOAT_BASES = frozenset({"f32", "f64", "bf16"})
+

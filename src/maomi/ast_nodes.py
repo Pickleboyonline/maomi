@@ -22,7 +22,7 @@ class Dim:
 
 @dataclass
 class TypeAnnotation:
-    base: str  # "f32", "f64", "i32", "i64", "bool", or struct name
+    base: str  # "f32", "f64", "bf16", "i32", "i64", "bool", or struct name
     dims: list[Dim] | None  # None = scalar (or struct)
     span: Span
     wildcard: bool = False  # True for f32[..] shape wildcard
@@ -191,7 +191,7 @@ class GradExpr:
 @dataclass
 class CastExpr:
     expr: Expr
-    target_type: str  # "f32", "f64", "i32", "i64", "bool"
+    target_type: str  # "f32", "f64", "bf16", "i32", "i64", "bool"
     span: Span
 
 

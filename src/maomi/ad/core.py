@@ -64,7 +64,7 @@ from ..ast_nodes import (
     _ReduceSum,
     Expr,
 )
-from ..types import MaomiType, ScalarType, ArrayType, StructType
+from ..types import MaomiType, ScalarType, ArrayType, StructType, FLOAT_BASES
 from ..errors import MaomiError
 
 from .constants import (
@@ -934,7 +934,7 @@ class ADTransform(SimpleGradRulesMixin, ComplexGradRulesMixin):
                     inner_base = inner_type.base
                 elif isinstance(inner_type, ArrayType):
                     inner_base = inner_type.base
-                if inner_base in ("f32", "f64") and target in ("f32", "f64"):
+                if inner_base in FLOAT_BASES and target in FLOAT_BASES:
                     cast_back = CastExpr(adj, inner_base, _DUMMY_SPAN)
                     self.type_map[id(cast_back)] = inner_type
                     self._accumulate(adjoints, inner_name, cast_back)
@@ -1124,7 +1124,7 @@ class ADTransform(SimpleGradRulesMixin, ComplexGradRulesMixin):
     def _make_zero(self, t: MaomiType) -> Expr:
         """Create a zero expression matching the given type."""
         if isinstance(t, ScalarType):
-            if t.base in ("f32", "f64"):
+            if t.base in FLOAT_BASES:
                 return self._make_float(0.0)
             node = IntLiteral(0, _DUMMY_SPAN)
             self.type_map[id(node)] = t

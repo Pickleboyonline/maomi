@@ -37,7 +37,7 @@ from ...ast_nodes import (
     _ReduceSum,
     Expr,
 )
-from ...types import MaomiType, ScalarType, ArrayType, StructType
+from ...types import MaomiType, ScalarType, ArrayType, StructType, FLOAT_BASES
 from ...errors import MaomiError
 from .utils import (
     _mlir_type,
@@ -90,6 +90,8 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
                 and ta.base not in ('I',)  # not a base type prefix
                 and ta.dims is None and not getattr(ta, 'wildcard', False))
 
+    _CONCRETE_BASES = FLOAT_BASES | {'i32', 'i64', 'bool', 'Key'}
+
     def _is_generic_fn(self, fn) -> bool:
         """True if function has wildcard, symbolic-dim, or type-variable annotations."""
         struct_names = {sd.name for sd in self.program.struct_defs} if self.program else set()
@@ -100,7 +102,7 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
             if ta.dims is not None and any(isinstance(d.value, str) for d in ta.dims):
                 return True
             if (ta.dims is None and not getattr(ta, 'wildcard', False)
-                    and ta.base not in {'f32', 'f64', 'i32', 'i64', 'bool', 'Key'}
+                    and ta.base not in self._CONCRETE_BASES
                     and ta.base not in struct_names):
                 return True
         rta = fn.return_type
@@ -109,7 +111,7 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
         if rta.dims is not None and any(isinstance(d.value, str) for d in rta.dims):
             return True
         if (rta.dims is None and not getattr(rta, 'wildcard', False)
-                and rta.base not in {'f32', 'f64', 'i32', 'i64', 'bool', 'Key'}
+                and rta.base not in self._CONCRETE_BASES
                 and rta.base not in struct_names):
             return True
         return False
@@ -168,7 +170,7 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
     def _resolve_annotation_type(self, ta) -> MaomiType:
         if getattr(ta, 'wildcard', False):
             raise RuntimeError(f"unresolved wildcard type {ta.base}[..] reached codegen — monomorphization bug")
-        if ta.base in ("f32", "f64", "i32", "i64", "bool"):
+        if ta.base in ("f32", "f64", "bf16", "i32", "i64", "bool"):
             if ta.dims is None:
                 return ScalarType(ta.base)
             dims = tuple(d.value for d in ta.dims)
@@ -1096,8 +1098,12 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
     @staticmethod
     def _reduce_init_value(base: str, is_max: bool) -> str:
         """Return the StableHLO init value literal for reduce-max/min."""
-        if base in ("f32", "f64"):
-            return "0xFF800000" if is_max else "0x7F800000"  # -inf / +inf
+        if base in FLOAT_BASES:
+            if base == "f64":
+                return "0xFFF0000000000000" if is_max else "0x7FF0000000000000"
+            if base == "bf16":
+                return "0xFF80" if is_max else "0x7F80"  # bf16 -inf / +inf
+            return "0xFF800000" if is_max else "0x7F800000"  # f32 -inf / +inf
         elif base == "i32":
             return "-2147483647" if is_max else "2147483647"
         elif base == "i64":
@@ -1247,7 +1253,7 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
         # Variadic reduce
         result_var = self._fresh()
         cmp = "GT" if is_max else "LT"
-        cmp_kind = "FLOAT" if arg_type.base in ("f32", "f64") else "SIGNED"
+        cmp_kind = "FLOAT" if arg_type.base in FLOAT_BASES else "SIGNED"
 
         self._emit(
             f"{result_var}:2 = stablehlo.reduce({arg} init: {init_val}, {iota_var} init: {init_idx}) "

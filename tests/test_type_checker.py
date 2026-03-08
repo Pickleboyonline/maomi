@@ -742,3 +742,54 @@ class TestLogsumexp:
             "fn f(x: f32[3, 4]) -> f32[3] { logsumexp(x, axis=2) }",
             "axis 2 out of range",
         )
+class TestBF16:
+    def test_bf16_param(self):
+        check_ok("fn f(x: bf16) -> bf16 { x }")
+
+    def test_bf16_array(self):
+        check_ok("fn f(x: bf16[3, 4]) -> bf16[3, 4] { x }")
+
+    def test_cast_to_bf16(self):
+        check_ok("fn f(x: f32) -> bf16 { cast(x, bf16) }")
+
+    def test_cast_from_bf16(self):
+        check_ok("fn f(x: bf16) -> f32 { cast(x, f32) }")
+
+    def test_bf16_add(self):
+        check_ok("fn f(x: bf16, y: bf16) -> bf16 { x + y }")
+
+    def test_bf16_array_ops(self):
+        check_ok("fn f(x: bf16[4], y: bf16[4]) -> bf16[4] { x + y }")
+
+    def test_bf16_sub(self):
+        check_ok("fn f(x: bf16, y: bf16) -> bf16 { x - y }")
+
+    def test_bf16_mul(self):
+        check_ok("fn f(x: bf16, y: bf16) -> bf16 { x * y }")
+
+    def test_bf16_div(self):
+        check_ok("fn f(x: bf16, y: bf16) -> bf16 { x / y }")
+
+    def test_bf16_type_mismatch(self):
+        check_err(
+            "fn f(x: bf16, y: f32) -> bf16 { x + y }",
+            "mismatched types",
+        )
+
+    def test_bf16_builtin_exp(self):
+        check_ok("fn f(x: bf16) -> bf16 { exp(x) }")
+
+    def test_bf16_builtin_sqrt(self):
+        check_ok("fn f(x: bf16[4]) -> bf16[4] { sqrt(x) }")
+
+    def test_bf16_cast_to_i32(self):
+        check_ok("fn f(x: bf16) -> i32 { cast(x, i32) }")
+
+    def test_bf16_cast_from_i32(self):
+        check_ok("fn f(x: i32) -> bf16 { cast(x, bf16) }")
+
+    def test_bf16_negation(self):
+        check_ok("fn f(x: bf16) -> bf16 { -x }")
+
+    def test_bf16_comparison(self):
+        check_ok("fn f(x: bf16, y: bf16) -> bool { x < y }")

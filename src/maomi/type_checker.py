@@ -31,7 +31,7 @@ from .ast_nodes import (
     TypeAnnotation,
     Expr,
 )
-from .types import MaomiType, ScalarType, ArrayType, StructType, WildcardArrayType, StringType, TypeVar, F32, F64, I32, I64, BOOL, STRING
+from .types import MaomiType, ScalarType, ArrayType, StructType, WildcardArrayType, StringType, TypeVar, F32, F64, I32, I64, BOOL, STRING, FLOAT_BASES
 from .errors import MaomiTypeError
 
 
@@ -113,7 +113,7 @@ class FnSignature:
     comptime: list[bool] = field(default_factory=list)
 
 
-NUMERIC_BASES = {"f32", "f64", "i32", "i64"}
+NUMERIC_BASES = {"f32", "f64", "bf16", "i32", "i64"}
 COMPARISON_OPS = {"==", "!=", "<", ">", "<=", ">="}
 ARITHMETIC_OPS = {"+", "-", "*", "/", "**", "@"}
 
@@ -170,16 +170,16 @@ def _is_numeric(t: MaomiType) -> bool:
 
 
 def _struct_has_float_leaves(t: StructType) -> bool:
-    """Check that all leaf fields of a struct are float types (f32/f64)."""
+    """Check that all leaf fields of a struct are float types."""
     for _, ft in t.fields:
         if isinstance(ft, StructType):
             if not _struct_has_float_leaves(ft):
                 return False
         elif isinstance(ft, ScalarType):
-            if ft.base not in {"f32", "f64"}:
+            if ft.base not in FLOAT_BASES:
                 return False
         elif isinstance(ft, ArrayType):
-            if ft.base not in {"f32", "f64"}:
+            if ft.base not in FLOAT_BASES:
                 return False
         else:
             return False
@@ -355,7 +355,7 @@ class TypeChecker:
         comptime_flags = [p.comptime for p in fn.params]
         return FnSignature(param_names, param_types, ret, comptime=comptime_flags)
 
-    _BASE_TYPES = {"f32", "f64", "i32", "i64", "bool"}
+    _BASE_TYPES = {"f32", "f64", "bf16", "i32", "i64", "bool"}
 
     def _resolve_type_annotation(self, ta: TypeAnnotation) -> MaomiType | None:
         if ta.base in self._BASE_TYPES:
@@ -662,7 +662,7 @@ class TypeChecker:
 
         return wrt_type
 
-    _CAST_BASES = {"f32", "f64", "i32", "i64", "bool"}
+    _CAST_BASES = {"f32", "f64", "bf16", "i32", "i64", "bool"}
 
     def _check_cast(self, expr: CastExpr, env: TypeEnv) -> MaomiType | None:
         inner_type = self._infer(expr.expr, env)
@@ -1384,17 +1384,26 @@ class TypeChecker:
             if expr.callee in _ELEMENTWISE_BUILTINS and isinstance(arg_type, StructType):
                 continue
 
+            # Elementwise builtins accept any float type — skip normal unification for non-f32 floats
+            if expr.callee in _ELEMENTWISE_BUILTINS:
+                arg_base = arg_type.base if isinstance(arg_type, (ScalarType, ArrayType)) else None
+                if arg_base in FLOAT_BASES and arg_base != "f32":
+                    continue
+
             if not self._unify_arg(arg_type, param_type, substitution, expr, i):
                 continue
 
         # Apply substitution to return type
         ret = self._apply_substitution(sig.return_type, substitution)
 
-        # For elementwise builtins (scalar->scalar), lift return to array if arg is array
+        # For elementwise builtins (scalar->scalar), lift return to match arg type
         if expr.callee in _ELEMENTWISE_BUILTINS and isinstance(ret, ScalarType):
             for at in arg_types:
-                if isinstance(at, ArrayType) and at.base == ret.base:
-                    ret = ArrayType(ret.base, at.dims)
+                if isinstance(at, ArrayType) and at.base in FLOAT_BASES:
+                    ret = ArrayType(at.base, at.dims)
+                    break
+                if isinstance(at, ScalarType) and at.base in FLOAT_BASES and at.base != "f32":
+                    ret = ScalarType(at.base)
                     break
                 if isinstance(at, StructType):
                     # Struct-level builtin: apply field-by-field
