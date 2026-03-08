@@ -650,6 +650,10 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
             return self._gen_reshape(expr, env)
         if expr.callee == "concat":
             return self._gen_concat(expr, env)
+        if expr.callee == "stack":
+            return self._gen_stack(expr, env)
+        if expr.callee == "pad":
+            return self._gen_pad(expr, env)
         if expr.callee == "stop_gradient":
             return self._gen_expr(expr.args[0], env)
         if expr.callee == "isfinite":
@@ -1326,6 +1330,67 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
         self._emit(
             f"{var} = stablehlo.concatenate {args_str}, dim = {axis} "
             f": ({types_str}) -> {_mlir_type(result_type)}"
+        )
+        return var
+
+    def _gen_stack(self, expr: CallExpr, env: dict[str, str]) -> str:
+        axis = expr.args[-1].value  # last arg is axis
+        array_args = expr.args[:-1]  # all but last
+        result_type = self._type_of(expr)
+
+        # Reshape each array to insert size-1 dim at axis, then concatenate
+        reshaped = []
+        reshaped_types = []
+        for arr_expr in array_args:
+            arr = self._gen_expr(arr_expr, env)
+            arr_type = self._type_of(arr_expr)
+            assert isinstance(arr_type, ArrayType)
+            # Insert size-1 dim at axis
+            new_dims = list(arr_type.dims)
+            new_dims.insert(axis, 1)
+            new_type = ArrayType(arr_type.base, tuple(new_dims))
+            mlir_new = _mlir_type(new_type)
+            reshaped_var = self._fresh()
+            self._emit(
+                f"{reshaped_var} = stablehlo.reshape {arr} "
+                f": ({_mlir_type(arr_type)}) -> {mlir_new}"
+            )
+            reshaped.append(reshaped_var)
+            reshaped_types.append(new_type)
+
+        # Concatenate along axis
+        args_str = ", ".join(reshaped)
+        types_str = ", ".join(_mlir_type(t) for t in reshaped_types)
+        var = self._fresh()
+        self._emit(
+            f"{var} = stablehlo.concatenate {args_str}, dim = {axis} "
+            f": ({types_str}) -> {_mlir_type(result_type)}"
+        )
+        return var
+
+    def _gen_pad(self, expr: CallExpr, env: dict[str, str]) -> str:
+        x = self._gen_expr(expr.args[0], env)
+        val = self._gen_expr(expr.args[1], env)
+        pad_lo = expr.args[2].value
+        pad_hi = expr.args[3].value
+
+        x_type = self._type_of(expr.args[0])
+        result_type = self._type_of(expr)
+        assert isinstance(x_type, ArrayType)
+        ndims = len(x_type.dims)
+
+        lo_str = ", ".join([str(pad_lo)] * ndims)
+        hi_str = ", ".join([str(pad_hi)] * ndims)
+        interior_str = ", ".join(["0"] * ndims)
+
+        mlir_x = _mlir_type(x_type)
+        mlir_scalar = _mlir_type(ScalarType(x_type.base))
+        mlir_result = _mlir_type(result_type)
+        var = self._fresh()
+        self._emit(
+            f"{var} = stablehlo.pad {x}, {val}, "
+            f"low = [{lo_str}], high = [{hi_str}], interior = [{interior_str}] "
+            f": ({mlir_x}, {mlir_scalar}) -> {mlir_result}"
         )
         return var
 

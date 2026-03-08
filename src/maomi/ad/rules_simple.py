@@ -482,3 +482,93 @@ class SimpleGradRulesMixin:
 
             self._accumulate(adjoints, x_name, self._reduce_broadcast(grad_x, x_type))
             self._accumulate(adjoints, y_name, self._reduce_broadcast(grad_y, y_type))
+    def _backprop_stack(self, args: list[Expr], adj: Expr,
+                         adjoints: dict[str, Expr], var_map: dict[int, str]):
+        """Backprop through stack: slice adj along the stack axis, reshape to remove the extra dim."""
+        axis = args[-1].value
+        array_args = args[:-1]
+
+        adj_type = self._type_of(adj)
+
+        # If adj is scalar, just accumulate to each input
+        if not isinstance(adj_type, ArrayType):
+            for arg in array_args:
+                if id(arg) in var_map:
+                    self._accumulate(adjoints, var_map[id(arg)], adj)
+            return
+
+        rank = len(adj_type.dims)
+
+        for i, arg in enumerate(array_args):
+            arg_type = self._type_of(arg)
+            if not isinstance(arg_type, ArrayType):
+                continue
+            if id(arg) not in var_map:
+                continue
+            arg_name = var_map[id(arg)]
+
+            # Slice adj along stack axis at position i, size 1
+            components = []
+            for d in range(rank):
+                if d == axis:
+                    start = IntLiteral(i, _DUMMY_SPAN)
+                    end = IntLiteral(i + 1, _DUMMY_SPAN)
+                    self.type_map[id(start)] = ScalarType("i32")
+                    self.type_map[id(end)] = ScalarType("i32")
+                    ic = IndexComponent("slice", None, start, end, _DUMMY_SPAN)
+                    ic.static_size = 1
+                    components.append(ic)
+                else:
+                    components.append(IndexComponent("full", None, None, None, _DUMMY_SPAN))
+
+            # Slice type: same as adj but with size 1 at axis
+            slice_dims = list(adj_type.dims)
+            slice_dims[axis] = 1
+            slice_type = ArrayType(adj_type.base, tuple(slice_dims))
+            slice_expr = IndexExpr(adj, components, _DUMMY_SPAN)
+            self.type_map[id(slice_expr)] = slice_type
+
+            # Reshape to remove the size-1 dim (back to original shape)
+            dim_literals = []
+            for d in arg_type.dims:
+                lit = IntLiteral(d, _DUMMY_SPAN)
+                self.type_map[id(lit)] = ScalarType("i32")
+                dim_literals.append(lit)
+            reshape_call = CallExpr("reshape", [slice_expr] + dim_literals, _DUMMY_SPAN)
+            self.type_map[id(reshape_call)] = arg_type
+            self._accumulate(adjoints, arg_name, reshape_call)
+
+    def _backprop_pad(self, args: list[Expr], adj: Expr,
+                       adjoints: dict[str, Expr], var_map: dict[int, str]):
+        """Backprop through pad: slice adj to remove padding (extract the original portion)."""
+        x_arg = args[0]
+        if id(x_arg) not in var_map:
+            return
+        x_name = var_map[id(x_arg)]
+        x_type = self._type_of(x_arg)
+        if not isinstance(x_type, ArrayType):
+            self._accumulate(adjoints, x_name, adj)
+            return
+
+        adj_type = self._type_of(adj)
+        if not isinstance(adj_type, ArrayType):
+            self._accumulate(adjoints, x_name, adj)
+            return
+
+        pad_lo = args[2].value
+
+        rank = len(x_type.dims)
+        # Slice adj[pad_lo : pad_lo + orig_dim] along each axis
+        components = []
+        for d in range(rank):
+            start = IntLiteral(pad_lo, _DUMMY_SPAN)
+            end = IntLiteral(pad_lo + x_type.dims[d], _DUMMY_SPAN)
+            self.type_map[id(start)] = ScalarType("i32")
+            self.type_map[id(end)] = ScalarType("i32")
+            ic = IndexComponent("slice", None, start, end, _DUMMY_SPAN)
+            ic.static_size = x_type.dims[d]
+            components.append(ic)
+
+        slice_expr = IndexExpr(adj, components, _DUMMY_SPAN)
+        self.type_map[id(slice_expr)] = x_type
+        self._accumulate(adjoints, x_name, slice_expr)
