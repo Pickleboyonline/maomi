@@ -677,6 +677,21 @@ COMPLEX: dict[str, ComplexBuiltin] = {
         "Sample normal random values with given mean and std (Box-Muller).",
         (["key", "mean", "std", "dims..."], ["Key", "f32", "f32", "int..."], "f32[...]"),
     ),
+    "random.bernoulli": ComplexBuiltin(
+        "random.bernoulli", "rng", "zero_grad",
+        "Sample Bernoulli random values (0.0 or 1.0) with given probability.",
+        (["key", "prob", "dims..."], ["Key", "f32", "int..."], "f32[...]"),
+    ),
+    "random.categorical": ComplexBuiltin(
+        "random.categorical", "rng", "zero_grad",
+        "Sample from categorical distribution using Gumbel-max trick.",
+        (["key", "logits"], ["Key", "f32[...]"], "i32[...]"),
+    ),
+    "random.truncated_normal": ComplexBuiltin(
+        "random.truncated_normal", "rng", "zero_grad",
+        "Sample truncated normal random values clipped to [lo, hi].",
+        (["key", "lo", "hi", "dims..."], ["Key", "f32", "f32", "int..."], "f32[...]"),
+    ),
 
     # Utility / inspection
     "isfinite": ComplexBuiltin(

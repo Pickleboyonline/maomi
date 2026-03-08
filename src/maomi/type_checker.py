@@ -2605,38 +2605,100 @@ class TypeChecker:
             self._infer(args[1], env)
             return ArrayType("i32", (n, 4))
 
-        # random.uniform / random.normal
-        if len(args) < 4:
-            self._error(
-                f"{callee} expects at least 4 arguments (key, param1, param2, dim...), got {len(args)}",
-                span.line_start, span.col_start,
-            )
-            return None
-        key_type = self._infer(args[0], env)
-        if key_type is not None and key_type != KEY_TYPE:
-            self._error(f"{callee}: first argument must be Key (i32[4]), got {key_type}", args[0].span.line_start, args[0].span.col_start)
-            return None
-        for i in (1, 2):
-            t = self._infer(args[i], env)
-            if t is not None and t != F32:
-                param_name = ("low", "high") if callee == "random.uniform" else ("mean", "stddev")
+        # random.bernoulli(key, prob, d1, d2, ...)
+        if callee == "random.bernoulli":
+            if len(args) < 3:
                 self._error(
-                    f"{callee}: {param_name[i-1]} must be f32, got {t}",
-                    args[i].span.line_start, args[i].span.col_start,
+                    f"{callee} expects at least 3 arguments (key, prob, dim...), got {len(args)}",
+                    span.line_start, span.col_start,
                 )
                 return None
-        dims: list[int] = []
-        for i in range(3, len(args)):
-            if not isinstance(args[i], IntLiteral):
-                self._error(f"{callee}: dimension arguments must be integer literals", args[i].span.line_start, args[i].span.col_start)
+            key_type = self._infer(args[0], env)
+            if key_type is not None and key_type != KEY_TYPE:
+                self._error(f"{callee}: first argument must be Key (i32[4]), got {key_type}", args[0].span.line_start, args[0].span.col_start)
                 return None
-            if args[i].value < 1:
-                self._error(f"{callee}: dimensions must be >= 1, got {args[i].value}", args[i].span.line_start, args[i].span.col_start)
+            prob_type = self._infer(args[1], env)
+            if prob_type is not None and prob_type != F32:
+                self._error(f"{callee}: prob must be f32, got {prob_type}", args[1].span.line_start, args[1].span.col_start)
                 return None
-            dims.append(args[i].value)
-            # Infer the literal so it gets a type in the type_map
-            self._infer(args[i], env)
-        return ArrayType("f32", tuple(dims))
+            dims: list[int] = []
+            for i in range(2, len(args)):
+                if not isinstance(args[i], IntLiteral):
+                    self._error(f"{callee}: dimension arguments must be integer literals", args[i].span.line_start, args[i].span.col_start)
+                    return None
+                if args[i].value < 1:
+                    self._error(f"{callee}: dimensions must be >= 1, got {args[i].value}", args[i].span.line_start, args[i].span.col_start)
+                    return None
+                dims.append(args[i].value)
+                self._infer(args[i], env)
+            return ArrayType("f32", tuple(dims))
+
+        # random.categorical(key, logits)
+        if callee == "random.categorical":
+            if len(args) != 2:
+                self._error(
+                    f"{callee} expects 2 arguments (key, logits), got {len(args)}",
+                    span.line_start, span.col_start,
+                )
+                return None
+            key_type = self._infer(args[0], env)
+            if key_type is not None and key_type != KEY_TYPE:
+                self._error(f"{callee}: first argument must be Key (i32[4]), got {key_type}", args[0].span.line_start, args[0].span.col_start)
+                return None
+            logits_type = self._infer(args[1], env)
+            if logits_type is None:
+                return None
+            if not isinstance(logits_type, ArrayType) or logits_type.base != "f32":
+                self._error(f"{callee}: logits must be f32 array, got {logits_type}", args[1].span.line_start, args[1].span.col_start)
+                return None
+            if len(logits_type.dims) < 1:
+                self._error(f"{callee}: logits must have at least 1 dimension", args[1].span.line_start, args[1].span.col_start)
+                return None
+            # Return type: strip last dimension, change base to i32
+            if len(logits_type.dims) == 1:
+                return ScalarType("i32")
+            return ArrayType("i32", tuple(logits_type.dims[:-1]))
+
+        # random.uniform / random.normal / random.truncated_normal
+        if callee in ("random.uniform", "random.normal", "random.truncated_normal"):
+            param_names = {
+                "random.uniform": ("low", "high"),
+                "random.normal": ("mean", "stddev"),
+                "random.truncated_normal": ("lo", "hi"),
+            }
+            if len(args) < 4:
+                self._error(
+                    f"{callee} expects at least 4 arguments (key, param1, param2, dim...), got {len(args)}",
+                    span.line_start, span.col_start,
+                )
+                return None
+            key_type = self._infer(args[0], env)
+            if key_type is not None and key_type != KEY_TYPE:
+                self._error(f"{callee}: first argument must be Key (i32[4]), got {key_type}", args[0].span.line_start, args[0].span.col_start)
+                return None
+            for i in (1, 2):
+                t = self._infer(args[i], env)
+                if t is not None and t != F32:
+                    self._error(
+                        f"{callee}: {param_names[callee][i-1]} must be f32, got {t}",
+                        args[i].span.line_start, args[i].span.col_start,
+                    )
+                    return None
+            dims: list[int] = []
+            for i in range(3, len(args)):
+                if not isinstance(args[i], IntLiteral):
+                    self._error(f"{callee}: dimension arguments must be integer literals", args[i].span.line_start, args[i].span.col_start)
+                    return None
+                if args[i].value < 1:
+                    self._error(f"{callee}: dimensions must be >= 1, got {args[i].value}", args[i].span.line_start, args[i].span.col_start)
+                    return None
+                dims.append(args[i].value)
+                # Infer the literal so it gets a type in the type_map
+                self._infer(args[i], env)
+            return ArrayType("f32", tuple(dims))
+
+        self._error(f"unknown RNG builtin '{callee}'", span.line_start, span.col_start)
+        return None
 
     def _unify_arg(
         self,

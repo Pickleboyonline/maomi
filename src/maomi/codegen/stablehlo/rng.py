@@ -3,7 +3,7 @@ from __future__ import annotations
 from ...ast_nodes import (
     CallExpr,
 )
-from ...types import ArrayType
+from ...types import ArrayType, ScalarType
 from ...errors import MaomiError
 from .utils import _mlir_type
 
@@ -20,6 +20,12 @@ class RNGCodegenMixin:
             return self._gen_rng_uniform(expr, env)
         elif callee == "random.normal":
             return self._gen_rng_normal(expr, env)
+        elif callee == "random.bernoulli":
+            return self._gen_rng_bernoulli(expr, env)
+        elif callee == "random.categorical":
+            return self._gen_rng_categorical(expr, env)
+        elif callee == "random.truncated_normal":
+            return self._gen_rng_truncated_normal(expr, env)
         raise MaomiError(f"codegen: unknown RNG builtin '{callee}'", "<codegen>", 0, 0)
 
     def _gen_key_to_u64(self, key_ssa: str) -> str:
@@ -150,25 +156,12 @@ class RNGCodegenMixin:
         self._emit(f"{result} = stablehlo.add {scaled}, {low_bc} : {f32_type}")
         return result
 
-    def _gen_rng_normal(self, expr: CallExpr, env: dict[str, str]) -> str:
-        """rng_normal(key, mean, std, d1, ...) -> f32[d1, ...].
+    def _gen_box_muller(self, key_ssa: str, numel: int) -> str:
+        """Generate standard normal (mean=0, std=1) flat f32 array via Box-Muller.
 
-        Uses Box-Muller: z = sqrt(-2*ln(u1)) * cos(2*pi*u2)
-        Generates 2x elements, splits into pairs, applies transform.
+        Returns SSA var of shape tensor<{numel}xf32>.
+        Shared by _gen_rng_normal and _gen_rng_truncated_normal.
         """
-        key_ssa = self._gen_expr(expr.args[0], env)
-        mean_ssa = self._gen_expr(expr.args[1], env)
-        std_ssa = self._gen_expr(expr.args[2], env)
-
-        result_type = self._type_of(expr)
-        assert isinstance(result_type, ArrayType)
-        shape = tuple(result_type.dims)
-        numel = 1
-        for d in shape:
-            numel *= d
-
-        shape_str = "x".join(str(d) for d in shape)
-        f32_type = f"tensor<{shape_str}xf32>"
         flat_f32 = f"tensor<{numel}xf32>"
 
         # Generate 2*numel uniform values as a flat array
@@ -218,6 +211,30 @@ class RNGCodegenMixin:
 
         z_flat = self._fresh()
         self._emit(f"{z_flat} = stablehlo.multiply {radius}, {cos_angle} : {flat_f32}")
+        return z_flat
+
+    def _gen_rng_normal(self, expr: CallExpr, env: dict[str, str]) -> str:
+        """rng_normal(key, mean, std, d1, ...) -> f32[d1, ...].
+
+        Uses Box-Muller: z = sqrt(-2*ln(u1)) * cos(2*pi*u2)
+        Generates 2x elements, splits into pairs, applies transform.
+        """
+        key_ssa = self._gen_expr(expr.args[0], env)
+        mean_ssa = self._gen_expr(expr.args[1], env)
+        std_ssa = self._gen_expr(expr.args[2], env)
+
+        result_type = self._type_of(expr)
+        assert isinstance(result_type, ArrayType)
+        shape = tuple(result_type.dims)
+        numel = 1
+        for d in shape:
+            numel *= d
+
+        shape_str = "x".join(str(d) for d in shape)
+        f32_type = f"tensor<{shape_str}xf32>"
+        flat_f32 = f"tensor<{numel}xf32>"
+
+        z_flat = self._gen_box_muller(key_ssa, numel)
 
         # Scale: result = z * std + mean
         std_bc = self._fresh()
@@ -236,3 +253,183 @@ class RNGCodegenMixin:
         result = self._fresh()
         self._emit(f"{result} = stablehlo.reshape {shifted} : ({flat_f32}) -> {f32_type}")
         return result
+
+    def _gen_rng_bernoulli(self, expr: CallExpr, env: dict[str, str]) -> str:
+        """random.bernoulli(key, prob, d1, ...) -> f32[d1, ...].
+
+        Generate uniform in [0, 1), compare < prob, cast to f32.
+        """
+        key_ssa = self._gen_expr(expr.args[0], env)
+        prob_ssa = self._gen_expr(expr.args[1], env)
+
+        result_type = self._type_of(expr)
+        assert isinstance(result_type, ArrayType)
+        shape = tuple(result_type.dims)
+        shape_str = "x".join(str(d) for d in shape)
+        f32_type = f"tensor<{shape_str}xf32>"
+        bool_type = f"tensor<{shape_str}xi1>"
+
+        # Generate uniform [0, 1)
+        key_u64 = self._gen_key_to_u64(key_ssa)
+        _, bits = self._gen_rng_bits(key_u64, shape)
+        base_uniform = self._gen_bits_to_uniform(bits, shape)
+
+        # Broadcast prob to shape
+        prob_bc = self._fresh()
+        self._emit(f"{prob_bc} = stablehlo.broadcast_in_dim {prob_ssa}, dims = [] : (tensor<f32>) -> {f32_type}")
+
+        # Compare: uniform < prob
+        cmp = self._fresh()
+        self._emit(f"{cmp} = stablehlo.compare LT, {base_uniform}, {prob_bc} : ({f32_type}, {f32_type}) -> {bool_type}")
+
+        # Convert bool to f32 (true=1.0, false=0.0)
+        result = self._fresh()
+        self._emit(f"{result} = stablehlo.convert {cmp} : ({bool_type}) -> {f32_type}")
+        return result
+
+    def _gen_rng_categorical(self, expr: CallExpr, env: dict[str, str]) -> str:
+        """random.categorical(key, logits) -> i32[...] via Gumbel-max trick.
+
+        1. Generate uniform random with same shape as logits
+        2. Compute gumbel noise: -log(-log(uniform))
+        3. Add to logits: logits + gumbel
+        4. Argmax over last dimension (variadic reduce)
+        """
+        key_ssa = self._gen_expr(expr.args[0], env)
+        logits_ssa = self._gen_expr(expr.args[1], env)
+
+        logits_type = self._type_of(expr.args[1])
+        assert isinstance(logits_type, ArrayType)
+        logits_shape = tuple(logits_type.dims)
+        logits_shape_str = "x".join(str(d) for d in logits_shape)
+        logits_f32_type = f"tensor<{logits_shape_str}xf32>"
+
+        # Generate uniform in (0, 1) with same shape as logits
+        key_u64 = self._gen_key_to_u64(key_ssa)
+        _, bits = self._gen_rng_bits(key_u64, logits_shape)
+        base_uniform = self._gen_bits_to_uniform(bits, logits_shape)
+
+        # Clamp away from 0 and 1 for log safety
+        eps_s = self._fresh()
+        self._emit(f"{eps_s} = stablehlo.constant dense<1.000000e-07> : tensor<f32>")
+        eps = self._fresh()
+        self._emit(f"{eps} = stablehlo.broadcast_in_dim {eps_s}, dims = [] : (tensor<f32>) -> {logits_f32_type}")
+        u_safe = self._fresh()
+        self._emit(f"{u_safe} = stablehlo.maximum {base_uniform}, {eps} : {logits_f32_type}")
+
+        one_s = self._fresh()
+        self._emit(f"{one_s} = stablehlo.constant dense<1.000000e+00> : tensor<f32>")
+        one_bc = self._fresh()
+        self._emit(f"{one_bc} = stablehlo.broadcast_in_dim {one_s}, dims = [] : (tensor<f32>) -> {logits_f32_type}")
+        one_minus_eps = self._fresh()
+        self._emit(f"{one_minus_eps} = stablehlo.subtract {one_bc}, {eps} : {logits_f32_type}")
+        u_clamped = self._fresh()
+        self._emit(f"{u_clamped} = stablehlo.minimum {u_safe}, {one_minus_eps} : {logits_f32_type}")
+
+        # Gumbel noise: -log(-log(u))
+        log_u = self._fresh()
+        self._emit(f"{log_u} = stablehlo.log {u_clamped} : {logits_f32_type}")
+        neg_log_u = self._fresh()
+        self._emit(f"{neg_log_u} = stablehlo.negate {log_u} : {logits_f32_type}")
+        log_neg_log_u = self._fresh()
+        self._emit(f"{log_neg_log_u} = stablehlo.log {neg_log_u} : {logits_f32_type}")
+        gumbel = self._fresh()
+        self._emit(f"{gumbel} = stablehlo.negate {log_neg_log_u} : {logits_f32_type}")
+
+        # Add gumbel noise to logits
+        perturbed = self._fresh()
+        self._emit(f"{perturbed} = stablehlo.add {logits_ssa}, {gumbel} : {logits_f32_type}")
+
+        # Argmax over last dimension using variadic reduce (same pattern as _gen_argmax)
+        last_dim = len(logits_shape) - 1
+        result_type = self._type_of(expr)
+
+        # Compute result MLIR types
+        mlir_result = _mlir_type(result_type)
+        if isinstance(result_type, ScalarType):
+            val_result_type = ScalarType("f32")
+        else:
+            val_result_type = ArrayType("f32", result_type.dims)
+        mlir_val_result = _mlir_type(val_result_type)
+
+        # Init values for reduce
+        init_val = self._fresh()
+        self._emit(f"{init_val} = stablehlo.constant dense<0xFF800000> : tensor<f32>")
+        init_idx = self._fresh()
+        self._emit(f"{init_idx} = stablehlo.constant dense<0> : tensor<i32>")
+
+        # Iota for indices along last dim
+        iota_type_str = f"tensor<{logits_shape_str}xi32>"
+        iota_var = self._fresh()
+        self._emit(f"{iota_var} = stablehlo.iota dim = {last_dim} : {iota_type_str}")
+
+        # Variadic reduce with argmax body
+        result_var = self._fresh()
+        self._emit(
+            f"{result_var}:2 = stablehlo.reduce({perturbed} init: {init_val}, {iota_var} init: {init_idx}) "
+            f"across dimensions = [{last_dim}] "
+            f": ({logits_f32_type}, {iota_type_str}, tensor<f32>, tensor<i32>) "
+            f"-> ({mlir_val_result}, {mlir_result})"
+        )
+        self._indent += 1
+        a_val = self._fresh()
+        b_val = self._fresh()
+        a_idx = self._fresh()
+        b_idx = self._fresh()
+        self._emit(f"reducer({a_val}: tensor<f32>, {b_val}: tensor<f32>, "
+                   f"{a_idx}: tensor<i32>, {b_idx}: tensor<i32>) {{")
+        self._indent += 1
+        cmp_var = self._fresh()
+        self._emit(f"{cmp_var} = stablehlo.compare GT, {a_val}, {b_val}, FLOAT "
+                   f": (tensor<f32>, tensor<f32>) -> tensor<i1>")
+        sel_val = self._fresh()
+        self._emit(f"{sel_val} = stablehlo.select {cmp_var}, {a_val}, {b_val} "
+                   f": (tensor<i1>, tensor<f32>, tensor<f32>) -> tensor<f32>")
+        sel_idx = self._fresh()
+        self._emit(f"{sel_idx} = stablehlo.select {cmp_var}, {a_idx}, {b_idx} "
+                   f": (tensor<i1>, tensor<i32>, tensor<i32>) -> tensor<i32>")
+        self._emit(f"stablehlo.return {sel_val}, {sel_idx} : tensor<f32>, tensor<i32>")
+        self._indent -= 1
+        self._emit("}")
+        self._indent -= 1
+
+        return f"{result_var}#1"
+
+    def _gen_rng_truncated_normal(self, expr: CallExpr, env: dict[str, str]) -> str:
+        """random.truncated_normal(key, lo, hi, d1, ...) -> f32[d1, ...].
+
+        Generate normal(0, 1) values via Box-Muller and clamp to [lo, hi].
+        """
+        key_ssa = self._gen_expr(expr.args[0], env)
+        lo_ssa = self._gen_expr(expr.args[1], env)
+        hi_ssa = self._gen_expr(expr.args[2], env)
+
+        result_type = self._type_of(expr)
+        assert isinstance(result_type, ArrayType)
+        shape = tuple(result_type.dims)
+        numel = 1
+        for d in shape:
+            numel *= d
+
+        shape_str = "x".join(str(d) for d in shape)
+        f32_type = f"tensor<{shape_str}xf32>"
+        flat_f32 = f"tensor<{numel}xf32>"
+
+        z_flat = self._gen_box_muller(key_ssa, numel)
+
+        # Reshape from flat to target shape if needed
+        if len(shape) == 1:
+            normal_vals = z_flat
+        else:
+            normal_vals = self._fresh()
+            self._emit(f"{normal_vals} = stablehlo.reshape {z_flat} : ({flat_f32}) -> {f32_type}")
+
+        # Clamp to [lo, hi]
+        lo_bc = self._fresh()
+        self._emit(f"{lo_bc} = stablehlo.broadcast_in_dim {lo_ssa}, dims = [] : (tensor<f32>) -> {f32_type}")
+        hi_bc = self._fresh()
+        self._emit(f"{hi_bc} = stablehlo.broadcast_in_dim {hi_ssa}, dims = [] : (tensor<f32>) -> {f32_type}")
+
+        clamped = self._fresh()
+        self._emit(f"{clamped} = stablehlo.clamp {lo_bc}, {normal_vals}, {hi_bc} : {f32_type}")
+        return clamped
