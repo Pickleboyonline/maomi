@@ -148,6 +148,84 @@ def _grad_reciprocal(ctx: Any, arg_ref: Expr, adj: Expr) -> Expr:
     return ctx._make_binop("*", adj, ctx._make_unary("-", recip_sq))
 
 
+def _grad_square(ctx: Any, arg_ref: Expr, adj: Expr) -> Expr:
+    # d/dx x^2 = 2x * dz
+    two_x = ctx._make_binop("*", ctx._make_float(2.0), arg_ref)
+    return ctx._make_binop("*", two_x, adj)
+
+
+def _grad_softplus(ctx: Any, arg_ref: Expr, adj: Expr) -> Expr:
+    # d/dx log(1 + exp(x)) = sigmoid(x) * dz
+    sig = ctx._make_call("sigmoid", [arg_ref])
+    return ctx._make_binop("*", sig, adj)
+
+
+def _grad_relu(ctx: Any, arg_ref: Expr, adj: Expr) -> Expr:
+    # d/dx relu(x) = (x > 0) * dz
+    # Compare x > 0, cast bool to f32, multiply by adj
+    from .ast_nodes import BinOp, CastExpr
+    from .types import ScalarType, ArrayType
+
+    zero = ctx._make_float(0.0)
+    arg_type = ctx.type_map.get(id(arg_ref))
+    if isinstance(arg_type, ArrayType):
+        bool_type = ArrayType("bool", arg_type.dims)
+    else:
+        bool_type = ScalarType("bool")
+        if not isinstance(arg_type, ScalarType):
+            arg_type = ScalarType("f32")
+
+    cmp = BinOp(">", arg_ref, zero, arg_ref.span)
+    ctx.type_map[id(cmp)] = bool_type
+    mask = CastExpr(cmp, arg_type.base, arg_ref.span)
+    ctx.type_map[id(mask)] = arg_type
+    return ctx._make_binop("*", mask, adj)
+
+
+def _grad_silu(ctx: Any, arg_ref: Expr, adj: Expr) -> Expr:
+    # d/dx x*sigmoid(x) = sigmoid(x) + x*sigmoid(x)*(1 - sigmoid(x))
+    #                    = sigmoid(x) * (1 + x*(1 - sigmoid(x))) * dz
+    sig = ctx._make_call("sigmoid", [arg_ref])
+    one = ctx._make_float(1.0)
+    one_minus_sig = ctx._make_binop("-", one, sig)
+    x_sig_1ms = ctx._make_binop("*", arg_ref, ctx._make_binop("*", sig, one_minus_sig))
+    inner = ctx._make_binop("+", sig, x_sig_1ms)
+    return ctx._make_binop("*", adj, inner)
+
+
+def _grad_gelu(ctx: Any, arg_ref: Expr, adj: Expr) -> Expr:
+    # GELU (tanh approx): 0.5 * x * (1 + tanh(c * (x + k*x^3)))
+    # where c = sqrt(2/pi) ≈ 0.7978845608, k = 0.044715
+    # Derivative:
+    # gelu'(x) = 0.5 * (1 + t) + 0.5 * x * (1 - t^2) * c * (1 + 3*k*x^2)
+    # where t = tanh(c * (x + k*x^3))
+    c = ctx._make_float(0.7978845608)
+    k = ctx._make_float(0.044715)
+    three_k = ctx._make_float(3.0 * 0.044715)
+    half = ctx._make_float(0.5)
+    one = ctx._make_float(1.0)
+
+    x_sq = ctx._make_binop("*", arg_ref, arg_ref)
+    x_cu = ctx._make_binop("*", x_sq, arg_ref)
+    inner = ctx._make_binop("*", c, ctx._make_binop("+", arg_ref, ctx._make_binop("*", k, x_cu)))
+    t = ctx._make_call("tanh", [inner])
+    t_sq = ctx._make_binop("*", t, t)
+
+    # 0.5 * (1 + t)
+    term1 = ctx._make_binop("*", half, ctx._make_binop("+", one, t))
+
+    # 0.5 * x * (1 - t^2) * c * (1 + 3*k*x^2)
+    one_minus_tsq = ctx._make_binop("-", one, t_sq)
+    one_plus_3kx2 = ctx._make_binop("+", one, ctx._make_binop("*", three_k, x_sq))
+    term2 = ctx._make_binop("*", half,
+                ctx._make_binop("*", arg_ref,
+                    ctx._make_binop("*", one_minus_tsq,
+                        ctx._make_binop("*", c, one_plus_3kx2))))
+
+    grad_val = ctx._make_binop("+", term1, term2)
+    return ctx._make_binop("*", adj, grad_val)
+
+
 # ---------------------------------------------------------------------------
 # Compound elementwise codegen functions
 # ---------------------------------------------------------------------------
@@ -156,21 +234,30 @@ def _grad_reciprocal(ctx: Any, arg_ref: Expr, adj: Expr) -> Expr:
 # Uses the codegen's internal API: _gen_expr, _type_of, _fresh, _emit.
 # Uses the module-level _mlir_type function from codegen_stablehlo.
 
-def _codegen_sigmoid(codegen: Any, expr: Any, env: dict[str, str]) -> str:
-    """sigmoid(x) = 1 / (1 + exp(-x))"""
-    from .codegen.stablehlo.utils import _mlir_type
-    from .types import StructType
+def _compound_codegen(name: str, inner_fn: Callable[..., str]) -> CodegenFn:
+    """Create a compound codegen wrapper that handles StructType dispatch.
 
-    arg = codegen._gen_expr(expr.args[0], env)
-    result_type = codegen._type_of(expr)
+    Every compound elementwise builtin has the same outer pattern: evaluate
+    the argument, check for StructType (field-by-field application), then
+    delegate to the inner function that emits the actual StableHLO ops.
+    """
+    def codegen_fn(codegen: Any, expr: Any, env: dict[str, str]) -> str:
+        from .codegen.stablehlo.utils import _mlir_type
+        from .types import StructType
 
-    if isinstance(result_type, StructType):
-        return codegen._gen_struct_compound_elementwise(
-            "sigmoid", _codegen_sigmoid_inner, arg, result_type,
-        )
+        arg = codegen._gen_expr(expr.args[0], env)
+        result_type = codegen._type_of(expr)
 
-    mlir_t = _mlir_type(result_type)
-    return _codegen_sigmoid_inner(codegen, arg, mlir_t)
+        if isinstance(result_type, StructType):
+            return codegen._gen_struct_compound_elementwise(
+                name, inner_fn, arg, result_type,
+            )
+
+        mlir_t = _mlir_type(result_type)
+        return inner_fn(codegen, arg, mlir_t)
+
+    codegen_fn.__doc__ = f"Compound codegen for {name}"
+    return codegen_fn
 
 
 def _codegen_sigmoid_inner(codegen: Any, arg_ssa: str, mlir_t: str) -> str:
@@ -186,22 +273,7 @@ def _codegen_sigmoid_inner(codegen: Any, arg_ssa: str, mlir_t: str) -> str:
     codegen._emit(f"{result} = stablehlo.divide {one}, {denom} : {mlir_t}")
     return result
 
-
-def _codegen_log2(codegen: Any, expr: Any, env: dict[str, str]) -> str:
-    """log2(x) = log(x) / ln(2)"""
-    from .codegen.stablehlo.utils import _mlir_type
-    from .types import StructType
-
-    arg = codegen._gen_expr(expr.args[0], env)
-    result_type = codegen._type_of(expr)
-
-    if isinstance(result_type, StructType):
-        return codegen._gen_struct_compound_elementwise(
-            "log2", _codegen_log2_inner, arg, result_type,
-        )
-
-    mlir_t = _mlir_type(result_type)
-    return _codegen_log2_inner(codegen, arg, mlir_t)
+_codegen_sigmoid = _compound_codegen("sigmoid", _codegen_sigmoid_inner)
 
 
 def _codegen_log2_inner(codegen: Any, arg_ssa: str, mlir_t: str) -> str:
@@ -213,22 +285,7 @@ def _codegen_log2_inner(codegen: Any, arg_ssa: str, mlir_t: str) -> str:
     codegen._emit(f"{result} = stablehlo.divide {log_x}, {ln2} : {mlir_t}")
     return result
 
-
-def _codegen_reciprocal(codegen: Any, expr: Any, env: dict[str, str]) -> str:
-    """reciprocal(x) = 1 / x"""
-    from .codegen.stablehlo.utils import _mlir_type
-    from .types import StructType
-
-    arg = codegen._gen_expr(expr.args[0], env)
-    result_type = codegen._type_of(expr)
-
-    if isinstance(result_type, StructType):
-        return codegen._gen_struct_compound_elementwise(
-            "reciprocal", _codegen_reciprocal_inner, arg, result_type,
-        )
-
-    mlir_t = _mlir_type(result_type)
-    return _codegen_reciprocal_inner(codegen, arg, mlir_t)
+_codegen_log2 = _compound_codegen("log2", _codegen_log2_inner)
 
 
 def _codegen_reciprocal_inner(codegen: Any, arg_ssa: str, mlir_t: str) -> str:
@@ -237,6 +294,102 @@ def _codegen_reciprocal_inner(codegen: Any, arg_ssa: str, mlir_t: str) -> str:
     result = codegen._fresh()
     codegen._emit(f"{result} = stablehlo.divide {one}, {arg_ssa} : {mlir_t}")
     return result
+
+_codegen_reciprocal = _compound_codegen("reciprocal", _codegen_reciprocal_inner)
+
+
+def _codegen_square_inner(codegen: Any, arg_ssa: str, mlir_t: str) -> str:
+    result = codegen._fresh()
+    codegen._emit(f"{result} = stablehlo.multiply {arg_ssa}, {arg_ssa} : {mlir_t}")
+    return result
+
+_codegen_square = _compound_codegen("square", _codegen_square_inner)
+
+
+def _codegen_softplus_inner(codegen: Any, arg_ssa: str, mlir_t: str) -> str:
+    exp_x = codegen._fresh()
+    codegen._emit(f"{exp_x} = stablehlo.exponential {arg_ssa} : {mlir_t}")
+    one = codegen._fresh()
+    codegen._emit(f"{one} = stablehlo.constant dense<1.000000e+00> : {mlir_t}")
+    sum_val = codegen._fresh()
+    codegen._emit(f"{sum_val} = stablehlo.add {one}, {exp_x} : {mlir_t}")
+    result = codegen._fresh()
+    codegen._emit(f"{result} = stablehlo.log {sum_val} : {mlir_t}")
+    return result
+
+_codegen_softplus = _compound_codegen("softplus", _codegen_softplus_inner)
+
+
+def _codegen_relu_inner(codegen: Any, arg_ssa: str, mlir_t: str) -> str:
+    # Build bool type matching the shape
+    bool_t = mlir_t.replace("f32", "i1").replace("f64", "i1")
+    zero = codegen._fresh()
+    codegen._emit(f"{zero} = stablehlo.constant dense<0.000000e+00> : {mlir_t}")
+    cmp = codegen._fresh()
+    codegen._emit(f"{cmp} = stablehlo.compare GT, {arg_ssa}, {zero} : ({mlir_t}, {mlir_t}) -> {bool_t}")
+    result = codegen._fresh()
+    codegen._emit(f"{result} = stablehlo.select {cmp}, {arg_ssa}, {zero} : ({bool_t}, {mlir_t}, {mlir_t}) -> {mlir_t}")
+    return result
+
+_codegen_relu = _compound_codegen("relu", _codegen_relu_inner)
+
+
+def _codegen_silu_inner(codegen: Any, arg_ssa: str, mlir_t: str) -> str:
+    sig = _codegen_sigmoid_inner(codegen, arg_ssa, mlir_t)
+    result = codegen._fresh()
+    codegen._emit(f"{result} = stablehlo.multiply {arg_ssa}, {sig} : {mlir_t}")
+    return result
+
+_codegen_silu = _compound_codegen("silu", _codegen_silu_inner)
+
+
+def _codegen_gelu_inner(codegen: Any, arg_ssa: str, mlir_t: str) -> str:
+    # Constants
+    half = codegen._fresh()
+    codegen._emit(f"{half} = stablehlo.constant dense<5.000000e-01> : {mlir_t}")
+    one = codegen._fresh()
+    codegen._emit(f"{one} = stablehlo.constant dense<1.000000e+00> : {mlir_t}")
+    c = codegen._fresh()
+    codegen._emit(f"{c} = stablehlo.constant dense<7.978846e-01> : {mlir_t}")
+    k = codegen._fresh()
+    codegen._emit(f"{k} = stablehlo.constant dense<4.471500e-02> : {mlir_t}")
+
+    # x^3 = x * x * x
+    x_sq = codegen._fresh()
+    codegen._emit(f"{x_sq} = stablehlo.multiply {arg_ssa}, {arg_ssa} : {mlir_t}")
+    x_cu = codegen._fresh()
+    codegen._emit(f"{x_cu} = stablehlo.multiply {x_sq}, {arg_ssa} : {mlir_t}")
+
+    # k * x^3
+    k_x3 = codegen._fresh()
+    codegen._emit(f"{k_x3} = stablehlo.multiply {k}, {x_cu} : {mlir_t}")
+
+    # x + k*x^3
+    x_plus_kx3 = codegen._fresh()
+    codegen._emit(f"{x_plus_kx3} = stablehlo.add {arg_ssa}, {k_x3} : {mlir_t}")
+
+    # c * (x + k*x^3)
+    inner = codegen._fresh()
+    codegen._emit(f"{inner} = stablehlo.multiply {c}, {x_plus_kx3} : {mlir_t}")
+
+    # tanh(inner)
+    tanh_inner = codegen._fresh()
+    codegen._emit(f"{tanh_inner} = stablehlo.tanh {inner} : {mlir_t}")
+
+    # 1 + tanh(inner)
+    one_plus_tanh = codegen._fresh()
+    codegen._emit(f"{one_plus_tanh} = stablehlo.add {one}, {tanh_inner} : {mlir_t}")
+
+    # x * (1 + tanh(inner))
+    x_times = codegen._fresh()
+    codegen._emit(f"{x_times} = stablehlo.multiply {arg_ssa}, {one_plus_tanh} : {mlir_t}")
+
+    # 0.5 * x * (1 + tanh(inner))
+    result = codegen._fresh()
+    codegen._emit(f"{result} = stablehlo.multiply {half}, {x_times} : {mlir_t}")
+    return result
+
+_codegen_gelu = _compound_codegen("gelu", _codegen_gelu_inner)
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +462,33 @@ ELEMENTWISE: dict[str, ElementwiseBuiltin] = {
         "reciprocal", None, _grad_reciprocal,
         "Compute element-wise reciprocal (1/x).",
         codegen_fn=_codegen_reciprocal,
+    ),
+
+    # -- Compound activation functions --
+    "square": ElementwiseBuiltin(
+        "square", None, _grad_square,
+        "Compute element-wise square (x^2).",
+        codegen_fn=_codegen_square,
+    ),
+    "softplus": ElementwiseBuiltin(
+        "softplus", None, _grad_softplus,
+        "Compute element-wise softplus: log(1 + exp(x)).",
+        codegen_fn=_codegen_softplus,
+    ),
+    "relu": ElementwiseBuiltin(
+        "relu", None, _grad_relu,
+        "Compute element-wise ReLU: max(x, 0).",
+        codegen_fn=_codegen_relu,
+    ),
+    "silu": ElementwiseBuiltin(
+        "silu", None, _grad_silu,
+        "Compute element-wise SiLU/Swish: x * sigmoid(x).",
+        codegen_fn=_codegen_silu,
+    ),
+    "gelu": ElementwiseBuiltin(
+        "gelu", None, _grad_gelu,
+        "Compute element-wise GELU (Gaussian Error Linear Unit, tanh approximation).",
+        codegen_fn=_codegen_gelu,
     ),
 }
 
