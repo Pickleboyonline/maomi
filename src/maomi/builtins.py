@@ -158,7 +158,7 @@ def _grad_reciprocal(ctx: Any, arg_ref: Expr, adj: Expr) -> Expr:
 
 def _codegen_sigmoid(codegen: Any, expr: Any, env: dict[str, str]) -> str:
     """sigmoid(x) = 1 / (1 + exp(-x))"""
-    from .codegen_stablehlo import _mlir_type
+    from .codegen.stablehlo.utils import _mlir_type
     from .types import StructType
 
     arg = codegen._gen_expr(expr.args[0], env)
@@ -189,7 +189,7 @@ def _codegen_sigmoid_inner(codegen: Any, arg_ssa: str, mlir_t: str) -> str:
 
 def _codegen_log2(codegen: Any, expr: Any, env: dict[str, str]) -> str:
     """log2(x) = log(x) / ln(2)"""
-    from .codegen_stablehlo import _mlir_type
+    from .codegen.stablehlo.utils import _mlir_type
     from .types import StructType
 
     arg = codegen._gen_expr(expr.args[0], env)
@@ -216,7 +216,7 @@ def _codegen_log2_inner(codegen: Any, arg_ssa: str, mlir_t: str) -> str:
 
 def _codegen_reciprocal(codegen: Any, expr: Any, env: dict[str, str]) -> str:
     """reciprocal(x) = 1 / x"""
-    from .codegen_stablehlo import _mlir_type
+    from .codegen.stablehlo.utils import _mlir_type
     from .types import StructType
 
     arg = codegen._gen_expr(expr.args[0], env)

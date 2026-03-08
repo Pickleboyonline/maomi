@@ -16,7 +16,7 @@ import tvm
 from tvm import relax as rx
 from tvm.script import tir as T
 
-from .ast_nodes import (
+from ...ast_nodes import (
     BinOp,
     Block,
     BoolLiteral,
@@ -48,10 +48,10 @@ from .ast_nodes import (
     _ScanGrad,
     _WhileGrad,
 )
-from .types import ArrayType, MaomiType, ScalarType, StructType
+from ...types import ArrayType, MaomiType, ScalarType, StructType
 
 if TYPE_CHECKING:
-    from .ast_nodes import Expr, Program
+    from ...ast_nodes import Expr, Program
 
 
 # ---- Standalone helpers (AST-level, backend-agnostic) ----
