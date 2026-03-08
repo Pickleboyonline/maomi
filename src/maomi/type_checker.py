@@ -31,7 +31,7 @@ from .ast_nodes import (
     TypeAnnotation,
     Expr,
 )
-from .types import MaomiType, ScalarType, ArrayType, StructType, WildcardArrayType, StringType, F32, F64, I32, I64, BOOL, STRING
+from .types import MaomiType, ScalarType, ArrayType, StructType, WildcardArrayType, StringType, TypeVar, F32, F64, I32, I64, BOOL, STRING
 from .errors import MaomiTypeError
 
 
@@ -65,6 +65,34 @@ def _is_numeric(t: MaomiType) -> bool:
     return False
 
 
+def _struct_has_float_leaves(t: StructType) -> bool:
+    """Check that all leaf fields of a struct are float types (f32/f64)."""
+    for _, ft in t.fields:
+        if isinstance(ft, StructType):
+            if not _struct_has_float_leaves(ft):
+                return False
+        elif isinstance(ft, ScalarType):
+            if ft.base not in {"f32", "f64"}:
+                return False
+        elif isinstance(ft, ArrayType):
+            if ft.base not in {"f32", "f64"}:
+                return False
+        else:
+            return False
+    return True
+
+
+def _struct_has_numeric_leaves(t: StructType) -> bool:
+    """Check that all leaf fields of a struct are numeric (recursing into nested structs)."""
+    for _, ft in t.fields:
+        if isinstance(ft, StructType):
+            if not _struct_has_numeric_leaves(ft):
+                return False
+        elif not _is_numeric(ft):
+            return False
+    return True
+
+
 def _base_of(t: MaomiType) -> str:
     if isinstance(t, ScalarType):
         return t.base
@@ -76,13 +104,13 @@ def _base_of(t: MaomiType) -> str:
 def _make_builtins() -> dict[str, FnSignature]:
     builtins = {}
     # Elementwise: scalar -> scalar (also works on arrays via type matching)
-    for name in ("exp", "log", "tanh", "sqrt", "abs"):
+    for name in ("exp", "log", "tanh", "sqrt", "abs", "cos", "sin"):
         builtins[name] = FnSignature(["x"], [ScalarType("f32")], F32)
     return builtins
 
 
 BUILTINS = _make_builtins()
-_ELEMENTWISE_BUILTINS = {"exp", "log", "tanh", "sqrt", "abs"}
+_ELEMENTWISE_BUILTINS = {"exp", "log", "tanh", "sqrt", "abs", "cos", "sin"}
 _CALLBACK_BUILTINS = {"callback"}
 _RNG_BUILTINS = {"random.key", "random.split", "random.uniform", "random.normal"}
 
@@ -163,14 +191,18 @@ class TypeChecker:
 
     @staticmethod
     def _is_generic_sig(sig: FnSignature) -> bool:
-        """True if function has wildcard or symbolic types needing monomorphization."""
+        """True if function has wildcard, symbolic, or type-variable types needing monomorphization."""
         for pt in sig.param_types:
             if isinstance(pt, WildcardArrayType):
+                return True
+            if isinstance(pt, TypeVar):
                 return True
             if isinstance(pt, ArrayType) and any(isinstance(d, str) for d in pt.dims):
                 return True
         rt = sig.return_type
         if isinstance(rt, WildcardArrayType):
+            return True
+        if isinstance(rt, TypeVar):
             return True
         if isinstance(rt, ArrayType) and any(isinstance(d, str) for d in rt.dims):
             return True
@@ -217,6 +249,9 @@ class TypeChecker:
         # Struct type
         if ta.base in self.struct_defs:
             return self.struct_defs[ta.base]
+        # Type variable: single uppercase letter (A-Z)
+        if len(ta.base) == 1 and ta.base.isupper() and ta.dims is None:
+            return TypeVar(ta.base)
         self._error(
             f"unknown type: '{ta.base}'",
             ta.span.line_start,
@@ -837,6 +872,8 @@ class TypeChecker:
             return None
         if op == "-" and _is_numeric(t):
             return t
+        if op == "-" and isinstance(t, StructType) and _struct_has_numeric_leaves(t):
+            return t
         self._error(f"invalid unary {op} on type {t}", expr.span.line_start, expr.span.col_start)
         return None
 
@@ -863,6 +900,10 @@ class TypeChecker:
                 return ArrayType("bool", result_shape.dims)
             return BOOL
 
+        # Struct arithmetic
+        if isinstance(lt, StructType) or isinstance(rt, StructType):
+            return self._check_struct_binop(op, lt, rt, expr)
+
         # Arithmetic
         if not _is_numeric(lt) or not _is_numeric(rt):
             self._error(
@@ -882,6 +923,69 @@ class TypeChecker:
             return None
 
         return result
+
+    def _check_struct_binop(self, op: str, lt: MaomiType, rt: MaomiType, expr: Expr) -> MaomiType | None:
+        """Type-check arithmetic on struct types."""
+        # struct OP struct (same type)
+        if isinstance(lt, StructType) and isinstance(rt, StructType):
+            if op not in {"+", "-", "*", "/"}:
+                self._error(
+                    f"operator {op}: not supported between struct types",
+                    expr.span.line_start, expr.span.col_start,
+                )
+                return None
+            if lt.name != rt.name:
+                self._error(
+                    f"operator {op}: mismatched struct types {lt.name} and {rt.name}",
+                    expr.span.line_start, expr.span.col_start,
+                )
+                return None
+            if not _struct_has_numeric_leaves(lt):
+                self._error(
+                    f"operator {op}: struct {lt.name} has non-numeric fields",
+                    expr.span.line_start, expr.span.col_start,
+                )
+                return None
+            return lt
+
+        # scalar * struct / struct * scalar
+        if op == "*":
+            if isinstance(lt, StructType) and _is_numeric(rt) and isinstance(rt, ScalarType):
+                if not _struct_has_numeric_leaves(lt):
+                    self._error(f"operator *: struct {lt.name} has non-numeric fields", expr.span.line_start, expr.span.col_start)
+                    return None
+                return lt
+            if _is_numeric(lt) and isinstance(lt, ScalarType) and isinstance(rt, StructType):
+                if not _struct_has_numeric_leaves(rt):
+                    self._error(f"operator *: struct {rt.name} has non-numeric fields", expr.span.line_start, expr.span.col_start)
+                    return None
+                return rt
+
+        # struct / scalar
+        if op == "/" and isinstance(lt, StructType) and _is_numeric(rt) and isinstance(rt, ScalarType):
+            if not _struct_has_numeric_leaves(lt):
+                self._error(f"operator /: struct {lt.name} has non-numeric fields", expr.span.line_start, expr.span.col_start)
+                return None
+            return lt
+
+        # scalar + struct / struct + scalar (broadcast scalar to each field)
+        if op in {"+", "-"}:
+            if isinstance(lt, StructType) and _is_numeric(rt) and isinstance(rt, ScalarType):
+                if not _struct_has_numeric_leaves(lt):
+                    self._error(f"operator {op}: struct {lt.name} has non-numeric fields", expr.span.line_start, expr.span.col_start)
+                    return None
+                return lt
+            if _is_numeric(lt) and isinstance(lt, ScalarType) and isinstance(rt, StructType):
+                if not _struct_has_numeric_leaves(rt):
+                    self._error(f"operator {op}: struct {rt.name} has non-numeric fields", expr.span.line_start, expr.span.col_start)
+                    return None
+                return rt
+
+        self._error(
+            f"operator {op}: unsupported for struct types ({lt} and {rt})",
+            expr.span.line_start, expr.span.col_start,
+        )
+        return None
 
     def _check_matmul(self, lt: MaomiType, rt: MaomiType, expr: Expr) -> MaomiType | None:
         if not isinstance(lt, ArrayType) or not isinstance(rt, ArrayType):
@@ -1058,6 +1162,10 @@ class TypeChecker:
                 )
                 continue
 
+            # Elementwise builtins on struct types — skip normal unification
+            if expr.callee in _ELEMENTWISE_BUILTINS and isinstance(arg_type, StructType):
+                continue
+
             if not self._unify_arg(arg_type, param_type, substitution, expr, i):
                 continue
 
@@ -1069,6 +1177,16 @@ class TypeChecker:
             for at in arg_types:
                 if isinstance(at, ArrayType) and at.base == ret.base:
                     ret = ArrayType(ret.base, at.dims)
+                    break
+                if isinstance(at, StructType):
+                    # Struct-level builtin: apply field-by-field
+                    if not _struct_has_float_leaves(at):
+                        self._error(
+                            f"builtin '{expr.callee}' on struct {at.name}: all leaf fields must be float",
+                            expr.span.line_start, expr.span.col_start,
+                        )
+                        return None
+                    ret = at
                     break
 
         return ret
@@ -1540,6 +1658,7 @@ class TypeChecker:
 
         # Infer arg types, unify symbolic dims, resolve wildcard shapes
         substitution: dict[str, int | str] = {}
+        typevar_bindings: dict[str, StructType] = {}
         wildcard_shape: tuple[int | str, ...] | None = None
         wildcard_scalar = False
         arg_types: list[MaomiType | None] = []
@@ -1550,7 +1669,24 @@ class TypeChecker:
             if arg_type is None:
                 continue
 
-            if isinstance(param_type, WildcardArrayType):
+            if isinstance(param_type, TypeVar):
+                # Type variable param — must be a struct type
+                if not isinstance(arg_type, StructType):
+                    self._error(
+                        f"argument {i+1}: type variable '{param_type.name}' expects a struct type, got {arg_type}",
+                        arg.span.line_start, arg.span.col_start,
+                    )
+                    return None
+                if param_type.name in typevar_bindings:
+                    if typevar_bindings[param_type.name].name != arg_type.name:
+                        self._error(
+                            f"argument {i+1}: type variable '{param_type.name}' bound to {typevar_bindings[param_type.name]} but got {arg_type}",
+                            arg.span.line_start, arg.span.col_start,
+                        )
+                        return None
+                else:
+                    typevar_bindings[param_type.name] = arg_type
+            elif isinstance(param_type, WildcardArrayType):
                 # Wildcard param — match any shape with matching dtype
                 if isinstance(arg_type, ArrayType):
                     if arg_type.base != param_type.base:
@@ -1589,9 +1725,17 @@ class TypeChecker:
 
         # Resolve return type
         ret = generic_sig.return_type
-        if isinstance(ret, WildcardArrayType):
+        if isinstance(ret, TypeVar):
+            if ret.name not in typevar_bindings:
+                self._error(
+                    f"type variable '{ret.name}' in return type not bound by any parameter",
+                    expr.span.line_start, expr.span.col_start,
+                )
+                return None
+            concrete_ret: MaomiType = typevar_bindings[ret.name]
+        elif isinstance(ret, WildcardArrayType):
             if wildcard_scalar or wildcard_shape is None:
-                concrete_ret: MaomiType = ScalarType(ret.base)
+                concrete_ret = ScalarType(ret.base)
             else:
                 concrete_ret = ArrayType(ret.base, wildcard_shape)
         else:
@@ -1606,6 +1750,8 @@ class TypeChecker:
                 shape_parts.append("x".join(str(d) for d in at.dims))
             elif isinstance(at, ScalarType):
                 shape_parts.append(at.base)
+            elif isinstance(at, StructType):
+                shape_parts.append(at.name)
             else:
                 shape_parts.append(str(at))
         mono_name = f"{expr.callee}${','.join(shape_parts)}"
@@ -1618,7 +1764,10 @@ class TypeChecker:
             # Replace type annotations with concrete types
             for p in mono_fn.params:
                 ta = p.type_annotation
-                if ta.wildcard:
+                if ta.base in typevar_bindings:
+                    # TypeVar → concrete struct name
+                    p.type_annotation = TypeAnnotation(typevar_bindings[ta.base].name, None, ta.span)
+                elif ta.wildcard:
                     if wildcard_scalar or wildcard_shape is None:
                         p.type_annotation = TypeAnnotation(ta.base, None, ta.span)
                     else:
@@ -1636,7 +1785,9 @@ class TypeChecker:
 
             # Resolve return type annotation
             rta = mono_fn.return_type
-            if rta.wildcard:
+            if rta.base in typevar_bindings:
+                mono_fn.return_type = TypeAnnotation(typevar_bindings[rta.base].name, None, rta.span)
+            elif rta.wildcard:
                 if wildcard_scalar or wildcard_shape is None:
                     mono_fn.return_type = TypeAnnotation(rta.base, None, rta.span)
                 else:

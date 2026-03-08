@@ -129,6 +129,8 @@ _BUILTIN_OPS = {
     "tanh": "stablehlo.tanh",
     "sqrt": "stablehlo.sqrt",
     "abs": "stablehlo.abs",
+    "cos": "stablehlo.cosine",
+    "sin": "stablehlo.sine",
 }
 
 
@@ -264,18 +266,33 @@ class StableHLOCodegen:
         return "\n".join(self._lines)
 
     @staticmethod
-    def _is_generic_fn(fn) -> bool:
-        """True if function has wildcard or symbolic-dim type annotations."""
+    def _is_typevar_annotation(ta) -> bool:
+        """True if type annotation is a single uppercase letter (type variable)."""
+        return (len(ta.base) == 1 and ta.base.isupper()
+                and ta.base not in ('I',)  # not a base type prefix
+                and ta.dims is None and not getattr(ta, 'wildcard', False))
+
+    def _is_generic_fn(self, fn) -> bool:
+        """True if function has wildcard, symbolic-dim, or type-variable annotations."""
+        struct_names = {sd.name for sd in self.program.struct_defs} if self.program else set()
         for p in fn.params:
             ta = p.type_annotation
             if getattr(ta, 'wildcard', False):
                 return True
             if ta.dims is not None and any(isinstance(d.value, str) for d in ta.dims):
                 return True
+            if (ta.dims is None and not getattr(ta, 'wildcard', False)
+                    and ta.base not in {'f32', 'f64', 'i32', 'i64', 'bool', 'Key'}
+                    and ta.base not in struct_names):
+                return True
         rta = fn.return_type
         if getattr(rta, 'wildcard', False):
             return True
         if rta.dims is not None and any(isinstance(d.value, str) for d in rta.dims):
+            return True
+        if (rta.dims is None and not getattr(rta, 'wildcard', False)
+                and rta.base not in {'f32', 'f64', 'i32', 'i64', 'bool', 'Key'}
+                and rta.base not in struct_names):
             return True
         return False
 
@@ -455,11 +472,31 @@ class StableHLOCodegen:
     def _gen_unary(self, op: str, operand: Expr, expr: Expr, env: dict[str, str]) -> str:
         val = self._gen_expr(operand, env)
         result_type = self._type_of(expr)
+        if op == "-" and isinstance(result_type, StructType):
+            return self._gen_struct_negate(val, result_type)
         mlir_t = _mlir_type(result_type)
         var = self._fresh()
         if op == "-":
             self._emit(f"{var} = stablehlo.negate {val} : {mlir_t}")
         return var
+
+    def _gen_struct_negate(self, val: str, stype: 'StructType') -> str:
+        """Negate each field of a struct."""
+        field_ssas = []
+        for i, (fname, ftype) in enumerate(stype.fields):
+            mlir_ft = _mlir_type(ftype)
+            extracted = self._fresh()
+            self._emit(f"{extracted} = stablehlo.get_tuple_element {val}[{i}] : ({_mlir_type(stype)}) -> {mlir_ft}")
+            if isinstance(ftype, StructType):
+                field_ssas.append(self._gen_struct_negate(extracted, ftype))
+            else:
+                negated = self._fresh()
+                self._emit(f"{negated} = stablehlo.negate {extracted} : {mlir_ft}")
+                field_ssas.append(negated)
+        result = self._fresh()
+        types_str = ", ".join(_mlir_type(ft) for _, ft in stype.fields)
+        self._emit(f"{result} = stablehlo.tuple {', '.join(field_ssas)} : tuple<{types_str}>")
+        return result
 
     def _gen_binop(self, op: str, left: Expr, right: Expr, expr: Expr, env: dict[str, str]) -> str:
         if op == "@":
@@ -471,6 +508,11 @@ class StableHLOCodegen:
         lt = self._type_of(left)
         rt = self._type_of(right)
         result_type = self._type_of(expr)
+
+        # Struct arithmetic — field-by-field
+        if isinstance(result_type, StructType):
+            return self._gen_struct_binop(op, lhs, rhs, lt, rt, result_type)
+
         mlir_result = _mlir_type(result_type)
 
         var = self._fresh()
@@ -508,6 +550,55 @@ class StableHLOCodegen:
 
         self._emit(f"{var} = {stablehlo_op} {lhs}, {rhs} : {mlir_result}")
         return var
+
+    def _gen_struct_binop(self, op: str, lhs: str, rhs: str,
+                          lt: 'MaomiType', rt: 'MaomiType',
+                          result_type: 'StructType') -> str:
+        """Generate field-by-field arithmetic on struct types."""
+        from .types import StructType as ST, ScalarType as ScT
+
+        op_map = {"+": "stablehlo.add", "-": "stablehlo.subtract",
+                  "*": "stablehlo.multiply", "/": "stablehlo.divide",
+                  "**": "stablehlo.power"}
+        stablehlo_op = op_map[op]
+
+        field_ssas = []
+        for i, (fname, ftype) in enumerate(result_type.fields):
+            mlir_ft = _mlir_type(ftype)
+            # Extract fields from struct operands
+            if isinstance(lt, ST):
+                lf = self._fresh()
+                self._emit(f"{lf} = stablehlo.get_tuple_element {lhs}[{i}] : ({_mlir_type(lt)}) -> {mlir_ft}")
+            else:
+                lf = lhs  # scalar — will be broadcast per field
+            if isinstance(rt, ST):
+                rf = self._fresh()
+                self._emit(f"{rf} = stablehlo.get_tuple_element {rhs}[{i}] : ({_mlir_type(rt)}) -> {mlir_ft}")
+            else:
+                rf = rhs  # scalar
+
+            if isinstance(ftype, ST):
+                # Recurse for nested struct fields
+                inner_lt = dict(lt.fields)[fname] if isinstance(lt, ST) else lt
+                inner_rt = dict(rt.fields)[fname] if isinstance(rt, ST) else rt
+                field_ssas.append(self._gen_struct_binop(op, lf, rf, inner_lt, inner_rt, ftype))
+            else:
+                # Leaf numeric field — broadcast scalar if needed
+                if not isinstance(lt, ST):
+                    lf = self._maybe_broadcast(lf, lt, ftype)
+                if not isinstance(rt, ST):
+                    rf = self._maybe_broadcast(rf, rt, ftype)
+                var = self._fresh()
+                self._emit(f"{var} = {stablehlo_op} {lf}, {rf} : {mlir_ft}")
+                field_ssas.append(var)
+
+        # Reconstruct the tuple
+        mlir_result = _mlir_type(result_type)
+        result_var = self._fresh()
+        fields_str = ", ".join(field_ssas)
+        types_str = ", ".join(_mlir_type(ft) for _, ft in result_type.fields)
+        self._emit(f"{result_var} = stablehlo.tuple {fields_str} : tuple<{types_str}>")
+        return result_var
 
     def _gen_matmul(self, left: Expr, right: Expr, expr: Expr, env: dict[str, str]) -> str:
         lhs = self._gen_expr(left, env)
@@ -931,10 +1022,30 @@ class StableHLOCodegen:
     def _gen_elementwise_builtin(self, expr: CallExpr, env: dict[str, str]) -> str:
         arg = self._gen_expr(expr.args[0], env)
         result_type = self._type_of(expr)
-        mlir_t = _mlir_type(result_type)
         op = _BUILTIN_OPS[expr.callee]
+        if isinstance(result_type, StructType):
+            return self._gen_struct_elementwise(op, arg, result_type)
+        mlir_t = _mlir_type(result_type)
         var = self._fresh()
         self._emit(f"{var} = {op} {arg} : {mlir_t}")
+        return var
+
+    def _gen_struct_elementwise(self, op: str, arg_ssa: str, stype: StructType) -> str:
+        """Apply an elementwise builtin to each field of a struct."""
+        field_ssas = []
+        for i, (fname, ftype) in enumerate(stype.fields):
+            mlir_ft = _mlir_type(ftype)
+            extracted = self._fresh()
+            self._emit(f"{extracted} = stablehlo.get_tuple_element {arg_ssa}[{i}] : ({_mlir_type(stype)}) -> {mlir_ft}")
+            if isinstance(ftype, StructType):
+                field_ssas.append(self._gen_struct_elementwise(op, extracted, ftype))
+            else:
+                result = self._fresh()
+                self._emit(f"{result} = {op} {extracted} : {mlir_ft}")
+                field_ssas.append(result)
+        var = self._fresh()
+        types_str = ", ".join(_mlir_type(ft) for _, ft in stype.fields)
+        self._emit(f"{var} = stablehlo.tuple {', '.join(field_ssas)} : tuple<{types_str}>")
         return var
 
     def _gen_iota(self, expr: CallExpr, env: dict[str, str]) -> str:
