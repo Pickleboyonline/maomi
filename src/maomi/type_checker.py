@@ -1300,6 +1300,14 @@ class TypeChecker:
         if expr.callee == "transpose":
             return self._check_transpose(expr, env)
 
+        # stack(a, b, ..., axis) — stack arrays along new axis
+        if expr.callee == "stack":
+            return self._check_stack(expr, env)
+
+        # pad(x, val, pad_lo, pad_hi) — pad array with constant value
+        if expr.callee == "pad":
+            return self._check_pad(expr, env)
+
         sig = self.fn_table.get(expr.callee)
         if sig is None:
             # Check for generic (wildcard) function
@@ -1741,6 +1749,144 @@ class TypeChecker:
         result_dims = list(first.dims)
         result_dims[axis] = axis_sum
         return ArrayType(first.base, tuple(result_dims))
+
+    def _check_stack(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
+        # stack(a, b, ..., axis) — at least 3 args (2 arrays + axis)
+        if len(expr.args) < 3:
+            self._error(
+                "stack requires at least 3 arguments: two or more arrays and an axis",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        # Infer all arg types
+        arg_types: list[MaomiType | None] = []
+        for arg in expr.args:
+            arg_types.append(self._infer(arg, env))
+
+        if any(t is None for t in arg_types):
+            return None
+
+        # Last arg must be int literal (axis)
+        if not isinstance(expr.args[-1], IntLiteral):
+            self._error(
+                "stack: last argument (axis) must be an integer literal",
+                expr.args[-1].span.line_start, expr.args[-1].span.col_start,
+            )
+            return None
+
+        axis = expr.args[-1].value
+        array_args = expr.args[:-1]
+        array_types = arg_types[:-1]
+
+        # All must be arrays
+        for i, (arg, t) in enumerate(zip(array_args, array_types)):
+            if not isinstance(t, ArrayType):
+                self._error(
+                    f"stack: argument {i} must be an array, got {t}",
+                    arg.span.line_start, arg.span.col_start,
+                )
+                return None
+
+        first = array_types[0]
+        assert isinstance(first, ArrayType)
+        rank = len(first.dims)
+
+        # axis must be in [0, rank] (can insert at end)
+        if axis < 0 or axis > rank:
+            self._error(
+                f"stack: axis {axis} out of range for rank-{rank} arrays (valid: 0..{rank})",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        # All arrays must have the same shape and base type
+        for i, t in enumerate(array_types[1:], 1):
+            assert isinstance(t, ArrayType)
+            if t.base != first.base:
+                self._error(
+                    f"stack: base type mismatch at argument {i}: {first.base} vs {t.base}",
+                    array_args[i].span.line_start, array_args[i].span.col_start,
+                )
+                return None
+            if t.dims != first.dims:
+                self._error(
+                    f"stack: shape mismatch at argument {i}: {first.dims} vs {t.dims}",
+                    array_args[i].span.line_start, array_args[i].span.col_start,
+                )
+                return None
+
+        # Result: insert dim of size n_arrays at axis position
+        n_arrays = len(array_args)
+        result_dims = list(first.dims)
+        result_dims.insert(axis, n_arrays)
+        return ArrayType(first.base, tuple(result_dims))
+
+    def _check_pad(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
+        # pad(x, val, pad_lo, pad_hi) — exactly 4 args
+        if len(expr.args) != 4:
+            self._error(
+                "pad expects exactly 4 arguments: pad(x, val, pad_lo, pad_hi)",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        x_type = self._infer(expr.args[0], env)
+        val_type = self._infer(expr.args[1], env)
+        self._infer(expr.args[2], env)
+        self._infer(expr.args[3], env)
+
+        if x_type is None or val_type is None:
+            return None
+
+        if not isinstance(x_type, ArrayType):
+            self._error(
+                f"pad: first argument must be an array, got {x_type}",
+                expr.args[0].span.line_start, expr.args[0].span.col_start,
+            )
+            return None
+
+        if not isinstance(val_type, ScalarType) or val_type.base not in ("f32", "f64"):
+            self._error(
+                "pad: second argument (padding value) must be a float scalar",
+                expr.args[1].span.line_start, expr.args[1].span.col_start,
+            )
+            return None
+
+        if not isinstance(expr.args[2], IntLiteral):
+            self._error(
+                "pad: pad_lo must be an integer literal",
+                expr.args[2].span.line_start, expr.args[2].span.col_start,
+            )
+            return None
+
+        if not isinstance(expr.args[3], IntLiteral):
+            self._error(
+                "pad: pad_hi must be an integer literal",
+                expr.args[3].span.line_start, expr.args[3].span.col_start,
+            )
+            return None
+
+        pad_lo = expr.args[2].value
+        pad_hi = expr.args[3].value
+
+        if pad_lo < 0:
+            self._error(
+                "pad: pad_lo must be non-negative",
+                expr.args[2].span.line_start, expr.args[2].span.col_start,
+            )
+            return None
+
+        if pad_hi < 0:
+            self._error(
+                "pad: pad_hi must be non-negative",
+                expr.args[3].span.line_start, expr.args[3].span.col_start,
+            )
+            return None
+
+        # Result shape: each dim + pad_lo + pad_hi
+        result_dims = tuple(d + pad_lo + pad_hi for d in x_type.dims)
+        return ArrayType(x_type.base, result_dims)
 
     def _check_conv2d(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
         # conv2d(input, kernel) — stride=1, pad=0

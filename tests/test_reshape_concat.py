@@ -227,3 +227,170 @@ class TestADConcat:
             "fn f(a: f32[3], b: f32[7]) -> f32[3] { grad(mean(concat(a, b)), a) }"
         )
         assert "module {" in out
+
+
+# ---------- Type checker: stack ----------
+
+
+class TestStackTypeChecker:
+    def test_stack_1d(self):
+        _check_ok("fn f(a: f32[4], b: f32[4]) -> f32[2, 4] { stack(a, b, 0) }")
+
+    def test_stack_axis0_3arrays(self):
+        _check_ok("fn f(a: f32[4], b: f32[4], c: f32[4]) -> f32[3, 4] { stack(a, b, c, 0) }")
+
+    def test_stack_axis1(self):
+        _check_ok("fn f(a: f32[3, 4], b: f32[3, 4]) -> f32[3, 2, 4] { stack(a, b, 1) }")
+
+    def test_stack_axis_last(self):
+        _check_ok("fn f(a: f32[3, 4], b: f32[3, 4]) -> f32[3, 4, 2] { stack(a, b, 2) }")
+
+    def test_stack_shape_mismatch(self):
+        _check_err(
+            "fn f(a: f32[4], b: f32[6]) -> f32[2, 4] { stack(a, b, 0) }",
+            "shape mismatch",
+        )
+
+    def test_stack_type_mismatch(self):
+        _check_err(
+            "fn f(a: f32[4], b: i32[4]) -> f32[2, 4] { stack(a, b, 0) }",
+            "base type mismatch",
+        )
+
+    def test_stack_too_few_args(self):
+        _check_err(
+            "fn f(a: f32[4]) -> f32[1, 4] { stack(a, 0) }",
+            "at least 3 arguments",
+        )
+
+    def test_stack_axis_out_of_range(self):
+        _check_err(
+            "fn f(a: f32[4], b: f32[4]) -> f32[4, 2] { stack(a, b, 2) }",
+            "axis 2 out of range",
+        )
+
+    def test_stack_non_array(self):
+        _check_err(
+            "fn f(a: f32, b: f32) -> f32[2] { stack(a, b, 0) }",
+            "must be an array",
+        )
+
+
+# ---------- Type checker: pad ----------
+
+
+class TestPadTypeChecker:
+    def test_pad_2d(self):
+        _check_ok("fn f(x: f32[3, 4]) -> f32[5, 6] { pad(x, 0.0, 1, 1) }")
+
+    def test_pad_1d(self):
+        _check_ok("fn f(x: f32[8]) -> f32[12] { pad(x, 0.0, 2, 2) }")
+
+    def test_pad_asymmetric(self):
+        _check_ok("fn f(x: f32[3, 4]) -> f32[4, 5] { pad(x, 0.0, 1, 0) }")
+
+    def test_pad_wrong_arg_count(self):
+        _check_err(
+            "fn f(x: f32[4]) -> f32[6] { pad(x, 0.0, 1) }",
+            "exactly 4 arguments",
+        )
+
+    def test_pad_non_array(self):
+        _check_err(
+            "fn f(x: f32) -> f32 { pad(x, 0.0, 1, 1) }",
+            "must be an array",
+        )
+
+    def test_pad_non_literal_lo(self):
+        _check_err(
+            "fn f(x: f32[4], n: i32) -> f32[6] { pad(x, 0.0, n, 1) }",
+            "integer literal",
+        )
+
+
+# ---------- Codegen: stack ----------
+
+
+class TestStackCodegen:
+    def test_emits_reshape_and_concatenate(self):
+        out = _compile("fn f(a: f32[4], b: f32[4]) -> f32[2, 4] { stack(a, b, 0) }")
+        assert "stablehlo.reshape" in out
+        assert "stablehlo.concatenate" in out
+
+    def test_correct_types(self):
+        out = _compile("fn f(a: f32[4], b: f32[4]) -> f32[2, 4] { stack(a, b, 0) }")
+        assert "tensor<4xf32>" in out
+        assert "tensor<1x4xf32>" in out
+        assert "tensor<2x4xf32>" in out
+
+    def test_axis1(self):
+        out = _compile("fn f(a: f32[3, 4], b: f32[3, 4]) -> f32[3, 2, 4] { stack(a, b, 1) }")
+        assert "stablehlo.concatenate" in out
+        assert "dim = 1" in out
+
+
+# ---------- Codegen: pad ----------
+
+
+class TestPadCodegen:
+    def test_emits_pad_op(self):
+        out = _compile("fn f(x: f32[3, 4]) -> f32[5, 6] { pad(x, 0.0, 1, 1) }")
+        assert "stablehlo.pad" in out
+
+    def test_correct_types(self):
+        out = _compile("fn f(x: f32[3, 4]) -> f32[5, 6] { pad(x, 0.0, 1, 1) }")
+        assert "tensor<3x4xf32>" in out
+        assert "tensor<5x6xf32>" in out
+
+    def test_padding_attributes(self):
+        out = _compile("fn f(x: f32[3, 4]) -> f32[5, 6] { pad(x, 0.0, 1, 1) }")
+        assert "low = [1, 1]" in out
+        assert "high = [1, 1]" in out
+        assert "interior = [0, 0]" in out
+
+
+# ---------- AD: stack ----------
+
+
+class TestADStack:
+    def test_grad_through_stack(self):
+        out = _compile(
+            "fn f(a: f32[4], b: f32[4]) -> f32[4] { grad(sum(stack(a, b, 0)), a) }"
+        )
+        assert "module {" in out
+
+    def test_grad_stack_wrt_second(self):
+        out = _compile(
+            "fn f(a: f32[4], b: f32[4]) -> f32[4] { grad(sum(stack(a, b, 0)), b) }"
+        )
+        assert "module {" in out
+
+    def test_grad_stack_with_multiply(self):
+        # When adj is an array, stack backward slices + reshapes
+        out = _compile(
+            "fn f(a: f32[4], b: f32[4], c: f32[2, 4]) -> f32[4] { grad(sum(stack(a, b, 0) * c), a) }"
+        )
+        assert "stablehlo.reshape" in out
+
+
+# ---------- AD: pad ----------
+
+
+class TestADPad:
+    def test_grad_through_pad(self):
+        out = _compile(
+            "fn f(x: f32[3, 4]) -> f32[3, 4] { grad(sum(pad(x, 0.0, 1, 1)), x) }"
+        )
+        assert "module {" in out
+
+    def test_grad_pad_with_multiply(self):
+        out = _compile(
+            "fn f(x: f32[3, 4], y: f32[5, 6]) -> f32[3, 4] { grad(sum(pad(x, 0.0, 1, 1) * y), x) }"
+        )
+        assert "stablehlo.slice" in out
+
+    def test_grad_pad_compiles(self):
+        out = _compile(
+            "fn f(x: f32[4]) -> f32[4] { grad(mean(pad(x, 0.0, 2, 2)), x) }"
+        )
+        assert "module {" in out

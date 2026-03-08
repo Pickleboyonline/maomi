@@ -869,6 +869,10 @@ class ADTransform(SimpleGradRulesMixin, ComplexGradRulesMixin):
                     self._backprop_reshape(args, adj, adjoints, var_map)
                 elif callee == "concat":
                     self._backprop_concat(args, adj, adjoints, var_map)
+                elif callee == "stack":
+                    self._backprop_stack(args, adj, adjoints, var_map)
+                elif callee == "pad":
+                    self._backprop_pad(args, adj, adjoints, var_map)
                 elif callee == "transpose":
                     # d/dx transpose(x, perm) = transpose(adj, inv_perm)
                     arg = args[0]

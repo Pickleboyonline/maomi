@@ -368,6 +368,16 @@ COMPLEX: dict[str, ComplexBuiltin] = {
         "Permute array axes. transpose(x) swaps 2D; transpose(x, 0, 2, 1, 3) for general permutation.",
         (["x", "perm..."], ["f32[...]", "int..."], "f32[...]"),
     ),
+    "stack": ComplexBuiltin(
+        "stack", "shape", "has_rule",
+        "Stack arrays along a new axis. Last argument is the axis.",
+        (["arrays...", "axis"], ["f32[...]...", "int"], "f32[...]"),
+    ),
+    "pad": ComplexBuiltin(
+        "pad", "shape", "has_rule",
+        "Pad array with constant value. pad(x, val, pad_lo, pad_hi).",
+        (["x", "val", "pad_lo", "pad_hi"], ["f32[...]", "f32", "int", "int"], "f32[...]"),
+    ),
 
     # Array construction
     "iota": ComplexBuiltin(
