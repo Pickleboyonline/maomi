@@ -577,6 +577,21 @@ COMPLEX: dict[str, ComplexBuiltin] = {
         "Pad array with constant value. pad(x, val, pad_lo, pad_hi).",
         (["x", "val", "pad_lo", "pad_hi"], ["f32[...]", "f32", "int", "int"], "f32[...]"),
     ),
+    "expand_dims": ComplexBuiltin(
+        "expand_dims", "shape", "has_rule",
+        "Insert a size-1 dimension at the given axis.",
+        (["x", "axis"], ["f32[...]", "int"], "f32[...]"),
+    ),
+    "squeeze": ComplexBuiltin(
+        "squeeze", "shape", "has_rule",
+        "Remove a size-1 dimension at the given axis.",
+        (["x", "axis"], ["f32[...]", "int"], "f32[...]"),
+    ),
+    "broadcast_to": ComplexBuiltin(
+        "broadcast_to", "shape", "has_rule",
+        "Broadcast array to the given shape.",
+        (["x", "dims..."], ["f32[...]", "int..."], "f32[...]"),
+    ),
 
     # Array construction
     "iota": ComplexBuiltin(

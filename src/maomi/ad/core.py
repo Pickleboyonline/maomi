@@ -875,6 +875,12 @@ class ADTransform(SimpleGradRulesMixin, ComplexGradRulesMixin):
                     self._backprop_stack(args, adj, adjoints, var_map)
                 elif callee == "pad":
                     self._backprop_pad(args, adj, adjoints, var_map)
+                elif callee == "expand_dims":
+                    self._backprop_expand_dims(args, adj, adjoints, var_map)
+                elif callee == "squeeze":
+                    self._backprop_squeeze(args, adj, adjoints, var_map)
+                elif callee == "broadcast_to":
+                    self._backprop_broadcast_to(args, adj, adjoints, var_map, node)
                 elif callee == "transpose":
                     # d/dx transpose(x, perm) = transpose(adj, inv_perm)
                     arg = args[0]

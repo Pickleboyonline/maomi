@@ -768,3 +768,59 @@ class TestLogsumexpGrad:
             [x],
             jax.grad(lambda x: jax_logsumexp(x)), [jnp.array(x)],
         )
+
+
+# ---------------------------------------------------------------------------
+# Shape ops
+# ---------------------------------------------------------------------------
+
+class TestShapeOpsGrad:
+    def test_expand_dims(self):
+        x = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+        _check(
+            "fn f(x: f32[2, 2]) -> f32 { sum(expand_dims(x, 0)) }\n"
+            "fn grad_f(x: f32[2, 2]) -> f32[2, 2] { grad(f(x), x) }",
+            [x],
+            jax.grad(lambda x: jnp.sum(jnp.expand_dims(x, 0))),
+            [jnp.array(x)],
+        )
+
+    def test_expand_dims_middle(self):
+        x = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+        _check(
+            "fn f(x: f32[2, 2]) -> f32 { sum(expand_dims(x, 1)) }\n"
+            "fn grad_f(x: f32[2, 2]) -> f32[2, 2] { grad(f(x), x) }",
+            [x],
+            jax.grad(lambda x: jnp.sum(jnp.expand_dims(x, 1))),
+            [jnp.array(x)],
+        )
+
+    def test_squeeze(self):
+        x = np.array([[[1.0, 2.0], [3.0, 4.0]]], dtype=np.float32)  # [1, 2, 2]
+        _check(
+            "fn f(x: f32[1, 2, 2]) -> f32 { sum(squeeze(x, 0)) }\n"
+            "fn grad_f(x: f32[1, 2, 2]) -> f32[1, 2, 2] { grad(f(x), x) }",
+            [x],
+            jax.grad(lambda x: jnp.sum(jnp.squeeze(x, 0))),
+            [jnp.array(x)],
+        )
+
+    def test_broadcast_to(self):
+        x = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
+        _check(
+            "fn f(x: f32[4]) -> f32 { sum(broadcast_to(x, 3, 4)) }\n"
+            "fn grad_f(x: f32[4]) -> f32[4] { grad(f(x), x) }",
+            [x],
+            jax.grad(lambda x: jnp.sum(jnp.broadcast_to(x, (3, 4)))),
+            [jnp.array(x)],
+        )
+
+    def test_broadcast_to_scalar(self):
+        x = np.float32(2.0)
+        _check(
+            "fn f(x: f32) -> f32 { sum(broadcast_to(x, 3, 4)) }\n"
+            "fn grad_f(x: f32) -> f32 { grad(f(x), x) }",
+            [x],
+            jax.grad(lambda x: jnp.sum(jnp.broadcast_to(x, (3, 4)))),
+            [jnp.float32(2.0)],
+        )

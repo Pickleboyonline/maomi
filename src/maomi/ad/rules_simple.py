@@ -572,3 +572,36 @@ class SimpleGradRulesMixin:
         slice_expr = IndexExpr(adj, components, _DUMMY_SPAN)
         self.type_map[id(slice_expr)] = x_type
         self._accumulate(adjoints, x_name, slice_expr)
+    def _backprop_expand_dims(self, args: list[Expr], adj: Expr,
+                               adjoints: dict[str, Expr], var_map: dict[int, str]):
+        """Backprop through expand_dims: reshape adjoint back to original shape."""
+        arg = args[0]
+        if id(arg) not in var_map:
+            return
+        arg_name = var_map[id(arg)]
+        arg_type = self._type_of(arg)
+
+        if isinstance(arg_type, ArrayType):
+            # Same as reshape backprop: reshape adj to original dims
+            self._backprop_reshape(args, adj, adjoints, var_map)
+        else:
+            # Scalar: expand_dims(scalar, 0) -> [1], adjoint is [1] -> sum to scalar
+            sum_call = CallExpr("sum", [adj], _DUMMY_SPAN)
+            self.type_map[id(sum_call)] = arg_type
+            self._accumulate(adjoints, arg_name, sum_call)
+
+    # squeeze backprop is identical to reshape backprop: reshape adj to original dims
+    _backprop_squeeze = _backprop_reshape
+
+    def _backprop_broadcast_to(self, args: list[Expr], adj: Expr,
+                                adjoints: dict[str, Expr], var_map: dict[int, str],
+                                node: Expr):
+        """Backprop through broadcast_to: reduce adj over broadcast dimensions."""
+        arg = args[0]
+        if id(arg) not in var_map:
+            return
+        arg_name = var_map[id(arg)]
+        arg_type = self._type_of(arg)
+
+        grad = self._reduce_broadcast(adj, arg_type)
+        self._accumulate(adjoints, arg_name, grad)

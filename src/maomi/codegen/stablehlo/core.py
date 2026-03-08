@@ -654,6 +654,12 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
             return self._gen_stack(expr, env)
         if expr.callee == "pad":
             return self._gen_pad(expr, env)
+        if expr.callee == "expand_dims":
+            return self._gen_expand_dims(expr, env)
+        if expr.callee == "squeeze":
+            return self._gen_squeeze(expr, env)
+        if expr.callee == "broadcast_to":
+            return self._gen_broadcast_to(expr, env)
         if expr.callee == "stop_gradient":
             return self._gen_expr(expr.args[0], env)
         if expr.callee == "isfinite":
@@ -1308,6 +1314,38 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
             f"{var} = stablehlo.reshape {arg} "
             f": ({_mlir_type(arg_type)}) -> {_mlir_type(result_type)}"
         )
+        return var
+
+    # expand_dims and squeeze both emit stablehlo.reshape, same as _gen_reshape
+    _gen_expand_dims = _gen_reshape
+    _gen_squeeze = _gen_reshape
+
+    def _gen_broadcast_to(self, expr: CallExpr, env: dict[str, str]) -> str:
+        arg = self._gen_expr(expr.args[0], env)
+        arg_type = self._type_of(expr.args[0])
+        result_type = self._type_of(expr)
+        mlir_result = _mlir_type(result_type)
+
+        var = self._fresh()
+        if isinstance(arg_type, ScalarType):
+            # Scalar → array: no broadcast_dimensions
+            self._emit(
+                f"{var} = stablehlo.broadcast_in_dim {arg}, "
+                f"dims = [] : ({_mlir_type(arg_type)}) -> {mlir_result}"
+            )
+        else:
+            # Array → array: compute broadcast_dimensions
+            assert isinstance(arg_type, ArrayType) and isinstance(result_type, ArrayType)
+            src_rank = len(arg_type.dims)
+            dst_rank = len(result_type.dims)
+            # Right-align: input dim i maps to output dim (offset + i)
+            offset = dst_rank - src_rank
+            broadcast_dims = list(range(offset, dst_rank))
+            dims_str = ", ".join(str(d) for d in broadcast_dims)
+            self._emit(
+                f"{var} = stablehlo.broadcast_in_dim {arg}, "
+                f"dims = [{dims_str}] : ({_mlir_type(arg_type)}) -> {mlir_result}"
+            )
         return var
 
     def _gen_concat(self, expr: CallExpr, env: dict[str, str]) -> str:
