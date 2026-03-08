@@ -752,3 +752,23 @@ class TestClipCodegen:
         out = codegen("fn f(x: f32[4], lo: f32, hi: f32) -> f32[4] { clip(x, lo, hi) }")
         assert "stablehlo.clamp" in out
         assert "broadcast_in_dim" in out  # scalar lo/hi broadcast to array
+class TestOneHot:
+    def test_one_hot_scalar(self):
+        out = codegen("fn f(x: i32) -> f32[5] { one_hot(x, 5) }")
+        assert "stablehlo.iota" in out
+        assert "stablehlo.compare" in out
+        assert "stablehlo.convert" in out
+        assert "tensor<5xf32>" in out
+
+    def test_one_hot_array(self):
+        out = codegen("fn f(x: i32[3]) -> f32[3, 5] { one_hot(x, 5) }")
+        assert "stablehlo.iota" in out
+        assert "stablehlo.compare" in out
+        assert "stablehlo.convert" in out
+        assert "tensor<3x5xf32>" in out
+
+    def test_one_hot_2d(self):
+        out = codegen("fn f(x: i32[3, 4]) -> f32[3, 4, 5] { one_hot(x, 5) }")
+        assert "stablehlo.iota" in out
+        assert "dim = 2" in out
+        assert "tensor<3x4x5xf32>" in out
