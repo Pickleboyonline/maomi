@@ -1431,6 +1431,10 @@ class TypeChecker:
             m_val = expr.args[1].value if len(expr.args) == 2 else n_val
             return ArrayType("f32", (n_val, m_val))
 
+        # Linear algebra builtins
+        if expr.callee in ("cholesky", "triangular_solve"):
+            return self._check_linalg(expr, env)
+
         # conv2d(input, kernel, ...) — 2D convolution
         if expr.callee == "conv2d":
             return self._check_conv2d(expr, env)
@@ -2750,6 +2754,97 @@ class TypeChecker:
         # Result shape: each dim + pad_lo + pad_hi
         result_dims = tuple(d + pad_lo + pad_hi for d in x_type.dims)
         return ArrayType(x_type.base, result_dims)
+
+    def _check_linalg(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
+        """Type-check cholesky(x) and triangular_solve(a, b, lower, left_side)."""
+        if expr.callee == "cholesky":
+            if len(expr.args) != 1:
+                self._error("cholesky expects exactly 1 argument", expr.span.line_start, expr.span.col_start)
+                return None
+            x_type = self._infer(expr.args[0], env)
+            if x_type is None:
+                return None
+            if not isinstance(x_type, ArrayType):
+                self._error(f"cholesky: argument must be a 2D array, got {x_type}", expr.span.line_start, expr.span.col_start)
+                return None
+            if len(x_type.dims) != 2:
+                self._error(f"cholesky: argument must be a 2D array, got {len(x_type.dims)}D", expr.span.line_start, expr.span.col_start)
+                return None
+            if x_type.base not in FLOAT_BASES:
+                self._error(f"cholesky: argument must be a float array, got {x_type.base}", expr.span.line_start, expr.span.col_start)
+                return None
+            d0, d1 = x_type.dims
+            if isinstance(d0, int) and isinstance(d1, int) and d0 != d1:
+                self._error(f"cholesky: argument must be a square matrix, got {d0}x{d1}", expr.span.line_start, expr.span.col_start)
+                return None
+            return x_type
+
+        if expr.callee == "triangular_solve":
+            if len(expr.args) != 4:
+                self._error("triangular_solve expects exactly 4 arguments: (a, b, lower, left_side)", expr.span.line_start, expr.span.col_start)
+                return None
+
+            a_type = self._infer(expr.args[0], env)
+            b_type = self._infer(expr.args[1], env)
+
+            # lower and left_side must be bool literals
+            if not isinstance(expr.args[2], BoolLiteral):
+                self._error("triangular_solve: 'lower' (3rd argument) must be a bool literal (true or false)", expr.span.line_start, expr.span.col_start)
+                return None
+            if not isinstance(expr.args[3], BoolLiteral):
+                self._error("triangular_solve: 'left_side' (4th argument) must be a bool literal (true or false)", expr.span.line_start, expr.span.col_start)
+                return None
+            self._infer(expr.args[2], env)
+            self._infer(expr.args[3], env)
+
+            if a_type is None or b_type is None:
+                return None
+
+            if not isinstance(a_type, ArrayType):
+                self._error(f"triangular_solve: 'a' must be a 2D array, got {a_type}", expr.span.line_start, expr.span.col_start)
+                return None
+            if len(a_type.dims) != 2:
+                self._error(f"triangular_solve: 'a' must be a 2D array, got {len(a_type.dims)}D", expr.span.line_start, expr.span.col_start)
+                return None
+            if a_type.base not in FLOAT_BASES:
+                self._error(f"triangular_solve: 'a' must be a float array, got {a_type.base}", expr.span.line_start, expr.span.col_start)
+                return None
+            a_d0, a_d1 = a_type.dims
+            if isinstance(a_d0, int) and isinstance(a_d1, int) and a_d0 != a_d1:
+                self._error(f"triangular_solve: 'a' must be a square matrix, got {a_d0}x{a_d1}", expr.span.line_start, expr.span.col_start)
+                return None
+
+            if not isinstance(b_type, ArrayType):
+                self._error(f"triangular_solve: 'b' must be a 2D array, got {b_type}", expr.span.line_start, expr.span.col_start)
+                return None
+            if len(b_type.dims) != 2:
+                self._error(f"triangular_solve: 'b' must be a 2D array, got {len(b_type.dims)}D", expr.span.line_start, expr.span.col_start)
+                return None
+            if b_type.base not in FLOAT_BASES:
+                self._error(f"triangular_solve: 'b' must be a float array, got {b_type.base}", expr.span.line_start, expr.span.col_start)
+                return None
+            if a_type.base != b_type.base:
+                self._error(f"triangular_solve: 'a' and 'b' must have the same base type, got {a_type.base} and {b_type.base}", expr.span.line_start, expr.span.col_start)
+                return None
+
+            left_side = expr.args[3].value
+            b_d0, b_d1 = b_type.dims
+            n = a_d0  # a is N x N
+
+            if left_side:
+                # Solves A @ X = B, so B must be N x M
+                if isinstance(n, int) and isinstance(b_d0, int) and n != b_d0:
+                    self._error(f"triangular_solve: with left_side=true, b's first dimension ({b_d0}) must match a's dimension ({n})", expr.span.line_start, expr.span.col_start)
+                    return None
+            else:
+                # Solves X @ A = B, so B must be M x N
+                if isinstance(n, int) and isinstance(b_d1, int) and n != b_d1:
+                    self._error(f"triangular_solve: with left_side=false, b's second dimension ({b_d1}) must match a's dimension ({n})", expr.span.line_start, expr.span.col_start)
+                    return None
+
+            return b_type
+
+        return None  # unreachable
 
     def _check_conv2d(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
         # conv2d(input, kernel) — stride=1, pad=0

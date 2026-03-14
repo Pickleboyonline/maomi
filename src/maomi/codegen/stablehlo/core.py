@@ -56,10 +56,11 @@ from .conv import ConvCodegenMixin
 from .map_codegen import MapCodegenMixin
 from .indexing import IndexingCodegenMixin
 from .rng import RNGCodegenMixin
+from .linalg import LinalgCodegenMixin
 
 
 class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
-                        IndexingCodegenMixin, RNGCodegenMixin):
+                        IndexingCodegenMixin, RNGCodegenMixin, LinalgCodegenMixin):
 
     def __init__(self, program: Program, type_map: dict[int, MaomiType] | None = None):
         self.program = program
@@ -705,6 +706,10 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
             return self._gen_max_pool(expr, env)
         if expr.callee == "avg_pool":
             return self._gen_avg_pool(expr, env)
+        if expr.callee == "cholesky":
+            return self._gen_cholesky(expr, env)
+        if expr.callee == "triangular_solve":
+            return self._gen_triangular_solve(expr, env)
         if expr.callee in ("maximum", "minimum", "pow", "atan2"):
             return self._gen_two_arg_elementwise(expr, env)
         if expr.callee in ("logaddexp", "hypot", "remainder", "copysign"):
