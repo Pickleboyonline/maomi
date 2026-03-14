@@ -1016,6 +1016,21 @@ COMPLEX: dict[str, ComplexBuiltin] = {
         "Create an array filled with a scalar value. `full(0.5, 3, 4)` → `f32[3, 4]`.",
         (["value", "dims..."], ["f32", "int..."], "f32[...]"),
     ),
+    "arange": ComplexBuiltin(
+        "arange", "construction", "zero_grad",
+        "Generate integer sequence. `arange(0, 10, 2)` → `i32[5]` = `[0, 2, 4, 6, 8]`.",
+        (["start", "stop", "step"], ["int", "int", "int"], "i32[...]"),
+    ),
+    "linspace": ComplexBuiltin(
+        "linspace", "construction", "zero_grad",
+        "Generate linearly spaced floats. `linspace(0.0, 1.0, 5)` → `f32[5]`.",
+        (["start", "stop", "n"], ["f32", "f32", "int"], "f32[n]"),
+    ),
+    "eye": ComplexBuiltin(
+        "eye", "construction", "zero_grad",
+        "Identity matrix. `eye(3)` → `f32[3,3]`, `eye(2, 3)` → `f32[2,3]`.",
+        (["n", "m"], ["int", "int"], "f32[n,m]"),
+    ),
 
     # Convolution / Pooling
     "conv2d": ComplexBuiltin(

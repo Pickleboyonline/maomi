@@ -642,6 +642,14 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
         if expr.callee in ("zeros", "ones", "full"):
             return self._gen_fill(expr, env)
 
+        # arange/linspace/eye → array construction
+        if expr.callee == "arange":
+            return self._gen_arange(expr, env)
+        if expr.callee == "linspace":
+            return self._gen_linspace(expr, env)
+        if expr.callee == "eye":
+            return self._gen_eye(expr, env)
+
         # RNG builtins
         if expr.callee in self._RNG_BUILTINS:
             return self._gen_rng(expr, env)
@@ -907,6 +915,100 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
             scalar = self._gen_expr(expr.args[0], env)
         result = self._fresh()
         self._emit(f"{result} = stablehlo.broadcast_in_dim {scalar}, dims = [] : (tensor<f32>) -> {mlir_t}")
+        return result
+
+    def _gen_arange(self, expr: CallExpr, env: dict[str, str]) -> str:
+        result_type = self._type_of(expr)
+        n = result_type.dims[0]
+        mlir_t = _mlir_type(result_type)
+        start_val = expr.args[0].value
+        step_val = expr.args[2].value
+        # iota
+        iota = self._fresh()
+        self._emit(f"{iota} = stablehlo.iota dim = 0 : {mlir_t}")
+        # multiply by step
+        if step_val != 1:
+            step_c = self._fresh()
+            self._emit(f"{step_c} = stablehlo.constant dense<{step_val}> : {mlir_t}")
+            scaled = self._fresh()
+            self._emit(f"{scaled} = stablehlo.multiply {iota}, {step_c} : {mlir_t}")
+        else:
+            scaled = iota
+        # add start
+        if start_val != 0:
+            start_c = self._fresh()
+            self._emit(f"{start_c} = stablehlo.constant dense<{start_val}> : {mlir_t}")
+            result = self._fresh()
+            self._emit(f"{result} = stablehlo.add {scaled}, {start_c} : {mlir_t}")
+        else:
+            result = scaled
+        return result
+
+    @staticmethod
+    def _extract_float(expr) -> float:
+        """Extract float value from FloatLiteral or UnaryOp('-', FloatLiteral)."""
+        if isinstance(expr, FloatLiteral):
+            return expr.value
+        if isinstance(expr, UnaryOp) and expr.op == "-" and isinstance(expr.operand, FloatLiteral):
+            return -expr.operand.value
+        raise ValueError(f"Cannot extract float from {expr}")
+
+    def _gen_linspace(self, expr: CallExpr, env: dict[str, str]) -> str:
+        result_type = self._type_of(expr)
+        n = result_type.dims[0]
+        mlir_t = _mlir_type(result_type)
+        start_val = self._extract_float(expr.args[0])
+        stop_val = self._extract_float(expr.args[1])
+
+        # Edge case: n=1 → just return [start]
+        if n == 1:
+            result = self._fresh()
+            self._emit(f"{result} = stablehlo.constant dense<{start_val:.6e}> : {mlir_t}")
+            return result
+
+        i32_t = f"tensor<{n}xi32>"
+        # iota i32
+        iota = self._fresh()
+        self._emit(f"{iota} = stablehlo.iota dim = 0 : {i32_t}")
+        # convert to f32
+        iota_f = self._fresh()
+        self._emit(f"{iota_f} = stablehlo.convert {iota} : ({i32_t}) -> {mlir_t}")
+        # divide by (n-1)
+        nm1 = self._fresh()
+        self._emit(f"{nm1} = stablehlo.constant dense<{float(n - 1):.6e}> : {mlir_t}")
+        frac = self._fresh()
+        self._emit(f"{frac} = stablehlo.divide {iota_f}, {nm1} : {mlir_t}")
+        # multiply by (stop - start)
+        range_val = stop_val - start_val
+        range_c = self._fresh()
+        self._emit(f"{range_c} = stablehlo.constant dense<{range_val:.6e}> : {mlir_t}")
+        scaled = self._fresh()
+        self._emit(f"{scaled} = stablehlo.multiply {frac}, {range_c} : {mlir_t}")
+        # add start
+        start_c = self._fresh()
+        self._emit(f"{start_c} = stablehlo.constant dense<{start_val:.6e}> : {mlir_t}")
+        result = self._fresh()
+        self._emit(f"{result} = stablehlo.add {scaled}, {start_c} : {mlir_t}")
+        return result
+
+    def _gen_eye(self, expr: CallExpr, env: dict[str, str]) -> str:
+        result_type = self._type_of(expr)
+        n, m = result_type.dims
+        mlir_t = _mlir_type(result_type)
+        i32_t = f"tensor<{n}x{m}xi32>"
+        bool_t = f"tensor<{n}x{m}xi1>"
+        # iota dim=0 (row indices)
+        row = self._fresh()
+        self._emit(f"{row} = stablehlo.iota dim = 0 : {i32_t}")
+        # iota dim=1 (col indices)
+        col = self._fresh()
+        self._emit(f"{col} = stablehlo.iota dim = 1 : {i32_t}")
+        # compare EQ
+        cmp = self._fresh()
+        self._emit(f"{cmp} = stablehlo.compare EQ, {row}, {col} : ({i32_t}, {i32_t}) -> {bool_t}")
+        # convert bool → f32
+        result = self._fresh()
+        self._emit(f"{result} = stablehlo.convert {cmp} : ({bool_t}) -> {mlir_t}")
         return result
 
     def _gen_isfinite(self, expr: CallExpr, env: dict[str, str]) -> str:
