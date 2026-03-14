@@ -404,7 +404,17 @@ class TypeChecker:
             return
 
         expected = self._resolve_type_annotation(fn.return_type)
-        if expected and not self._types_compatible(body_type, expected):
+        if expected and isinstance(expected, WildcardArrayType):
+            # Wildcard return type: accept any array/scalar with matching base type.
+            # The body determines the concrete return type (used by _check_generic_call).
+            if isinstance(body_type, (ArrayType, ScalarType)) and body_type.base == expected.base:
+                return  # OK — concrete return inferred from body
+            self._error(
+                f"return type mismatch: function '{fn.name}' declares {expected} but body returns {body_type}",
+                fn.body.span.line_end,
+                fn.body.span.col_end,
+            )
+        elif expected and not self._types_compatible(body_type, expected):
             self._error(
                 f"return type mismatch: function '{fn.name}' declares {expected} but body returns {body_type}",
                 fn.body.span.line_end,
@@ -2817,14 +2827,13 @@ class TypeChecker:
 
             # Resolve return type annotation
             rta = mono_fn.return_type
+            ret_was_wildcard = rta.wildcard
             if rta.base in typevar_bindings:
                 mono_fn.return_type = TypeAnnotation(typevar_bindings[rta.base].name, None, rta.span)
             elif rta.wildcard:
-                if wildcard_scalar or wildcard_shape is None:
-                    mono_fn.return_type = TypeAnnotation(rta.base, None, rta.span)
-                else:
-                    dims = [Dim(d, ASTSpan(0, 0, 0, 0)) for d in wildcard_shape]
-                    mono_fn.return_type = TypeAnnotation(rta.base, dims, rta.span)
+                # Keep wildcard — _check_fn will accept any shape with matching base.
+                # Concrete return type will be inferred from the body after type-checking.
+                pass
             elif rta.dims is not None:
                 new_dims = []
                 for d in rta.dims:
@@ -2846,9 +2855,34 @@ class TypeChecker:
             self.fn_table[mono_name] = sig
             self._check_fn(mono_fn)
 
+            # If the return type was a wildcard, infer the concrete return from the body
+            if ret_was_wildcard:
+                env = TypeEnv()
+                for p in mono_fn.params:
+                    t = self._resolve_type_annotation(p.type_annotation)
+                    if t:
+                        env.define(p.name, t)
+                body_ret = self._check_block(mono_fn.body, env)
+                if body_ret is not None:
+                    concrete_ret = body_ret
+                    # Update the signature and return type annotation to match the body
+                    self.fn_table[mono_name] = FnSignature(
+                        sig.param_names, sig.param_types, concrete_ret, sig.comptime
+                    )
+                    if isinstance(concrete_ret, ArrayType):
+                        dims = [Dim(d, ASTSpan(0, 0, 0, 0)) for d in concrete_ret.dims]
+                        mono_fn.return_type = TypeAnnotation(concrete_ret.base, dims, mono_fn.return_type.span)
+                    elif isinstance(concrete_ret, ScalarType):
+                        mono_fn.return_type = TypeAnnotation(concrete_ret.base, None, mono_fn.return_type.span)
+
             # Add to program's function list so codegen can find it
             if self._program is not None:
                 self._program.functions.append(mono_fn)
+
+        # If the function was already monomorphized and the return was a wildcard,
+        # retrieve the actual return type from the registered signature.
+        if mono_name in self.fn_table and isinstance(ret, WildcardArrayType):
+            concrete_ret = self.fn_table[mono_name].return_type
 
         # Rewrite the call to target the monomorphized function
         expr.callee = mono_name
