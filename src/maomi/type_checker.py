@@ -1402,6 +1402,14 @@ class TypeChecker:
         if expr.callee in ("sort", "argsort"):
             return self._check_sort(expr, env)
 
+        # flip(x, axis) — reverse along axis
+        if expr.callee == "flip":
+            return self._check_flip(expr, env)
+
+        # tril(x), triu(x) — triangular masks
+        if expr.callee in ("tril", "triu"):
+            return self._check_tril_triu(expr, env)
+
         sig = self.fn_table.get(expr.callee)
         if sig is None:
             # Check for generic (wildcard) function
@@ -1965,6 +1973,89 @@ class TypeChecker:
 
         if name == "argsort":
             return ArrayType("i32", x_type.dims)
+        return x_type  # Same shape and type as input
+
+    def _check_flip(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
+        """Check flip(x, axis) — reverse array along an axis."""
+        self._resolve_named_args(expr, ["x", "axis"])
+        args = expr.args
+        if len(args) != 2:
+            self._error(
+                "flip expects exactly 2 arguments: flip(x, axis)",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        x_type = self._infer(args[0], env)
+        if x_type is None:
+            return None
+        if not isinstance(x_type, ArrayType):
+            self._error(
+                f"flip requires an array argument, got {x_type}",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        axis_node = args[1]
+        self._infer(axis_node, env)
+        if isinstance(axis_node, IntLiteral):
+            axis_val = axis_node.value
+        else:
+            neg = _try_negative_literal(axis_node)
+            if neg is not None:
+                axis_val = neg
+            else:
+                self._error(
+                    "flip: axis must be an integer literal",
+                    expr.span.line_start, expr.span.col_start,
+                )
+                return None
+
+        ndim = len(x_type.dims)
+        if axis_val < 0:
+            axis_val += ndim
+        if axis_val < 0 or axis_val >= ndim:
+            self._error(
+                f"flip: axis {axis_val} out of range for {ndim}-D array",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        return x_type  # Same shape and type as input
+
+    def _check_tril_triu(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
+        """Check tril(x) / triu(x) — triangular matrix masks. Input must be 2D float."""
+        name = expr.callee
+        args = expr.args
+        if len(args) != 1:
+            self._error(
+                f"{name} expects exactly 1 argument: {name}(x)",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        x_type = self._infer(args[0], env)
+        if x_type is None:
+            return None
+        if not isinstance(x_type, ArrayType):
+            self._error(
+                f"{name} requires a 2D array argument, got {x_type}",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+        if len(x_type.dims) != 2:
+            self._error(
+                f"{name} requires a 2D array, got {len(x_type.dims)}-D array",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+        if x_type.base not in FLOAT_BASES:
+            self._error(
+                f"{name} requires a float array, got {x_type.base}",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
         return x_type  # Same shape and type as input
 
     def _check_transpose(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:

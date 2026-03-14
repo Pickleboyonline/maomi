@@ -1089,6 +1089,23 @@ COMPLEX: dict[str, ComplexBuiltin] = {
         (["x", "axis"], ["f32[...]", "int"], "i32[...]"),
     ),
 
+    # Array manipulation
+    "flip": ComplexBuiltin(
+        "flip", "array_manip", "has_rule",
+        "Reverse array along an axis. `flip(x, 0)` reverses first axis.",
+        (["x", "axis"], ["f32[...]", "int"], "f32[...]"),
+    ),
+    "tril": ComplexBuiltin(
+        "tril", "array_manip", "has_rule",
+        "Lower triangular matrix. Zeros out elements above the diagonal. Input must be 2D.",
+        (["x"], ["f32[N,M]"], "f32[N,M]"),
+    ),
+    "triu": ComplexBuiltin(
+        "triu", "array_manip", "has_rule",
+        "Upper triangular matrix. Zeros out elements below the diagonal. Input must be 2D.",
+        (["x"], ["f32[N,M]"], "f32[N,M]"),
+    ),
+
     # Two-arg math
     "atan2": ComplexBuiltin(
         "atan2", "two_arg_elementwise", "has_rule",

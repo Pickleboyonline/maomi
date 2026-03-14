@@ -701,6 +701,10 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
             return self._gen_cumulative(expr, env)
         if expr.callee in ("sort", "argsort"):
             return self._gen_sort(expr, env)
+        if expr.callee == "flip":
+            return self._gen_flip(expr, env)
+        if expr.callee in ("tril", "triu"):
+            return self._gen_tril_triu(expr, env)
 
         # User-defined function call
         if self._batch_depth > 0:
@@ -1914,6 +1918,71 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
                 f": ({mlir_x}, {mlir_idx}) -> ({mlir_x}, {mlir_idx})"
             )
             return sorted_idxs
+
+    # ------------------------------------------------------------------
+    # Array manipulation: flip, tril, triu
+    # ------------------------------------------------------------------
+
+    def _gen_flip(self, expr: CallExpr, env: dict[str, str]) -> str:
+        """Emit stablehlo.reverse for flip(x, axis)."""
+        x_ssa = self._gen_expr(expr.args[0], env)
+        x_type = self._type_of(expr.args[0])
+        assert isinstance(x_type, ArrayType)
+        ndim = len(x_type.dims)
+
+        axis_val = self._extract_axis(expr.args[1])
+        if axis_val < 0:
+            axis_val += ndim
+
+        mlir_t = _mlir_type(x_type)
+        var = self._fresh()
+        self._emit(
+            f"{var} = stablehlo.reverse {x_ssa}, dims = [{axis_val}] : {mlir_t}"
+        )
+        return var
+
+    def _gen_tril_triu(self, expr: CallExpr, env: dict[str, str]) -> str:
+        """Emit lower/upper triangular mask via iota + compare + select."""
+        name = expr.callee
+        x_ssa = self._gen_expr(expr.args[0], env)
+        x_type = self._type_of(expr.args[0])
+        assert isinstance(x_type, ArrayType) and len(x_type.dims) == 2
+
+        n, m = x_type.dims
+        etype = _MLIR_ETYPE[x_type.base]
+        mlir_t = _mlir_type(x_type)
+        i32_shape = f"tensor<{n}x{m}xi32>"
+        bool_shape = f"tensor<{n}x{m}xi1>"
+
+        # Row indices via iota dim=0
+        row_var = self._fresh()
+        self._emit(f"{row_var} = stablehlo.iota dim = 0 : {i32_shape}")
+
+        # Col indices via iota dim=1
+        col_var = self._fresh()
+        self._emit(f"{col_var} = stablehlo.iota dim = 1 : {i32_shape}")
+
+        # Compare: tril uses GE (row >= col), triu uses LE (row <= col)
+        cmp_dir = "GE" if name == "tril" else "LE"
+        mask_var = self._fresh()
+        self._emit(
+            f"{mask_var} = stablehlo.compare {cmp_dir}, {row_var}, {col_var} "
+            f": ({i32_shape}, {i32_shape}) -> {bool_shape}"
+        )
+
+        # Zero constant
+        zero_var = self._fresh()
+        self._emit(
+            f"{zero_var} = stablehlo.constant dense<0.000000e+00> : {mlir_t}"
+        )
+
+        # Select: keep where mask is true, zero otherwise
+        result_var = self._fresh()
+        self._emit(
+            f"{result_var} = stablehlo.select {mask_var}, {x_ssa}, {zero_var} "
+            f": ({bool_shape}, {mlir_t}, {mlir_t}) -> {mlir_t}"
+        )
+        return result_var
 
     # ------------------------------------------------------------------
     # Cumsum/cumprod backward (_CumsumGrad)

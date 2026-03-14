@@ -637,3 +637,34 @@ class ComplexGradRulesMixin:
         if x_type is not None:
             self.type_map[id(grad_node)] = x_type
         self._accumulate(adjoints, x_name, grad_node)
+
+    def _backprop_array_manip(self, callee: str, args: list[Expr], adj: Expr,
+                               adjoints: dict[str, Expr], var_map: dict[int, str],
+                               node: Expr):
+        """Backprop through flip, tril, triu.
+
+        flip: self-inverse — grad is flip(adj, axis)
+        tril: mask adjoint with tril — grad is tril(adj)
+        triu: mask adjoint with triu — grad is triu(adj)
+        """
+        x_expr = args[0]
+        if id(x_expr) not in var_map:
+            return
+        x_name = var_map[id(x_expr)]
+
+        if callee == "flip":
+            # flip is its own adjoint: d/dx flip(x, axis) = flip(adj, axis)
+            grad_call = CallExpr("flip", [adj, args[1]], _DUMMY_SPAN)
+        elif callee == "tril":
+            # tril masks the upper triangle to zero, so grad masks the same way
+            grad_call = CallExpr("tril", [adj], _DUMMY_SPAN)
+        elif callee == "triu":
+            # triu masks the lower triangle to zero, so grad masks the same way
+            grad_call = CallExpr("triu", [adj], _DUMMY_SPAN)
+        else:
+            return
+
+        x_type = self._type_of(x_expr)
+        if x_type is not None:
+            self.type_map[id(grad_call)] = x_type
+        self._accumulate(adjoints, x_name, grad_call)
