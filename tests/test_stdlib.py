@@ -1,4 +1,4 @@
-"""Tests for the nn standard library module."""
+"""Tests for the standard library modules (nn, optim, math)."""
 
 import sys
 import os
@@ -156,5 +156,133 @@ class TestNnAD:
             import nn;
             fn loss(x: f32[3]) -> f32 { sum(nn.sigmoid(x)) }
             fn main(x: f32[3]) -> f32[3] { grad(loss(x), x) }
+        """)
+        assert out is not None
+
+
+# -- math module: import resolution --
+
+class TestMathImport:
+    def test_qualified_import(self):
+        out = compile_ok("""
+            import math;
+            fn main(x: f32[3,4]) -> f32[3] {
+                math.var(x, axis=1)
+            }
+        """)
+        assert out is not None
+
+    def test_selective_import_var(self):
+        out = compile_ok("""
+            from math import { var };
+            fn main(x: f32[3,4]) -> f32[3] {
+                var(x, axis=1)
+            }
+        """)
+        assert out is not None
+
+    def test_selective_import_std(self):
+        out = compile_ok("""
+            from math import { std };
+            fn main(x: f32[3,4]) -> f32[3] {
+                std(x, axis=1)
+            }
+        """)
+        assert out is not None
+
+    def test_selective_import_normalize(self):
+        out = compile_ok("""
+            from math import { normalize };
+            fn main(x: f32[3,4]) -> f32[3,4] {
+                normalize(x, axis=1)
+            }
+        """)
+        assert out is not None
+
+    def test_selective_import_multiple(self):
+        out = compile_ok("""
+            from math import { var, std, normalize };
+            fn main(x: f32[3,4]) -> f32[3] {
+                std(x, axis=1)
+            }
+        """)
+        assert out is not None
+
+
+# -- math.var --
+
+class TestMathVar:
+    def test_var_2d_axis1(self):
+        out = compile_ok("""
+            import math;
+            fn main(x: f32[3,4]) -> f32[3] {
+                math.var(x, axis=1)
+            }
+        """)
+        assert "tensor<3xf32>" in out
+
+    def test_var_2d_axis0(self):
+        out = compile_ok("""
+            import math;
+            fn main(x: f32[3,4]) -> f32[4] {
+                math.var(x, axis=0)
+            }
+        """)
+        assert "tensor<4xf32>" in out
+
+
+# -- math.std --
+
+class TestMathStd:
+    def test_std_2d_axis1(self):
+        out = compile_ok("""
+            import math;
+            fn main(x: f32[3,4]) -> f32[3] {
+                math.std(x, axis=1)
+            }
+        """)
+        assert "tensor<3xf32>" in out
+        assert "stablehlo.sqrt" in out
+
+
+# -- math.normalize --
+
+class TestMathNormalize:
+    def test_normalize_2d_axis1(self):
+        out = compile_ok("""
+            import math;
+            fn main(x: f32[3,4]) -> f32[3,4] {
+                math.normalize(x, axis=1)
+            }
+        """)
+        assert "tensor<3x4xf32>" in out
+        assert "stablehlo.sqrt" in out
+
+    def test_normalize_2d_axis0(self):
+        out = compile_ok("""
+            import math;
+            fn main(x: f32[3,4]) -> f32[3,4] {
+                math.normalize(x, axis=0)
+            }
+        """)
+        assert "tensor<3x4xf32>" in out
+
+
+# -- AD through math functions --
+
+class TestMathAD:
+    def test_grad_var(self):
+        out = compile_ad("""
+            import math;
+            fn loss(x: f32[3,4]) -> f32 { sum(math.var(x, axis=1)) }
+            fn main(x: f32[3,4]) -> f32[3,4] { grad(loss(x), x) }
+        """)
+        assert out is not None
+
+    def test_grad_normalize(self):
+        out = compile_ad("""
+            import math;
+            fn loss(x: f32[3,4]) -> f32 { sum(math.normalize(x, axis=1)) }
+            fn main(x: f32[3,4]) -> f32[3,4] { grad(loss(x), x) }
         """)
         assert out is not None
