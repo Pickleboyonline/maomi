@@ -1095,6 +1095,26 @@ COMPLEX: dict[str, ComplexBuiltin] = {
         "Element-wise two-argument arctangent: atan2(y, x) = arctan(y/x) with correct quadrant.",
         (["y", "x"], ["f32", "f32"], "f32"),
     ),
+    "logaddexp": ComplexBuiltin(
+        "logaddexp", "two_arg_elementwise", "has_rule",
+        "Numerically stable log(exp(a) + exp(b)).",
+        (["a", "b"], ["f32", "f32"], "f32"),
+    ),
+    "hypot": ComplexBuiltin(
+        "hypot", "two_arg_elementwise", "has_rule",
+        "Compute hypotenuse: sqrt(a^2 + b^2).",
+        (["a", "b"], ["f32", "f32"], "f32"),
+    ),
+    "remainder": ComplexBuiltin(
+        "remainder", "two_arg_elementwise", "has_rule",
+        "IEEE remainder: a - b * floor(a / b).",
+        (["a", "b"], ["f32", "f32"], "f32"),
+    ),
+    "copysign": ComplexBuiltin(
+        "copysign", "two_arg_elementwise", "has_rule",
+        "Return magnitude of a with sign of b: abs(a) * sign(b).",
+        (["a", "b"], ["f32", "f32"], "f32"),
+    ),
 
     # Einsum
     "einsum": ComplexBuiltin(

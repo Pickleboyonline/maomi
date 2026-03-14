@@ -1380,8 +1380,8 @@ class TypeChecker:
         if expr.callee in ("zeros_like", "ones_like"):
             return self._check_like(expr, env)
 
-        # maximum(x, y), minimum(x, y), pow(x, y), atan2(y, x) — two-arg elementwise
-        if expr.callee in ("maximum", "minimum", "pow", "atan2"):
+        # maximum(x, y), minimum(x, y), pow(x, y), atan2(y, x), logaddexp, hypot, remainder, copysign — two-arg elementwise
+        if expr.callee in ("maximum", "minimum", "pow", "atan2", "logaddexp", "hypot", "remainder", "copysign"):
             return self._check_two_arg_elementwise(expr, env)
         # stack(a, b, ..., axis) — stack arrays along new axis
         if expr.callee == "stack":

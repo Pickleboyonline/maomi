@@ -498,6 +498,69 @@ class SimpleGradRulesMixin:
 
             self._accumulate(adjoints, x_name, self._reduce_broadcast(grad_x, x_type))
             self._accumulate(adjoints, y_name, self._reduce_broadcast(grad_y, y_type))
+
+        elif callee == "logaddexp":
+            # logaddexp(a, b) = max(a,b) + log1p(exp(-abs(a-b)))
+            # d/da = exp(a) / (exp(a) + exp(b)) = sigmoid(a - b)
+            # d/db = exp(b) / (exp(a) + exp(b)) = sigmoid(b - a)
+            a_minus_b = self._make_binop("-", x_ref, y_ref)
+            b_minus_a = self._make_binop("-", y_ref, x_ref)
+            sig_ab = self._make_call("sigmoid", [a_minus_b])
+            self.type_map[id(sig_ab)] = result_type
+            sig_ba = self._make_call("sigmoid", [b_minus_a])
+            self.type_map[id(sig_ba)] = result_type
+
+            grad_x = self._make_binop("*", sig_ab, adj)
+            grad_y = self._make_binop("*", sig_ba, adj)
+
+            self._accumulate(adjoints, x_name, self._reduce_broadcast(grad_x, x_type))
+            self._accumulate(adjoints, y_name, self._reduce_broadcast(grad_y, y_type))
+
+        elif callee == "hypot":
+            # hypot(a, b) = sqrt(a^2 + b^2)
+            # d/da = a / hypot(a, b) * adj
+            # d/db = b / hypot(a, b) * adj
+            tape_name = var_map.get(id(node))
+            h_ref = self._make_ref(tape_name, result_type) if tape_name else node
+
+            grad_x = self._make_binop("*", adj, self._make_binop("/", x_ref, h_ref))
+            grad_y = self._make_binop("*", adj, self._make_binop("/", y_ref, h_ref))
+
+            self._accumulate(adjoints, x_name, self._reduce_broadcast(grad_x, x_type))
+            self._accumulate(adjoints, y_name, self._reduce_broadcast(grad_y, y_type))
+
+        elif callee == "remainder":
+            # remainder(a, b) = a - b * floor(a/b)
+            # d/da = 1 * adj
+            # d/db = -floor(a/b) * adj
+            grad_x = adj
+
+            a_div_b = self._make_binop("/", x_ref, y_ref)
+            floor_ab = self._make_call("floor", [a_div_b])
+            self.type_map[id(floor_ab)] = result_type
+            neg_floor = self._make_unary("-", floor_ab)
+            grad_y = self._make_binop("*", neg_floor, adj)
+
+            self._accumulate(adjoints, x_name, self._reduce_broadcast(grad_x, x_type))
+            self._accumulate(adjoints, y_name, self._reduce_broadcast(grad_y, y_type))
+
+        elif callee == "copysign":
+            # copysign(a, b) = abs(a) * sign(b)
+            # d/da = sign(b) * adj  (magnitude contributes)
+            # d/db = 0  (sign is piecewise constant)
+            sign_b = self._make_call("sign", [y_ref])
+            self.type_map[id(sign_b)] = result_type
+            grad_x = self._make_binop("*", sign_b, adj)
+
+            self._accumulate(adjoints, x_name, self._reduce_broadcast(grad_x, x_type))
+            # b gets zero gradient (sign is piecewise constant)
+            zero = self._make_float(0.0)
+            if isinstance(y_type, ArrayType):
+                zero_bc = _BroadcastExpr(zero, tuple(y_type.dims), _DUMMY_SPAN)
+                self.type_map[id(zero_bc)] = y_type
+                self._accumulate(adjoints, y_name, zero_bc)
+            else:
+                self._accumulate(adjoints, y_name, zero)
     def _backprop_stack(self, args: list[Expr], adj: Expr,
                          adjoints: dict[str, Expr], var_map: dict[int, str]):
         """Backprop through stack: slice adj along the stack axis, reshape to remove the extra dim."""
