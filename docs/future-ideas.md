@@ -1,46 +1,30 @@
 # Future Ideas
 
-## StableHLO Primitives to Add
+## Implemented StableHLO Primitives
 
-### Tier 1 — Big unlocks for ML
+The following primitives from the original roadmap have been implemented:
 
-| Op | What it enables | Syntax idea |
-|---|---|---|
-| `stablehlo.convolution` | CNNs — image models impossible without this | `conv2d(input, kernel, stride=1, padding="same")` |
-| `stablehlo.gather` | Fancy indexing — `x[ids]` where `ids: i32[B]`. Embedding lookups, batched gathers | `x[ids]` where `ids` is an array |
-| `stablehlo.scatter` | Indexed scatter/update — `x[indices] += values`. Inverse of gather, essential for embedding gradients | Paired with gather for AD |
-| `stablehlo.reduce_window` | Pooling (max pool, avg pool). Sliding window reductions | `pool(x, size=2, stride=2, mode="max")` |
-| `stablehlo.iota` | Generate `[0, 1, 2, ..., N-1]`. Positional encodings, index arrays, arange | `range(10)` or `iota(10)` |
+**Tier 1 (all complete):**
+- `stablehlo.convolution` → `conv2d(input, kernel, stride, padding)` with full AD
+- `stablehlo.gather` → `x[ids]` array-based indexing with AD (scatter for backward)
+- `stablehlo.scatter` → Used internally for gather gradients
+- `stablehlo.reduce_window` → `max_pool` and `avg_pool` with AD
+- `stablehlo.iota` → `iota(N)` integer sequences
 
-### Tier 2 — Important utilities
+**Tier 2 (mostly complete):**
+- `stablehlo.concatenate` → `concat(a, b, axis)`
+- `stablehlo.reshape` → `reshape(x, d1, d2, ...)`
+- `stablehlo.pad` → `pad(x, pad_width)`
+- `stablehlo.sort` → `sort(x, axis)` and `argsort(x, axis)` with AD
+- `stablehlo.rng` → `random.key`, `random.split`, `random.uniform`, `random.normal`, `random.bernoulli`, `random.categorical`, `random.truncated_normal`
 
-| Op | What it enables | Syntax idea |
-|---|---|---|
-| `stablehlo.concatenate` | Join arrays along an axis. Can't build sequences or combine results without this | `concat(a, b, axis=0)` |
-| `stablehlo.reshape` | User-facing reshape (already used internally). Flattening, unflattening, view changes | `reshape(x, [4, 8])` |
-| `stablehlo.pad` | Zero/constant padding. Needed for conv padding, sequence padding | `pad(x, [(0,1), (2,2)])` |
-| `stablehlo.reverse` | Reverse along axes. Sequence processing, flipping | `reverse(x, axis=0)` |
-| `stablehlo.sort` | Sorting + argsort. Top-k, ranking, beam search | `sort(x)`, `argsort(x)` |
-| `stablehlo.rng` | Random number generation on-device. Dropout, initialization, sampling | `random(shape, seed)` |
-
-### Tier 3 — Linear algebra / specialized
-
-| Op | What it enables |
-|---|---|
-| `stablehlo.cholesky` | Cholesky decomposition — Gaussian processes, covariance |
-| `stablehlo.triangular_solve` | Solve triangular systems — paired with Cholesky |
-| `stablehlo.fft` | FFT — signal processing, spectral methods, efficient convolution |
-| `stablehlo.all_reduce` / `all_gather` | Distributed training across multiple devices |
-| `stablehlo.custom_call` | Escape hatch to call custom kernels (FlashAttention, cuBLAS, etc.) |
-
-### Priority order
-
-1. **`iota` + `gather` + `scatter`** — Completes the indexing story. `x[indices]` where indices is an array (embedding lookup) is probably the most used pattern in transformers.
-2. **`concatenate` + `reshape`** — Fundamental array manipulation currently impossible. Can't even stack two arrays.
-3. **`convolution` + `reduce_window`** — Opens up CNNs (conv + pooling).
-4. **`rng`** — No randomness means no dropout, no stochastic anything.
-
-These four groups take Maomi from "can express MLPs and RNNs" to "can express most standard architectures."
+**Still not implemented:**
+- `stablehlo.reverse` — reverse along axes
+- `stablehlo.cholesky` — Cholesky decomposition
+- `stablehlo.triangular_solve` — solve triangular systems
+- `stablehlo.fft` — FFT / spectral methods
+- `stablehlo.all_reduce` / `all_gather` — distributed training
+- `stablehlo.custom_call` — escape hatch to custom kernels
 
 ---
 
@@ -74,18 +58,6 @@ fn concat_pair(a: f32[N], b: f32[M]) -> f32[N + M] {
 ```
 
 Type checker does symbolic arithmetic — `D/8` requires `D` divisible by 8, checked at compile time. StableHLO just sees concrete shapes, but the language proves they're correct.
-
-### First-class einsum syntax
-
-JAX uses a string-based DSL with no editor support or type checking.
-
-```maomi
-fn attend(q: f32[B, S, H, D], k: f32[B, T, H, D]) -> f32[B, H, S, T] {
-    contract(q, k, over=D)   // or: q *. k  (dot over shared named dims)
-}
-```
-
-Compiler knows contraction dimensions from the types. Emits the same `stablehlo.dot_general` with the right contraction/batch dims inferred.
 
 ### Differentiability in the type system
 
