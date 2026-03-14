@@ -657,6 +657,10 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
             return self._gen_sum(expr, env)
         if expr.callee in ("max", "min"):
             return self._gen_max_min(expr, env)
+        if expr.callee == "prod":
+            return self._gen_prod(expr, env)
+        if expr.callee in ("all", "any"):
+            return self._gen_bool_reduction(expr, env)
         if expr.callee == "logsumexp":
             return self._gen_logsumexp(expr, env)
         if expr.callee in ("argmax", "argmin"):
@@ -1199,6 +1203,171 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
         elif base == "i64":
             return "-9223372036854775807" if is_max else "9223372036854775807"
         return "0xFF800000" if is_max else "0x7F800000"
+
+    def _gen_prod(self, expr: CallExpr, env: dict[str, str]) -> str:
+        """Generate product reduction: stablehlo.reduce with multiply combiner."""
+        arg = self._gen_expr(expr.args[0], env)
+        arg_type = self._type_of(expr.args[0])
+        result_type = self._type_of(expr)
+
+        if not isinstance(arg_type, ArrayType):
+            return arg
+
+        keepdims = self._has_keepdims(expr)
+
+        if len(expr.args) >= 2:
+            axis = expr.args[1].value
+            bd = self._batch_depth
+            actual_axis = bd + axis
+            if keepdims:
+                reduced_dims = tuple(d for i, d in enumerate(arg_type.dims) if i != axis)
+                reduced_type = ArrayType(arg_type.base, reduced_dims) if reduced_dims else ScalarType(arg_type.base)
+                reduced = self._gen_reduce_prod_single_axis(arg, arg_type, reduced_type, actual_axis)
+                return self._keepdims_reshape(reduced, arg_type, axis, result_type)
+            return self._gen_reduce_prod_single_axis(arg, arg_type, result_type, actual_axis)
+
+        return self._gen_reduce_prod(arg, arg_type, result_type)
+
+    def _gen_reduce_prod(self, arg: str, arg_type: ArrayType, result_type: MaomiType) -> str:
+        """Generate a product reduction over all non-batch dims."""
+        bd = self._batch_depth
+        ndims = len(arg_type.dims)
+        reduce_dims = list(range(bd, ndims))
+        dims_str = ", ".join(str(i) for i in reduce_dims)
+
+        init_var = self._fresh()
+        scalar_type = ScalarType(arg_type.base)
+        mlir_scalar = _mlir_type(scalar_type)
+        self._emit(f"{init_var} = stablehlo.constant dense<1.000000e+00> : {mlir_scalar}")
+
+        mlir_result = _mlir_type(result_type)
+        var = self._fresh()
+        self._emit(
+            f"{var} = stablehlo.reduce({arg} init: {init_var}) "
+            f"across dimensions = [{dims_str}] "
+            f": ({_mlir_type(arg_type)}, {mlir_scalar}) -> {mlir_result}"
+        )
+        self._indent += 1
+        a_var = self._fresh()
+        b_var = self._fresh()
+        self._emit(f"reducer({a_var}: {mlir_scalar}, {b_var}: {mlir_scalar}) {{")
+        self._indent += 1
+        r_var = self._fresh()
+        self._emit(f"{r_var} = stablehlo.multiply {a_var}, {b_var} : {mlir_scalar}")
+        self._emit(f"stablehlo.return {r_var} : {mlir_scalar}")
+        self._indent -= 1
+        self._emit("}")
+        self._indent -= 1
+        return var
+
+    def _gen_reduce_prod_single_axis(self, arg: str, arg_type: ArrayType, result_type: MaomiType, axis: int) -> str:
+        """Generate a product reduction along a single axis."""
+        init_var = self._fresh()
+        scalar_type = ScalarType(arg_type.base)
+        mlir_scalar = _mlir_type(scalar_type)
+        self._emit(f"{init_var} = stablehlo.constant dense<1.000000e+00> : {mlir_scalar}")
+
+        mlir_result = _mlir_type(result_type)
+        var = self._fresh()
+        self._emit(
+            f"{var} = stablehlo.reduce({arg} init: {init_var}) "
+            f"across dimensions = [{axis}] "
+            f": ({_mlir_type(arg_type)}, {mlir_scalar}) -> {mlir_result}"
+        )
+        self._indent += 1
+        a_var = self._fresh()
+        b_var = self._fresh()
+        self._emit(f"reducer({a_var}: {mlir_scalar}, {b_var}: {mlir_scalar}) {{")
+        self._indent += 1
+        r_var = self._fresh()
+        self._emit(f"{r_var} = stablehlo.multiply {a_var}, {b_var} : {mlir_scalar}")
+        self._emit(f"stablehlo.return {r_var} : {mlir_scalar}")
+        self._indent -= 1
+        self._emit("}")
+        self._indent -= 1
+        return var
+
+    def _gen_bool_reduction(self, expr: CallExpr, env: dict[str, str]) -> str:
+        """Generate all/any reduction: stablehlo.reduce with and/or combiner."""
+        arg = self._gen_expr(expr.args[0], env)
+        arg_type = self._type_of(expr.args[0])
+        result_type = self._type_of(expr)
+
+        if not isinstance(arg_type, ArrayType):
+            return arg
+
+        is_all = expr.callee == "all"
+        # all: init=true (dense<1>), combiner=stablehlo.and
+        # any: init=false (dense<0>), combiner=stablehlo.or
+        init_val = "1" if is_all else "0"
+        combiner = "stablehlo.and" if is_all else "stablehlo.or"
+
+        if len(expr.args) >= 2:
+            axis = expr.args[1].value
+            bd = self._batch_depth
+            actual_axis = bd + axis
+            return self._gen_reduce_bool_single_axis(arg, arg_type, result_type, actual_axis, init_val, combiner)
+
+        return self._gen_reduce_bool(arg, arg_type, result_type, init_val, combiner)
+
+    def _gen_reduce_bool(self, arg: str, arg_type: ArrayType, result_type: MaomiType,
+                         init_val: str, combiner: str) -> str:
+        """Generate a bool reduction over all non-batch dims."""
+        bd = self._batch_depth
+        ndims = len(arg_type.dims)
+        reduce_dims = list(range(bd, ndims))
+        dims_str = ", ".join(str(i) for i in reduce_dims)
+
+        init_var = self._fresh()
+        mlir_scalar = "tensor<i1>"
+        self._emit(f"{init_var} = stablehlo.constant dense<{init_val}> : {mlir_scalar}")
+
+        mlir_result = _mlir_type(result_type)
+        var = self._fresh()
+        self._emit(
+            f"{var} = stablehlo.reduce({arg} init: {init_var}) "
+            f"across dimensions = [{dims_str}] "
+            f": ({_mlir_type(arg_type)}, {mlir_scalar}) -> {mlir_result}"
+        )
+        self._indent += 1
+        a_var = self._fresh()
+        b_var = self._fresh()
+        self._emit(f"reducer({a_var}: {mlir_scalar}, {b_var}: {mlir_scalar}) {{")
+        self._indent += 1
+        r_var = self._fresh()
+        self._emit(f"{r_var} = {combiner} {a_var}, {b_var} : {mlir_scalar}")
+        self._emit(f"stablehlo.return {r_var} : {mlir_scalar}")
+        self._indent -= 1
+        self._emit("}")
+        self._indent -= 1
+        return var
+
+    def _gen_reduce_bool_single_axis(self, arg: str, arg_type: ArrayType, result_type: MaomiType,
+                                     axis: int, init_val: str, combiner: str) -> str:
+        """Generate a bool reduction along a single axis."""
+        init_var = self._fresh()
+        mlir_scalar = "tensor<i1>"
+        self._emit(f"{init_var} = stablehlo.constant dense<{init_val}> : {mlir_scalar}")
+
+        mlir_result = _mlir_type(result_type)
+        var = self._fresh()
+        self._emit(
+            f"{var} = stablehlo.reduce({arg} init: {init_var}) "
+            f"across dimensions = [{axis}] "
+            f": ({_mlir_type(arg_type)}, {mlir_scalar}) -> {mlir_result}"
+        )
+        self._indent += 1
+        a_var = self._fresh()
+        b_var = self._fresh()
+        self._emit(f"reducer({a_var}: {mlir_scalar}, {b_var}: {mlir_scalar}) {{")
+        self._indent += 1
+        r_var = self._fresh()
+        self._emit(f"{r_var} = {combiner} {a_var}, {b_var} : {mlir_scalar}")
+        self._emit(f"stablehlo.return {r_var} : {mlir_scalar}")
+        self._indent -= 1
+        self._emit("}")
+        self._indent -= 1
+        return var
 
     def _gen_logsumexp(self, expr: CallExpr, env: dict[str, str]) -> str:
         """Generate numerically stable logsumexp: m + log(sum(exp(x - m), axis))
