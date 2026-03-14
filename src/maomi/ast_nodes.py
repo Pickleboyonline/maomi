@@ -37,6 +37,7 @@ class StructDef:
     fields: list[tuple[str, TypeAnnotation]]
     span: Span
     doc: str | None = field(default=None, compare=False)
+    canonical_name: str | None = field(default=None, compare=False)
 
 
 # ---------- Function ----------

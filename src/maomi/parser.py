@@ -233,6 +233,9 @@ class Parser:
             return TypeAnnotation(base, dims, self._span_from(start), wildcard=wildcard)
         if start.type == TokenType.IDENT:
             base = self._advance().value
+            while self._check(TokenType.DOT):
+                self._advance()  # consume '.'
+                base += "." + self._expect(TokenType.IDENT).value
             return TypeAnnotation(base, None, self._span_from(start))
         raise self._error(f"expected type, got {start.type.value}")
 
@@ -664,8 +667,11 @@ class Parser:
                     self._advance()
                 else:
                     raise self._error(f"expected field name after '.', got {field_tok.type.value}")
-                if isinstance(expr, Identifier) and self._check(TokenType.LPAREN):
-                    # Module-qualified call: math.relu(...) — flatten to qualified identifier
+                if isinstance(expr, Identifier) and (
+                    self._check(TokenType.LPAREN) or
+                    (self._check(TokenType.LBRACE) and self._is_struct_literal())
+                ):
+                    # Module-qualified call or struct literal — flatten to qualified identifier
                     qualified = f"{expr.name}.{field_tok.value}"
                     expr = Identifier(qualified, Span(expr.span.line_start, expr.span.col_start, field_tok.line, field_tok.col + len(field_tok.value)))
                 else:
