@@ -87,6 +87,7 @@ from .constants import (
     _EINSUM_BUILTINS,
     _CUMULATIVE_BUILTINS,
     _SORTING_BUILTINS,
+    _LINALG_BUILTINS,
     _MAX_GRAD_DEPTH,
     _collect_free_vars,
 )
@@ -404,10 +405,10 @@ class ADTransform(SimpleGradRulesMixin, ComplexGradRulesMixin):
                 var_map[id(expr)] = name
                 tape.append((name, expr))
             case CallExpr(callee=callee, args=args):
-                if callee in _NONDIFF_BUILTINS:
+                if callee in _NONDIFF_BUILTINS and callee not in _LINALG_BUILTINS:
                     # Callback: no value, no gradient. Skip entirely.
                     return
-                elif callee in _IOTA_BUILTINS | _ELEMENTWISE_BUILTINS | _REDUCTION_BUILTINS | _SHAPE_BUILTINS | _CONV_POOL_BUILTINS | _RNG_BUILTINS | _STOP_GRAD_BUILTINS | _WHERE_BUILTINS | _CLIP_BUILTINS | _ARGMAX_BUILTINS | _TWO_ARG_EW_BUILTINS | _EINSUM_BUILTINS | _CUMULATIVE_BUILTINS | _SORTING_BUILTINS | {"transpose"}:
+                elif callee in _IOTA_BUILTINS | _ELEMENTWISE_BUILTINS | _REDUCTION_BUILTINS | _SHAPE_BUILTINS | _CONV_POOL_BUILTINS | _RNG_BUILTINS | _STOP_GRAD_BUILTINS | _WHERE_BUILTINS | _CLIP_BUILTINS | _ARGMAX_BUILTINS | _TWO_ARG_EW_BUILTINS | _EINSUM_BUILTINS | _CUMULATIVE_BUILTINS | _SORTING_BUILTINS | _LINALG_BUILTINS | {"transpose"}:
                     # Built-in: put on tape as-is
                     for a in args:
                         self._linearize(a, tape, var_map, let_env)
@@ -1031,6 +1032,11 @@ class ADTransform(SimpleGradRulesMixin, ComplexGradRulesMixin):
                     if callee == "sort":
                         self._backprop_sort(args, adj, adjoints, var_map, node)
                     # argsort: zero_grad, handled by _IOTA_BUILTINS check
+                elif callee in _LINALG_BUILTINS:
+                    raise MaomiError(
+                        f"grad: differentiation through '{callee}' is not yet supported",
+                        "<ad>", node.span.line_start, node.span.col_start,
+                    )
                 else:
                     raise MaomiError(
                         f"grad: unsupported function call '{callee}' inside grad",

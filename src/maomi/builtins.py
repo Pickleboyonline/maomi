@@ -1102,6 +1102,18 @@ COMPLEX: dict[str, ComplexBuiltin] = {
         "Einstein summation: `einsum(\"ij,jk->ik\", a, b)` for matrix multiply, `einsum(\"ij->ji\", a)` for transpose, etc.",
         (["spec", "a", "b"], ["str", "f32[...]", "f32[...]"], "f32[...]"),
     ),
+
+    # Linear algebra
+    "cholesky": ComplexBuiltin(
+        "cholesky", "linalg", "nondiff",
+        "Cholesky decomposition. Returns lower triangular L where x = L @ L^T. Input must be a symmetric positive-definite 2D square matrix.",
+        (["x"], ["f32[N,N]"], "f32[N,N]"),
+    ),
+    "triangular_solve": ComplexBuiltin(
+        "triangular_solve", "linalg", "nondiff",
+        "Solve a triangular linear system. `triangular_solve(a, b, true, true)` solves A @ X = B where A is lower triangular.",
+        (["a", "b", "lower", "left_side"], ["f32[N,N]", "f32[N,M]", "bool", "bool"], "f32[N,M]"),
+    ),
 }
 
 # ---------------------------------------------------------------------------

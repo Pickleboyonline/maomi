@@ -53,6 +53,7 @@ _TWO_ARG_EW_BUILTINS = {n for n, b in _CX_REGISTRY.items() if b.category == "two
 _EINSUM_BUILTINS = {n for n, b in _CX_REGISTRY.items() if b.category == "einsum"}
 _CUMULATIVE_BUILTINS = {n for n, b in _CX_REGISTRY.items() if b.category == "cumulative"}
 _SORTING_BUILTINS = {n for n, b in _CX_REGISTRY.items() if b.category == "sorting"}
+_LINALG_BUILTINS = {n for n, b in _CX_REGISTRY.items() if b.category == "linalg"}
 _MAX_GRAD_DEPTH = 10
 
 
