@@ -26,6 +26,10 @@ class RNGCodegenMixin:
             return self._gen_rng_categorical(expr, env)
         elif callee == "random.truncated_normal":
             return self._gen_rng_truncated_normal(expr, env)
+        elif callee == "random.exponential":
+            return self._gen_rng_exponential(expr, env)
+        elif callee == "random.randint":
+            return self._gen_rng_randint(expr, env)
         raise MaomiError(f"codegen: unknown RNG builtin '{callee}'", "<codegen>", 0, 0)
 
     def _gen_key_to_u64(self, key_ssa: str) -> str:
@@ -433,3 +437,95 @@ class RNGCodegenMixin:
         clamped = self._fresh()
         self._emit(f"{clamped} = stablehlo.clamp {lo_bc}, {normal_vals}, {hi_bc} : {f32_type}")
         return clamped
+
+    def _gen_rng_exponential(self, expr: CallExpr, env: dict[str, str]) -> str:
+        """random.exponential(key, d1, ...) -> f32[d1, ...].
+
+        Exponential(rate=1) = -log(uniform(0, 1)).
+        """
+        key_ssa = self._gen_expr(expr.args[0], env)
+
+        result_type = self._type_of(expr)
+        assert isinstance(result_type, ArrayType)
+        shape = tuple(result_type.dims)
+        shape_str = "x".join(str(d) for d in shape)
+        f32_type = f"tensor<{shape_str}xf32>"
+
+        # Generate uniform [0, 1)
+        key_u64 = self._gen_key_to_u64(key_ssa)
+        _, bits = self._gen_rng_bits(key_u64, shape)
+        base_uniform = self._gen_bits_to_uniform(bits, shape)
+
+        # Clamp away from 0 for log safety
+        eps_s = self._fresh()
+        self._emit(f"{eps_s} = stablehlo.constant dense<1.000000e-07> : tensor<f32>")
+        eps = self._fresh()
+        dims = "" if not shape else "dims = []"
+        self._emit(f"{eps} = stablehlo.broadcast_in_dim {eps_s}, {dims} : (tensor<f32>) -> {f32_type}")
+        u_safe = self._fresh()
+        self._emit(f"{u_safe} = stablehlo.maximum {base_uniform}, {eps} : {f32_type}")
+
+        # -log(u)
+        log_u = self._fresh()
+        self._emit(f"{log_u} = stablehlo.log {u_safe} : {f32_type}")
+        result = self._fresh()
+        self._emit(f"{result} = stablehlo.negate {log_u} : {f32_type}")
+        return result
+
+    def _gen_rng_randint(self, expr: CallExpr, env: dict[str, str]) -> str:
+        """random.randint(key, low, high, d1, ...) -> i32[d1, ...].
+
+        cast(floor(uniform(0, 1) * cast(high - low, f32)) + cast(low, f32), i32)
+        """
+        key_ssa = self._gen_expr(expr.args[0], env)
+        low_ssa = self._gen_expr(expr.args[1], env)
+        high_ssa = self._gen_expr(expr.args[2], env)
+
+        result_type = self._type_of(expr)
+        assert isinstance(result_type, ArrayType)
+        shape = tuple(result_type.dims)
+        shape_str = "x".join(str(d) for d in shape)
+        f32_type = f"tensor<{shape_str}xf32>"
+        i32_type = f"tensor<{shape_str}xi32>"
+
+        # Generate uniform [0, 1)
+        key_u64 = self._gen_key_to_u64(key_ssa)
+        _, bits = self._gen_rng_bits(key_u64, shape)
+        base_uniform = self._gen_bits_to_uniform(bits, shape)
+
+        dims = "dims = []"
+
+        # range = high - low (scalar i32)
+        range_i32 = self._fresh()
+        self._emit(f"{range_i32} = stablehlo.subtract {high_ssa}, {low_ssa} : tensor<i32>")
+
+        # cast range to f32
+        range_f32 = self._fresh()
+        self._emit(f"{range_f32} = stablehlo.convert {range_i32} : (tensor<i32>) -> tensor<f32>")
+
+        # broadcast range to output shape
+        range_bc = self._fresh()
+        self._emit(f"{range_bc} = stablehlo.broadcast_in_dim {range_f32}, {dims} : (tensor<f32>) -> {f32_type}")
+
+        # scaled = uniform * range
+        scaled = self._fresh()
+        self._emit(f"{scaled} = stablehlo.multiply {base_uniform}, {range_bc} : {f32_type}")
+
+        # floored = floor(scaled)
+        floored = self._fresh()
+        self._emit(f"{floored} = stablehlo.floor {scaled} : {f32_type}")
+
+        # cast low to f32 and broadcast
+        low_f32 = self._fresh()
+        self._emit(f"{low_f32} = stablehlo.convert {low_ssa} : (tensor<i32>) -> tensor<f32>")
+        low_bc = self._fresh()
+        self._emit(f"{low_bc} = stablehlo.broadcast_in_dim {low_f32}, {dims} : (tensor<f32>) -> {f32_type}")
+
+        # sum = floored + low
+        sum_val = self._fresh()
+        self._emit(f"{sum_val} = stablehlo.add {floored}, {low_bc} : {f32_type}")
+
+        # cast to i32
+        result = self._fresh()
+        self._emit(f"{result} = stablehlo.convert {sum_val} : ({f32_type}) -> {i32_type}")
+        return result

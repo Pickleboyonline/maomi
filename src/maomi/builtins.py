@@ -1104,6 +1104,16 @@ COMPLEX: dict[str, ComplexBuiltin] = {
         "Sample truncated normal random values clipped to [lo, hi].",
         (["key", "lo", "hi", "dims..."], ["Key", "f32", "f32", "int..."], "f32[...]"),
     ),
+    "random.exponential": ComplexBuiltin(
+        "random.exponential", "rng", "zero_grad",
+        "Sample from exponential distribution with rate=1. Values in [0, +inf).",
+        (["key", "dims..."], ["Key", "int..."], "f32[...]"),
+    ),
+    "random.randint": ComplexBuiltin(
+        "random.randint", "rng", "zero_grad",
+        "Sample random integers in [low, high).",
+        (["key", "low", "high", "dims..."], ["Key", "i32", "i32", "int..."], "i32[...]"),
+    ),
 
     # Utility / inspection
     "isfinite": ComplexBuiltin(
