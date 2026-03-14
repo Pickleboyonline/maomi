@@ -324,6 +324,24 @@ def _grad_log10(ctx: Any, arg_ref: Expr, adj: Expr) -> Expr:
     return ctx._make_binop("/", adj, x_ln10)
 
 
+def _grad_cbrt(ctx: Any, arg_ref: Expr, adj: Expr) -> Expr:
+    # d/dx cbrt(x) = 1/(3*cbrt(x)^2) = adj / (3*cbrt(x)^2)
+    cbrt_x = ctx._make_call("cbrt", [arg_ref])
+    cbrt_sq = ctx._make_binop("*", cbrt_x, cbrt_x)
+    three_cbrt_sq = ctx._make_binop("*", ctx._make_float(3.0), cbrt_sq)
+    return ctx._make_binop("/", adj, three_cbrt_sq)
+
+
+def _grad_round(ctx: Any, arg_ref: Expr, adj: Expr) -> Expr:
+    # round is piecewise constant — gradient is zero
+    return ctx._make_float(0.0)
+
+
+def _grad_trunc(ctx: Any, arg_ref: Expr, adj: Expr) -> Expr:
+    # trunc is piecewise constant — gradient is zero
+    return ctx._make_float(0.0)
+
+
 # ---------------------------------------------------------------------------
 # Compound elementwise codegen functions
 # ---------------------------------------------------------------------------
@@ -673,6 +691,21 @@ def _codegen_log10_inner(codegen: Any, arg_ssa: str, mlir_t: str) -> str:
 _codegen_log10 = _compound_codegen("log10", _codegen_log10_inner)
 
 
+def _codegen_trunc_inner(codegen: Any, arg_ssa: str, mlir_t: str) -> str:
+    # trunc(x) = sign(x) * floor(abs(x))
+    abs_x = codegen._fresh()
+    codegen._emit(f"{abs_x} = stablehlo.abs {arg_ssa} : {mlir_t}")
+    floor_abs = codegen._fresh()
+    codegen._emit(f"{floor_abs} = stablehlo.floor {abs_x} : {mlir_t}")
+    sign_x = codegen._fresh()
+    codegen._emit(f"{sign_x} = stablehlo.sign {arg_ssa} : {mlir_t}")
+    result = codegen._fresh()
+    codegen._emit(f"{result} = stablehlo.multiply {sign_x}, {floor_abs} : {mlir_t}")
+    return result
+
+_codegen_trunc = _compound_codegen("trunc", _codegen_trunc_inner)
+
+
 # ---------------------------------------------------------------------------
 # Elementwise builtin registry
 # ---------------------------------------------------------------------------
@@ -835,6 +868,21 @@ ELEMENTWISE: dict[str, ElementwiseBuiltin] = {
         "log10", None, _grad_log10,
         "Compute element-wise base-10 logarithm.",
         codegen_fn=_codegen_log10,
+    ),
+
+    # -- cbrt, round, trunc --
+    "cbrt": ElementwiseBuiltin(
+        "cbrt", "stablehlo.cbrt", _grad_cbrt,
+        "Compute element-wise cube root.",
+    ),
+    "round": ElementwiseBuiltin(
+        "round", "stablehlo.round_nearest_even", _grad_round,
+        "Round element-wise to nearest even integer. Not differentiable (gradient is zero).",
+    ),
+    "trunc": ElementwiseBuiltin(
+        "trunc", None, _grad_trunc,
+        "Truncate element-wise toward zero. Not differentiable (gradient is zero).",
+        codegen_fn=_codegen_trunc,
     ),
 }
 
