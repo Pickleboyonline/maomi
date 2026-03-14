@@ -101,7 +101,22 @@ uv run maomi run hello.mao --fn train_step
 
 This compiles the function, generates random inputs, and executes via JAX/XLA.
 
-## 5. Sequential Computation with Scan
+## 5. Value and Gradient Together
+
+Often you need both the loss value and its gradient. `value_and_grad` computes both in one pass.
+
+```maomi
+fn step(x: f32[4], w: f32[4]) -> f32[4] {
+    let loss = mean(x * w);
+    let { value, gradient } = value_and_grad(loss, w);
+    callback(value);   // print the loss
+    gradient           // return the gradient
+}
+```
+
+`value_and_grad(expr, var)` returns a struct with `.value` (the scalar result) and `.gradient` (same type as the variable). Use destructuring (`let { value, gradient } = ...`) to extract both.
+
+## 6. Sequential Computation with Scan
 
 `scan` is a sequential fold — it processes a sequence element by element, carrying state forward.
 
@@ -117,7 +132,32 @@ fn cumsum(xs: f32[10], init: f32) -> f32[10] {
 
 Scan is fully differentiable — the gradient runs a reverse scan automatically.
 
-## 6. Grouping Parameters with Structs
+## 6. Fold — When You Only Need the Final Value
+
+`fold` is like `scan` but returns only the final carry, not all intermediate values. This makes it ideal for training loops where you want the final trained parameters.
+
+```maomi
+fn total(xs: f32[10]) -> f32 {
+    fold (acc, x) in (0.0, xs) { acc + x }
+}
+```
+
+Unlike `scan`, `fold` supports struct carries — you can fold over a struct accumulator:
+
+```maomi
+struct Params { w: f32[4, 4], b: f32[4] }
+
+fn train(p: Params, xs: f32[100, 4], ys: f32[100, 4]) -> Params {
+    fold (model, (x, y)) in (p, (xs, ys)) {
+        let g = grad(sum((x @ model.w + model.b - y) * (x @ model.w + model.b - y)), model);
+        model - 0.01 * g
+    }
+}
+```
+
+Fully differentiable — `grad` through `fold` works automatically.
+
+## 7. Grouping Parameters with Structs
 
 As models grow, you'll want to group related parameters. Structs let you do this.
 
@@ -152,7 +192,19 @@ And updated at nested paths:
 let net2 = net with { hidden.b = new_bias };
 ```
 
-## 7. Random Initialization
+You can destructure structs to extract fields into individual bindings:
+
+```maomi
+let { w, b } = params;
+```
+
+Or rebind to different names:
+
+```maomi
+let { w: weights, b: bias } = params;
+```
+
+## 8. Random Initialization
 
 Real models need random weight initialization. Maomi provides deterministic, key-threaded RNG — same model as JAX. You create a key from a seed, split it for independent randomness, and pass keys to sampling functions.
 
@@ -172,7 +224,7 @@ fn init(seed: i32) -> f32[128, 64] {
 
 Same seed always produces the same output. Different seeds produce different output.
 
-## 8. Convolutions and Pooling
+## 9. Convolutions and Pooling
 
 For CNNs, Maomi provides conv2d and pooling builtins with NCHW layout.
 
@@ -187,7 +239,7 @@ fn conv_block(x: f32[1, 3, 8, 8], w: f32[16, 3, 3, 3]) -> f32[1, 16, 2, 2] {
 
 See `examples/cnn.mao` for more examples including gradient computation.
 
-## 9. Running Your Program
+## 10. Running Your Program
 
 ```bash
 # Compile and run, executing a specific function
@@ -202,7 +254,7 @@ uv run maomi compile your_file.mao --emit stablehlo
 
 When you use `run`, Maomi compiles your function, generates random inputs matching the parameter types, and executes via JAX's XLA backend. It prints the inputs and output.
 
-## 10. Using Modules
+## 11. Using Modules
 
 Split your code across files and import functions.
 

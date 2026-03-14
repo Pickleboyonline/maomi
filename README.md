@@ -17,7 +17,7 @@ fn converge_diff(x: f32) -> f32 {
 }
 ```
 
-Memory is still preallocated for gradients like a jax's `scan`, but you can early stop computation with compiled AD. 
+Memory is still preallocated for gradients like a jax's `scan`, but you can early stop computation with compiled AD.
 
 
 **[Getting Started](docs/getting-started.md)** · **[Language Reference](docs/reference.md)**
@@ -41,14 +41,19 @@ fn mse_loss(pred: f32[32], target: f32[32]) -> f32 {
 }
 
 fn train_step(x: f32[4], w: f32[4]) -> f32[4] {
-    let loss = mean(x * w);
-    grad(loss, w)
+    let { value, gradient } = value_and_grad(mean(x * w), w);
+    callback(value);
+    gradient
 }
 
 fn cumsum(xs: f32[10], init: f32) -> f32[10] {
     scan (acc, x) in (init, xs) {
         acc + x
     }
+}
+
+fn total(xs: f32[10]) -> f32 {
+    fold (acc, x) in (0.0, xs) { acc + x }
 }
 
 fn init_weights(seed: i32) -> f32[4, 4] {
@@ -63,9 +68,8 @@ fn conv_block(x: f32[1, 3, 8, 8], w: f32[16, 3, 3, 3]) -> f32[1, 16, 2, 2] {
 }
 
 fn softmax(x: f32[32, 128]) -> f32[32, 128] {
-    let e = exp(x);
-    let s = reshape(sum(e, 1), 32, 1);
-    e / s
+    let e = exp(x - max(x, 1, keepdims=true));
+    e / sum(e, 1, keepdims=true)
 }
 
 fn hessian_diag(x: f32[4]) -> f32[4] {
@@ -79,45 +83,45 @@ fn hessian_diag(x: f32[4]) -> f32[4] {
 | Construct | What it does |
 |---|---|
 | `fn f(x: f32[B, 128]) -> f32` | Function with shape-typed params |
+| `fn f(x: f32[..], comptime axis: i32) -> f32[..]` | Rank-polymorphic with compile-time param |
 | `struct S { x: f32, y: i32 }` | Named struct definition |
 | `S { x: 1.0, y: 2 }` | Struct construction |
 | `s.x` | Field access (nestable: `s.inner.x`) |
 | `s with { x = 1.0 }` | Functional update (nestable: `s with { inner.x = 1.0 }`) |
+| `let { x, y } = s;` | Struct destructuring |
+| `let { x: alias } = s;` | Destructuring with rebinding |
 | `let x = expr;` | Immutable binding |
+| `cast(x, f32)` | Type conversion (preserves shape) |
 | `if c { a } else { b }` | Conditional expression (returns a value) |
-| `map x in xs { ... }` | Elementwise transform (compiles to vectorized op) |
-| `scan (acc, x) in (init, xs) { ... }` | Sequential fold with carried state |
-| `sum(x)` `sum(x, 1)` | Sum reduction (all dims or specific axis) |
-| `mean(x)` `mean(x, 0)` | Mean reduction (all dims or specific axis) |
-| `where(cond, x, y)` | Element-wise conditional (array bool select) |
-| `stop_gradient(expr)` | Prevent gradient flow (identity in forward pass) |
+| `map x in xs { ... }` | General map/vmap (compiles to vectorized op) |
+| `scan (acc, x) in (init, xs) { ... }` | Sequential fold with carried state (stacks results) |
+| `fold (acc, x) in (init, xs) { ... }` | Sequential fold returning final value only (supports struct carries) |
+| `while s in x limit N { cond } do { body }` | Bounded while loop (differentiable with limit) |
 | `grad(expr, var)` | Reverse-mode AD (supports grad-of-grad, structs, scan, indexing, conv2d) |
-| `reshape(x, 4, 8)` | Reshape array (element count must match) |
-| `concat(a, b)` `concat(a, b, 1)` | Concatenate arrays (optional axis, default 0) |
-| `iota(N)` | Integer sequence `[0, 1, ..., N-1]` |
-| `conv2d(x, w)` `conv2d(x, w, stride, pad)` | 2D convolution (NCHW layout) |
-| `max_pool(x, wh, ww, sh, sw)` | Max pooling |
-| `avg_pool(x, wh, ww, sh, sw)` | Average pooling |
-| `random.key(seed)` | Create RNG key from integer seed |
-| `random.split(key, n)` | Split key into n subkeys |
-| `random.uniform(key, lo, hi, d1, d2, ...)` | Uniform random in [lo, hi) |
-| `random.normal(key, mu, std, d1, d2, ...)` | Normal random (Box-Muller) |
-| `x[i]` `x[1:3]` `x[:, 0]` `x[-1]` `x[1:]` `x[:-1]` | Array indexing and slicing |
-| `table[ids]` | Gather indexing (ids is an integer array) |
-| `import math;` | Qualified module import (`math.relu(x)`) |
-| `from math import { relu };` | Selective import (`relu(x)`) |
-| `import "../lib/nn" as nn;` | Path-based import with alias |
-| `callback(args...);` | Host callback (no-op in codegen, ignored by `grad`) |
+| `value_and_grad(expr, var)` | Forward value + gradient in one pass |
+| `f(x, axis=1)` | Named arguments at call sites |
 
-**Types:** `f32` `f64` `i32` `i64` `bool` `Key` — arrays as `f32[B, 128]` with symbolic or concrete dims. Named structs for grouping data. `Key` is `i32[4]` (RNG key alias).
+**Builtins — Math:** `exp` `log` `tanh` `sqrt` `abs` `cos` `sin` `tan` `acos` `asin` `atan` `sinh` `cosh` `asinh` `acosh` `atanh` `sigmoid` `relu` `gelu` `silu` `softplus` `log1p` `expm1` `log2` `log10` `exp2` `square` `rsqrt` `reciprocal` `neg` `sign` `floor` `ceil`
 
-**Builtins:** `exp` `log` `tanh` `sqrt` `abs` `mean` `sum` `reshape` `concat` `iota` `where` `stop_gradient` `conv2d` `max_pool` `avg_pool` `random.key` `random.split` `random.uniform` `random.normal` `callback`
+**Builtins — Reductions:** `sum` `mean` `max` `min` `logsumexp` `argmax` `argmin` `cumsum` `cumprod`
+
+**Builtins — Shape:** `reshape` `concat` `transpose` `stack` `pad` `expand_dims` `squeeze` `broadcast_to` `iota` `zeros` `ones` `full` `one_hot` `zeros_like` `ones_like`
+
+**Builtins — Other:** `where` `stop_gradient` `clip` `maximum` `minimum` `pow` `atan2` `sort` `argsort` `einsum` `conv2d` `max_pool` `avg_pool` `callback` `isfinite` `cast`
+
+**RNG:** `random.key` `random.split` `random.uniform` `random.normal` `random.bernoulli` `random.categorical` `random.truncated_normal`
+
+**Types:** `f32` `f64` `bf16` `i32` `i64` `bool` `Key` — arrays as `f32[B, 128]` with symbolic or concrete dims. `f32[..]` for rank-polymorphic. Named structs for grouping data.
+
+**Operators:** `+` `-` `*` `/` `@` (matmul) `**` (power) `==` `!=` `<` `>` `<=` `>=` `and` `or` `not`
 
 **Broadcasting:** Numpy-style broadcasting including size-1 dimensions: `f32[3, 1] * f32[3, 4]` → `f32[3, 4]`
 
-**Operators:** `+` `-` `*` `/` `@` (matmul) `**` (power) `==` `!=` `<` `>` `<=` `>=`
-
 **Indexing:** `x[0]` (single), `x[i]` (dynamic), `x[-1]` (negative), `x[1:3]` (slice), `x[1:]` `x[:3]` `x[:-1]` (open-ended), `x[:, 0]` (multi-axis), `x[0][1]` (chaining), `table[ids]` (gather). Fully differentiable — `grad` propagates through all indexing forms.
+
+**Modules:** `import math;` `from math import { relu };` `import "../lib/nn" as nn;`
+
+**Stdlib:** `nn` (relu, sigmoid, softmax, log_softmax, leaky_relu, elu, selu, mish, layer_norm) · `optim` (sgd_update, adam_update, linear_decay, cosine_decay)
 
 ## How It Works
 
@@ -150,16 +154,23 @@ uv run maomi run examples/grad.mao --fn grad_loss
 uv run maomi run examples/cnn.mao --fn conv_forward --seed 7
 ```
 
+**Python API:**
+
+```python
+import maomi
+module = maomi.compile("model.mao")
+result = module.forward(input_array)
+```
+
 ## Status
 
-**v0.8** — 400 tests across lexer, parser, type checker, codegen, AD, modules, indexing, array manipulation, conv/pooling, RNG, and broadcasting. Full pipeline from source to StableHLO.
+**v0.9** — 1373 tests across lexer, parser, type checker, codegen, AD, modules, indexing, array manipulation, conv/pooling, RNG, broadcasting, einsum, sorting, shape ops, and numerical AD verification. Full pipeline from source to StableHLO.
 
-**Works:** shape-typed arrays, array indexing/slicing (including negative indices, open-ended ranges, gather), `reshape`/`concat`/`transpose`/`iota` builtins, axis-specific reductions (`sum(x, 1)`, `mean(x, 0)`), size-1 broadcasting (`f32[N,1] * f32[N,M]`), `where(cond, x, y)` array conditional, `stop_gradient` for RL/detached targets, named structs (nested, with functional updates), `scan`/`map`/`grad`, grad-of-grad (higher-order differentiation), scan gradients, struct-shaped gradients, `conv2d`/`max_pool`/`avg_pool` with AD support, deterministic RNG (`random.key`/`random.split`/`random.uniform`/`random.normal`), import/module system, StableHLO codegen, JAX/XLA execution.
+**Works:** shape-typed arrays, rank polymorphism (`f32[..]`), compile-time params (`comptime`), named arguments, struct destructuring, array indexing/slicing (negative, open-ended, gather), `reshape`/`concat`/`transpose`/`stack`/`pad`/`expand_dims`/`squeeze`/`broadcast_to`/`iota`, 32+ elementwise builtins (trig, hyperbolic, activations), axis-specific reductions with `keepdims`, `logsumexp`, `cumsum`/`cumprod`, `sort`/`argsort`, `einsum`, `clip`, `maximum`/`minimum`, size-1 broadcasting, `where`/`stop_gradient`, named structs (nested, functional updates, destructuring, arithmetic, generics), `scan`/`fold`/`map`/`grad`/`value_and_grad`, grad-of-grad, struct-shaped gradients, `conv2d`/`max_pool`/`avg_pool` with AD, deterministic RNG (key/split/uniform/normal/bernoulli/categorical/truncated_normal), `callback` with JAX FFI execution, import/module system with stdlib (nn, optim), Python API, StableHLO codegen, JAX/XLA execution, LSP with full IDE support.
 
 **Limitations:**
 - Codegen requires concrete dimensions (symbolic dims type-check but don't compile)
-- `map`: elementwise bodies only
 - Slice bounds must be integer literals (no dynamic ranges)
-- `callback`: compiles but doesn't execute host callbacks yet
-- No rank polymorphism
-- Literal types fixed: `int` → `i32`, `float` → `f32`
+- Fixed literal types: `int` → `i32`, `float` → `f32`
+- No visibility modifiers (all functions importable)
+- Grad-of-grad not yet supported through conv2d/pool/while
