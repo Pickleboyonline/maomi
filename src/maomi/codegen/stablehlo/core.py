@@ -695,6 +695,8 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
             return self._gen_avg_pool(expr, env)
         if expr.callee in ("maximum", "minimum", "pow", "atan2"):
             return self._gen_two_arg_elementwise(expr, env)
+        if expr.callee in ("logaddexp", "hypot", "remainder", "copysign"):
+            return self._gen_compound_two_arg(expr, env)
         if expr.callee == "einsum":
             return self._gen_einsum(expr, env)
         if expr.callee in ("cumsum", "cumprod"):
@@ -749,6 +751,72 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
         var = self._fresh()
         self._emit(f"{var} = {op} {x}, {y} : {mlir_t}")
         return var
+
+    def _gen_compound_two_arg(self, expr: CallExpr, env: dict[str, str]) -> str:
+        """Emit StableHLO for compound two-arg ops: logaddexp, hypot, remainder, copysign."""
+        a = self._gen_expr(expr.args[0], env)
+        b = self._gen_expr(expr.args[1], env)
+        a_type = self._type_of(expr.args[0])
+        b_type = self._type_of(expr.args[1])
+        result_type = self._type_of(expr)
+        # Broadcast if needed
+        a = self._maybe_broadcast(a, a_type, result_type)
+        b = self._maybe_broadcast(b, b_type, result_type)
+        mlir_t = _mlir_type(result_type)
+
+        if expr.callee == "logaddexp":
+            # max(a,b) + log1p(exp(-abs(a-b)))
+            mx = self._fresh()
+            self._emit(f"{mx} = stablehlo.maximum {a}, {b} : {mlir_t}")
+            diff = self._fresh()
+            self._emit(f"{diff} = stablehlo.subtract {a}, {b} : {mlir_t}")
+            abs_diff = self._fresh()
+            self._emit(f"{abs_diff} = stablehlo.abs {diff} : {mlir_t}")
+            neg_abs = self._fresh()
+            self._emit(f"{neg_abs} = stablehlo.negate {abs_diff} : {mlir_t}")
+            exp_val = self._fresh()
+            self._emit(f"{exp_val} = stablehlo.exponential {neg_abs} : {mlir_t}")
+            log1p_val = self._fresh()
+            self._emit(f"{log1p_val} = stablehlo.log_plus_one {exp_val} : {mlir_t}")
+            result = self._fresh()
+            self._emit(f"{result} = stablehlo.add {mx}, {log1p_val} : {mlir_t}")
+            return result
+
+        elif expr.callee == "hypot":
+            # sqrt(a*a + b*b)
+            a_sq = self._fresh()
+            self._emit(f"{a_sq} = stablehlo.multiply {a}, {a} : {mlir_t}")
+            b_sq = self._fresh()
+            self._emit(f"{b_sq} = stablehlo.multiply {b}, {b} : {mlir_t}")
+            sum_sq = self._fresh()
+            self._emit(f"{sum_sq} = stablehlo.add {a_sq}, {b_sq} : {mlir_t}")
+            result = self._fresh()
+            self._emit(f"{result} = stablehlo.sqrt {sum_sq} : {mlir_t}")
+            return result
+
+        elif expr.callee == "remainder":
+            # a - b * floor(a/b)
+            div = self._fresh()
+            self._emit(f"{div} = stablehlo.divide {a}, {b} : {mlir_t}")
+            fl = self._fresh()
+            self._emit(f"{fl} = stablehlo.floor {div} : {mlir_t}")
+            prod = self._fresh()
+            self._emit(f"{prod} = stablehlo.multiply {b}, {fl} : {mlir_t}")
+            result = self._fresh()
+            self._emit(f"{result} = stablehlo.subtract {a}, {prod} : {mlir_t}")
+            return result
+
+        elif expr.callee == "copysign":
+            # abs(a) * sign(b)
+            abs_a = self._fresh()
+            self._emit(f"{abs_a} = stablehlo.abs {a} : {mlir_t}")
+            sign_b = self._fresh()
+            self._emit(f"{sign_b} = stablehlo.sign {b} : {mlir_t}")
+            result = self._fresh()
+            self._emit(f"{result} = stablehlo.multiply {abs_a}, {sign_b} : {mlir_t}")
+            return result
+
+        raise MaomiError(f"codegen: unknown compound two-arg op '{expr.callee}'", "<codegen>", 0, 0)
 
     def _gen_struct_elementwise(self, op: str, arg_ssa: str, stype: StructType) -> str:
         """Apply an elementwise builtin to each field of a struct."""
