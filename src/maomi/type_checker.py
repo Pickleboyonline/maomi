@@ -2946,6 +2946,63 @@ class TypeChecker:
                 return ScalarType("i32")
             return ArrayType("i32", tuple(logits_type.dims[:-1]))
 
+        # random.exponential(key, d1, d2, ...)
+        if callee == "random.exponential":
+            if len(args) < 2:
+                self._error(
+                    f"{callee} expects at least 2 arguments (key, dim...), got {len(args)}",
+                    span.line_start, span.col_start,
+                )
+                return None
+            key_type = self._infer(args[0], env)
+            if key_type is not None and key_type != KEY_TYPE:
+                self._error(f"{callee}: first argument must be Key (i32[4]), got {key_type}", args[0].span.line_start, args[0].span.col_start)
+                return None
+            dims: list[int] = []
+            for i in range(1, len(args)):
+                if not isinstance(args[i], IntLiteral):
+                    self._error(f"{callee}: dimension arguments must be integer literals", args[i].span.line_start, args[i].span.col_start)
+                    return None
+                if args[i].value < 1:
+                    self._error(f"{callee}: dimensions must be >= 1, got {args[i].value}", args[i].span.line_start, args[i].span.col_start)
+                    return None
+                dims.append(args[i].value)
+                self._infer(args[i], env)
+            return ArrayType("f32", tuple(dims))
+
+        # random.randint(key, low, high, d1, d2, ...)
+        if callee == "random.randint":
+            if len(args) < 4:
+                self._error(
+                    f"{callee} expects at least 4 arguments (key, low, high, dim...), got {len(args)}",
+                    span.line_start, span.col_start,
+                )
+                return None
+            key_type = self._infer(args[0], env)
+            if key_type is not None and key_type != KEY_TYPE:
+                self._error(f"{callee}: first argument must be Key (i32[4]), got {key_type}", args[0].span.line_start, args[0].span.col_start)
+                return None
+            for i in (1, 2):
+                t = self._infer(args[i], env)
+                param_name = "low" if i == 1 else "high"
+                if t is not None and t != I32:
+                    self._error(
+                        f"{callee}: {param_name} must be i32, got {t}",
+                        args[i].span.line_start, args[i].span.col_start,
+                    )
+                    return None
+            dims: list[int] = []
+            for i in range(3, len(args)):
+                if not isinstance(args[i], IntLiteral):
+                    self._error(f"{callee}: dimension arguments must be integer literals", args[i].span.line_start, args[i].span.col_start)
+                    return None
+                if args[i].value < 1:
+                    self._error(f"{callee}: dimensions must be >= 1, got {args[i].value}", args[i].span.line_start, args[i].span.col_start)
+                    return None
+                dims.append(args[i].value)
+                self._infer(args[i], env)
+            return ArrayType("i32", tuple(dims))
+
         # random.uniform / random.normal / random.truncated_normal
         if callee in ("random.uniform", "random.normal", "random.truncated_normal"):
             param_names = {
