@@ -158,3 +158,217 @@ class TestNnAD:
             fn main(x: f32[3]) -> f32[3] { grad(loss(x), x) }
         """)
         assert out is not None
+
+
+# -- nn.leaky_relu --
+
+class TestNnLeakyRelu:
+    def test_leaky_relu_1d(self):
+        out = compile_ok("""
+            from nn import { leaky_relu };
+            fn main(x: f32[4]) -> f32[4] { leaky_relu(x, 0.01) }
+        """)
+        assert "stablehlo.select" in out
+        assert "tensor<4xf32>" in out
+
+
+# -- nn.elu --
+
+class TestNnElu:
+    def test_elu_1d(self):
+        out = compile_ok("""
+            from nn import { elu };
+            fn main(x: f32[4]) -> f32[4] { elu(x, 1.0) }
+        """)
+        assert "stablehlo.select" in out
+        assert "stablehlo.exponential" in out
+
+
+# -- nn.selu --
+
+class TestNnSelu:
+    def test_selu_1d(self):
+        out = compile_ok("""
+            from nn import { selu };
+            fn main(x: f32[4]) -> f32[4] { selu(x) }
+        """)
+        assert "stablehlo.select" in out
+
+
+# -- nn.mish --
+
+class TestNnMish:
+    def test_mish_1d(self):
+        out = compile_ok("""
+            from nn import { mish };
+            fn main(x: f32[4]) -> f32[4] { mish(x) }
+        """)
+        assert out is not None
+
+
+# -- nn.layer_norm --
+
+class TestNnLayerNorm:
+    def test_layer_norm_1d(self):
+        out = compile_ok("""
+            from nn import { layer_norm };
+            fn main(x: f32[8]) -> f32[8] { layer_norm(x, axis=0) }
+        """)
+        assert out is not None
+
+
+# -- nn.celu --
+
+class TestNnCelu:
+    def test_celu_codegen(self):
+        out = compile_ok("""
+            from nn import { celu };
+            fn main(x: f32[4]) -> f32[4] { celu(x, 1.0) }
+        """)
+        assert out is not None
+        assert "stablehlo.select" in out
+        assert "stablehlo.exponential" in out
+
+    def test_celu_2d(self):
+        out = compile_ok("""
+            from nn import { celu };
+            fn main(x: f32[3, 4]) -> f32[3, 4] { celu(x, 0.5) }
+        """)
+        assert "tensor<3x4xf32>" in out
+
+
+# -- nn.hard_sigmoid --
+
+class TestNnHardSigmoid:
+    def test_hard_sigmoid_codegen(self):
+        out = compile_ok("""
+            from nn import { hard_sigmoid };
+            fn main(x: f32[4]) -> f32[4] { hard_sigmoid(x) }
+        """)
+        assert out is not None
+        assert "stablehlo.clamp" in out
+
+    def test_hard_sigmoid_2d(self):
+        out = compile_ok("""
+            from nn import { hard_sigmoid };
+            fn main(x: f32[3, 4]) -> f32[3, 4] { hard_sigmoid(x) }
+        """)
+        assert "tensor<3x4xf32>" in out
+
+
+# -- nn.hard_swish --
+
+class TestNnHardSwish:
+    def test_hard_swish_codegen(self):
+        out = compile_ok("""
+            from nn import { hard_swish };
+            fn main(x: f32[4]) -> f32[4] { hard_swish(x) }
+        """)
+        assert out is not None
+        assert "stablehlo.clamp" in out
+
+    def test_hard_swish_2d(self):
+        out = compile_ok("""
+            from nn import { hard_swish };
+            fn main(x: f32[3, 4]) -> f32[3, 4] { hard_swish(x) }
+        """)
+        assert "tensor<3x4xf32>" in out
+
+
+# -- nn.hard_tanh --
+
+class TestNnHardTanh:
+    def test_hard_tanh_codegen(self):
+        out = compile_ok("""
+            from nn import { hard_tanh };
+            fn main(x: f32[4]) -> f32[4] { hard_tanh(x) }
+        """)
+        assert out is not None
+        assert "stablehlo.clamp" in out
+
+    def test_hard_tanh_2d(self):
+        out = compile_ok("""
+            from nn import { hard_tanh };
+            fn main(x: f32[3, 4]) -> f32[3, 4] { hard_tanh(x) }
+        """)
+        assert "tensor<3x4xf32>" in out
+
+
+# -- nn.relu6 --
+
+class TestNnRelu6:
+    def test_relu6_codegen(self):
+        out = compile_ok("""
+            from nn import { relu6 };
+            fn main(x: f32[4]) -> f32[4] { relu6(x) }
+        """)
+        assert out is not None
+        assert "stablehlo.select" in out
+        assert "stablehlo.clamp" in out
+
+    def test_relu6_2d(self):
+        out = compile_ok("""
+            from nn import { relu6 };
+            fn main(x: f32[3, 4]) -> f32[3, 4] { relu6(x) }
+        """)
+        assert "tensor<3x4xf32>" in out
+
+
+# -- nn.log_sigmoid --
+
+class TestNnLogSigmoid:
+    def test_log_sigmoid_codegen(self):
+        out = compile_ok("""
+            from nn import { log_sigmoid };
+            fn main(x: f32[4]) -> f32[4] { log_sigmoid(x) }
+        """)
+        assert out is not None
+
+    def test_log_sigmoid_2d(self):
+        out = compile_ok("""
+            from nn import { log_sigmoid };
+            fn main(x: f32[3, 4]) -> f32[3, 4] { log_sigmoid(x) }
+        """)
+        assert "tensor<3x4xf32>" in out
+
+
+# -- nn.squareplus --
+
+class TestNnSquareplus:
+    def test_squareplus_codegen(self):
+        out = compile_ok("""
+            from nn import { squareplus };
+            fn main(x: f32[4]) -> f32[4] { squareplus(x, 4.0) }
+        """)
+        assert out is not None
+        assert "stablehlo.sqrt" in out
+
+    def test_squareplus_2d(self):
+        out = compile_ok("""
+            from nn import { squareplus };
+            fn main(x: f32[3, 4]) -> f32[3, 4] { squareplus(x, 1.0) }
+        """)
+        assert "tensor<3x4xf32>" in out
+
+
+# -- nn.batch_norm --
+
+class TestNnBatchNorm:
+    def test_batch_norm_codegen(self):
+        out = compile_ok("""
+            from nn import { batch_norm };
+            fn main(x: f32[4, 8], gamma: f32[4, 8], beta: f32[4, 8]) -> f32[4, 8] {
+                batch_norm(x, gamma, beta, axis=0)
+            }
+        """)
+        assert out is not None
+        assert "stablehlo.sqrt" in out
+
+    def test_batch_norm_axis1(self):
+        out = compile_ok("""
+            from nn import { batch_norm };
+            fn main(x: f32[4, 8], gamma: f32[4, 8], beta: f32[4, 8]) -> f32[4, 8] {
+                batch_norm(x, gamma, beta, axis=1)
+            }
+        """)
+        assert out is not None
