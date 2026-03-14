@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from .ast_nodes import (
     Program,
@@ -124,6 +125,15 @@ ARITHMETIC_OPS = {"+", "-", "*", "/", "**", "@"}
 def _try_negative_literal(expr) -> int | None:
     """If expr is UnaryOp('-', IntLiteral(n)), return -n. Otherwise None."""
     if isinstance(expr, UnaryOp) and expr.op == "-" and isinstance(expr.operand, IntLiteral):
+        return -expr.operand.value
+    return None
+
+
+def _try_float_literal(expr) -> float | None:
+    """Extract float value from FloatLiteral or UnaryOp('-', FloatLiteral). Otherwise None."""
+    if isinstance(expr, FloatLiteral):
+        return expr.value
+    if isinstance(expr, UnaryOp) and expr.op == "-" and isinstance(expr.operand, FloatLiteral):
         return -expr.operand.value
     return None
 
@@ -1344,6 +1354,68 @@ class TypeChecker:
                 self._infer(a, env)
                 dims_f.append(a.value)
             return ArrayType("f32", tuple(dims_f))
+
+        # arange(start, stop, step) — integer range
+        if expr.callee == "arange":
+            if len(expr.args) != 3:
+                self._error("arange expects exactly 3 arguments (start, stop, step)", expr.span.line_start, expr.span.col_start)
+                return None
+            for i, name in enumerate(["start", "stop", "step"]):
+                if not isinstance(expr.args[i], IntLiteral):
+                    self._error(f"arange {name} must be an integer literal", expr.span.line_start, expr.span.col_start)
+                    return None
+                self._infer(expr.args[i], env)
+            start_val = expr.args[0].value
+            stop_val = expr.args[1].value
+            step_val = expr.args[2].value
+            if step_val == 0:
+                self._error("arange step must not be zero", expr.span.line_start, expr.span.col_start)
+                return None
+            n = math.ceil((stop_val - start_val) / step_val)
+            if n <= 0:
+                self._error("arange produces empty range", expr.span.line_start, expr.span.col_start)
+                return None
+            return ArrayType("i32", (n,))
+
+        # linspace(start, stop, n) — linearly spaced floats
+        if expr.callee == "linspace":
+            if len(expr.args) != 3:
+                self._error("linspace expects exactly 3 arguments (start, stop, n)", expr.span.line_start, expr.span.col_start)
+                return None
+            start_f = _try_float_literal(expr.args[0])
+            if start_f is None:
+                self._error("linspace start must be a float literal", expr.span.line_start, expr.span.col_start)
+                return None
+            stop_f = _try_float_literal(expr.args[1])
+            if stop_f is None:
+                self._error("linspace stop must be a float literal", expr.span.line_start, expr.span.col_start)
+                return None
+            if not isinstance(expr.args[2], IntLiteral):
+                self._error("linspace n must be an integer literal", expr.span.line_start, expr.span.col_start)
+                return None
+            if expr.args[2].value <= 0:
+                self._error("linspace n must be positive", expr.span.line_start, expr.span.col_start)
+                return None
+            for a in expr.args:
+                self._infer(a, env)
+            return ArrayType("f32", (expr.args[2].value,))
+
+        # eye(n) / eye(n, m) — identity matrix
+        if expr.callee == "eye":
+            if len(expr.args) < 1 or len(expr.args) > 2:
+                self._error("eye expects 1 or 2 arguments", expr.span.line_start, expr.span.col_start)
+                return None
+            for i, a in enumerate(expr.args):
+                if not isinstance(a, IntLiteral):
+                    self._error("eye arguments must be integer literals", expr.span.line_start, expr.span.col_start)
+                    return None
+                if a.value <= 0:
+                    self._error("eye dimensions must be positive", expr.span.line_start, expr.span.col_start)
+                    return None
+                self._infer(a, env)
+            n_val = expr.args[0].value
+            m_val = expr.args[1].value if len(expr.args) == 2 else n_val
+            return ArrayType("f32", (n_val, m_val))
 
         # conv2d(input, kernel, ...) — 2D convolution
         if expr.callee == "conv2d":
