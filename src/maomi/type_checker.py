@@ -287,6 +287,10 @@ class TypeChecker:
         return self.errors
 
     def _register_struct(self, sd):
+        # Alias: reuse the canonical StructType for type identity
+        if sd.canonical_name and sd.canonical_name in self.struct_defs:
+            self.struct_defs[sd.name] = self.struct_defs[sd.canonical_name]
+            return
         fields: list[tuple[str, MaomiType]] = []
         for field_name, field_ta in sd.fields:
             t = self._resolve_type_annotation(field_ta)

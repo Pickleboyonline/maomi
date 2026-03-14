@@ -182,7 +182,7 @@ class TestResolver:
         path = _fixture("test.mao")
         tokens = Lexer(source, filename=path).tokenize()
         program = Parser(tokens, filename=path).parse()
-        with pytest.raises(MaomiError, match="no function 'nonexistent'"):
+        with pytest.raises(MaomiError, match="no function or struct 'nonexistent'"):
             resolve(program, path)
 
 
@@ -215,3 +215,217 @@ class TestModuleCompilation:
         assert "func.func @combined" in mlir
         assert "func.call @diamond_left.left_fn" in mlir
         assert "func.call @diamond_right.right_fn" in mlir
+
+
+# ---- Struct imports ----
+
+
+def _compile_source(source: str, filename: str = "test.mao") -> str:
+    """Compile source string through full pipeline. Returns MLIR."""
+    path = _fixture(filename)
+    tokens = Lexer(source, filename=path).tokenize()
+    program = Parser(tokens, filename=path).parse()
+    program = resolve(program, path)
+    checker = TypeChecker(filename=path)
+    errors = checker.check(program)
+    assert not errors, f"Type errors: {errors}"
+    program = transform_grad(program, checker.type_map)
+    return StableHLOCodegen(program, checker.type_map).generate()
+
+
+def _typecheck_source(source: str, filename: str = "test.mao"):
+    """Parse + resolve + typecheck. Returns (program, checker)."""
+    path = _fixture(filename)
+    tokens = Lexer(source, filename=path).tokenize()
+    program = Parser(tokens, filename=path).parse()
+    program = resolve(program, path)
+    checker = TypeChecker(filename=path)
+    errors = checker.check(program)
+    return program, checker, errors
+
+
+class TestStructImports:
+    """Tests for importing struct definitions across modules."""
+
+    def test_from_import_struct_as_param_and_return(self):
+        """from ... import { Point } — use as param type, return type, literal, field access."""
+        source = '''
+from with_struct import { Point };
+
+fn mirror(p: Point) -> Point {
+    Point { x: p.y, y: p.x }
+}
+'''
+        mlir = _compile_source(source)
+        assert "func.func @mirror" in mlir
+        assert "tuple" in mlir  # struct compiles to tuple
+
+    def test_from_import_struct_and_function(self):
+        """from ... import { Point, make_point } — mixed function + struct import."""
+        source = '''
+from with_struct import { Point, make_point };
+
+fn origin() -> Point {
+    make_point(0.0, 0.0)
+}
+'''
+        mlir = _compile_source(source)
+        assert "func.func @origin" in mlir
+        assert "func.call @make_point" in mlir
+
+    def test_qualified_import_struct(self):
+        """import ... as alias — use alias.Struct in type annotations and literals."""
+        source = '''
+import with_struct as ws;
+
+fn mirror(p: ws.Point) -> ws.Point {
+    ws.Point { x: p.y, y: p.x }
+}
+'''
+        mlir = _compile_source(source)
+        assert "func.func @mirror" in mlir
+        assert "tuple" in mlir
+
+    def test_qualified_import_struct_with_function(self):
+        """import ... as alias — call alias.fn() returning alias.Struct."""
+        source = '''
+import with_struct as ws;
+
+fn origin() -> ws.Point {
+    ws.make_point(0.0, 0.0)
+}
+'''
+        mlir = _compile_source(source)
+        assert "func.func @origin" in mlir
+        assert "func.call @ws.make_point" in mlir
+
+    def test_nested_struct_import(self):
+        """Import module with nested structs — both types available."""
+        source = '''
+from nested_struct import { Inner, Outer };
+
+fn get_val(o: Outer) -> f32 {
+    o.inner.val
+}
+'''
+        mlir = _compile_source(source)
+        assert "func.func @get_val" in mlir
+
+    def test_nested_struct_qualified(self):
+        """Qualified import of nested structs."""
+        source = '''
+import nested_struct as ns;
+
+fn wrap(v: f32) -> ns.Outer {
+    ns.Outer { inner: ns.Inner { val: v }, scale: 1.0 }
+}
+'''
+        mlir = _compile_source(source)
+        assert "func.func @wrap" in mlir
+
+    def test_struct_with_grad(self):
+        """Import struct, use in function with grad — struct-shaped gradients work."""
+        source = '''
+from with_struct import { Point };
+
+fn loss_and_grad(p: Point) -> Point {
+    let loss = p.x * p.x + p.y * p.y;
+    grad(loss, p)
+}
+'''
+        mlir = _compile_source(source)
+        assert "func.func @loss_and_grad" in mlir
+
+    def test_struct_field_access_imported(self):
+        """Import struct, use field access and with-expression."""
+        source = '''
+from with_struct import { Point };
+
+fn update_x(p: Point, new_x: f32) -> Point {
+    p with { x = new_x }
+}
+'''
+        mlir = _compile_source(source)
+        assert "func.func @update_x" in mlir
+
+    def test_collision_imported_vs_local(self):
+        """Imported struct conflicts with local struct → error."""
+        source = '''
+from with_struct import { Point };
+struct Point { a: f32, b: f32, c: f32 }
+fn f(p: Point) -> f32 { p.a }
+'''
+        path = _fixture("test.mao")
+        tokens = Lexer(source, filename=path).tokenize()
+        program = Parser(tokens, filename=path).parse()
+        with pytest.raises(MaomiError, match="conflicts with local struct"):
+            resolve(program, path)
+
+    def test_collision_two_modules(self):
+        """Two modules define same-named struct → error on selective import."""
+        source = '''
+from with_struct import { Point };
+from with_struct2 import { Point };
+fn f(p: Point) -> f32 { p.x }
+'''
+        path = _fixture("test.mao")
+        tokens = Lexer(source, filename=path).tokenize()
+        program = Parser(tokens, filename=path).parse()
+        with pytest.raises(MaomiError, match="imported from multiple modules"):
+            resolve(program, path)
+
+    def test_type_identity_selective_import(self):
+        """from ... import { Point } — Point and qualified name resolve to same type."""
+        source = '''
+from with_struct import { Point, make_point };
+
+fn use_it() -> Point {
+    make_point(1.0, 2.0)
+}
+'''
+        _, checker, errors = _typecheck_source(source)
+        assert not errors
+        # Both "Point" and "with_struct.Point" should resolve to same StructType
+        assert "Point" in checker.struct_defs
+        assert "with_struct.Point" in checker.struct_defs
+        assert checker.struct_defs["Point"] is checker.struct_defs["with_struct.Point"]
+
+    def test_resolver_merges_struct_defs(self):
+        """Resolver merges struct_defs from imported modules."""
+        source = '''
+from with_struct import { Point };
+fn f(p: Point) -> f32 { p.x }
+'''
+        path = _fixture("test.mao")
+        tokens = Lexer(source, filename=path).tokenize()
+        program = Parser(tokens, filename=path).parse()
+        resolved = resolve(program, path)
+        struct_names = {sd.name for sd in resolved.struct_defs}
+        assert "with_struct.Point" in struct_names
+        assert "Point" in struct_names  # alias
+
+    def test_qualified_struct_no_unqualified_leak(self):
+        """import ... as alias — struct only available qualified, not bare name."""
+        source = '''
+import with_struct as ws;
+fn f(p: Point) -> f32 { p.x }
+'''
+        _, _, errors = _typecheck_source(source)
+        assert len(errors) > 0  # "Point" not found, only "ws.Point"
+
+    def test_parser_dotted_type_annotation(self):
+        """Parser handles dotted type annotations like ws.Point."""
+        tokens = Lexer("fn f(p: ws.Point) -> ws.Point { p }").tokenize()
+        program = Parser(tokens).parse()
+        fn = program.functions[0]
+        assert fn.params[0].type_annotation.base == "ws.Point"
+        assert fn.return_type.base == "ws.Point"
+
+    def test_parser_dotted_struct_literal(self):
+        """Parser handles dotted struct literals like ws.Point { x: 1.0 }."""
+        from maomi.ast_nodes import StructLiteral
+        tokens = Lexer("fn f() -> f32 { ws.Point { x: 1.0, y: 2.0 } }").tokenize()
+        program = Parser(tokens).parse()
+        body_expr = program.functions[0].body.expr
+        assert isinstance(body_expr, StructLiteral)
+        assert body_expr.name == "ws.Point"
