@@ -870,6 +870,23 @@ COMPLEX: dict[str, ComplexBuiltin] = {
         "Numerically stable log-sum-exp. `logsumexp(x)` over all elements, `logsumexp(x, axis=1)` along an axis, `logsumexp(x, axis=1, keepdims=true)` to keep reduced dim as size 1.",
         (["x", "axis", "keepdims"], ["f32[...]", "int", "bool"], "f32"),
     ),
+    "prod": ComplexBuiltin(
+        "prod", "reduction", "has_rule",
+        "Compute the product. `prod(x)` over all elements, `prod(x, axis=1)` along an axis, `prod(x, axis=1, keepdims=true)` to keep reduced dim as size 1.",
+        (["x", "axis", "keepdims"], ["f32[...]", "int", "bool"], "f32"),
+    ),
+
+    # Boolean reductions
+    "all": ComplexBuiltin(
+        "all", "bool_reduction", "zero_grad",
+        "Logical AND reduction. `all(x)` over all elements, `all(x, axis=1)` along an axis. Input must be bool.",
+        (["x", "axis"], ["bool[...]", "int"], "bool"),
+    ),
+    "any": ComplexBuiltin(
+        "any", "bool_reduction", "zero_grad",
+        "Logical OR reduction. `any(x)` over all elements, `any(x, axis=1)` along an axis. Input must be bool.",
+        (["x", "axis"], ["bool[...]", "int"], "bool"),
+    ),
 
     # Argmax/argmin
     "argmax": ComplexBuiltin(

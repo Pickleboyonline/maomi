@@ -1259,8 +1259,12 @@ class TypeChecker:
             return self._check_rng_call(expr, env)
 
         # sum/mean/max/min — reduction with optional axis
-        if expr.callee in ("sum", "mean", "max", "min", "logsumexp"):
+        if expr.callee in ("sum", "mean", "max", "min", "logsumexp", "prod"):
             return self._check_reduction(expr, env)
+
+        # all/any — boolean reduction
+        if expr.callee in ("all", "any"):
+            return self._check_bool_reduction(expr, env)
 
         # argmax/argmin — returns i32 index
         if expr.callee in ("argmax", "argmin"):
@@ -1558,6 +1562,72 @@ class TypeChecker:
         if len(new_dims) == 0:
             return ScalarType(arg_type.base)
         return ArrayType(arg_type.base, new_dims)
+
+    def _check_bool_reduction(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
+        """Check all(x) / all(x, axis) / any(x) / any(x, axis) — boolean reductions."""
+        self._resolve_named_args(expr, ["x", "axis"])
+
+        if len(expr.args) < 1 or len(expr.args) > 2:
+            self._error(
+                f"{expr.callee} expects 1 or 2 arguments",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        arg_type = self._infer(expr.args[0], env)
+        if arg_type is None:
+            return None
+
+        # Input must be bool
+        if isinstance(arg_type, ScalarType):
+            if arg_type.base != "bool":
+                self._error(
+                    f"{expr.callee} requires a bool argument, got {arg_type.base}",
+                    expr.span.line_start, expr.span.col_start,
+                )
+                return None
+            if len(expr.args) >= 2:
+                self._error(
+                    f"{expr.callee} with axis requires an array argument",
+                    expr.span.line_start, expr.span.col_start,
+                )
+                return None
+            return arg_type
+
+        if not isinstance(arg_type, ArrayType) or arg_type.base != "bool":
+            self._error(
+                f"{expr.callee} requires a bool array argument, got {arg_type}",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        if len(expr.args) == 1:
+            # Reduce all dims -> bool scalar
+            return ScalarType("bool")
+
+        # Axis-specific reduction
+        axis_arg = expr.args[1]
+        self._infer(axis_arg, env)
+        if not isinstance(axis_arg, IntLiteral):
+            self._error(
+                f"{expr.callee} axis must be an integer literal",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        axis = axis_arg.value
+        ndim = len(arg_type.dims)
+        if axis < 0 or axis >= ndim:
+            self._error(
+                f"{expr.callee} axis {axis} out of range for {ndim}D array",
+                expr.span.line_start, expr.span.col_start,
+            )
+            return None
+
+        new_dims = tuple(d for i, d in enumerate(arg_type.dims) if i != axis)
+        if len(new_dims) == 0:
+            return ScalarType("bool")
+        return ArrayType("bool", new_dims)
 
     def _check_argmax(self, expr: CallExpr, env: TypeEnv) -> MaomiType | None:
         """Check argmax(x) or argmax(x, axis) — returns i32 indices."""
