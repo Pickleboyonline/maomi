@@ -36,7 +36,8 @@ _cache: dict[str, AnalysisResult] = {}
 
 def _local_functions(program: Program) -> list[FnDef]:
     """Return only functions defined in the current file (not imported)."""
-    return [fn for fn in program.functions if "." not in fn.name]
+    return [fn for fn in program.functions
+            if "." not in fn.name and fn.source_file is None]
 
 
 # ---------------------------------------------------------------------------

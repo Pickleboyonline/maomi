@@ -6,13 +6,15 @@ from pygls.lsp.server import LanguageServer
 from lsprotocol import types
 
 from ..ast_nodes import Block, LetStmt, ExprStmt, ScanExpr, MapExpr, IfExpr
-from ..types import MaomiType, StructType
+from ..types import MaomiType, ScalarType, ArrayType, StructType, WildcardArrayType, TypeVar, FLOAT_BASES
 from ._core import server, _cache, AnalysisResult, _local_functions
 from ._ast_utils import _span_contains, _find_node_at
 from ._builtin_data import (
     _KEYWORDS, _TYPE_NAMES, _BUILTINS, _BUILTIN_SET,
-    _BUILTIN_NAMESPACES, _BUILTIN_DOCS, _BUILTIN_CATEGORIES,
+    _BUILTIN_NAMESPACES, _BUILTIN_DOCS, _BUILTIN_CATEGORIES, _EW_NAMES,
+    _BUILTIN_SIGNATURES,
 )
+from ..builtins import COMPLEX as _CX_REGISTRY
 
 logger = logging.getLogger("maomi-lsp")
 
@@ -63,12 +65,12 @@ def completions(ls: LanguageServer, params: types.CompletionParams):
                 ))
             return types.CompletionList(is_incomplete=False, items=items)
 
-        return _complete_dot(result, params.position)
+        return _complete_dot(result, params.position, prefix)
 
     return _complete_general(result, params.position)
 
 
-def _complete_dot(result: AnalysisResult | None, position: types.Position):
+def _complete_dot(result: AnalysisResult | None, position: types.Position, prefix: str = ""):
     if not result or not result.program:
         return None
 
@@ -77,23 +79,261 @@ def _complete_dot(result: AnalysisResult | None, position: types.Position):
     # ends at position.character - 1 (0-indexed) = position.character (1-indexed)
     col = position.character
 
+    typ: MaomiType | None = None
+
+    # Try AST-based lookup first (works when the dot is part of a parsed expression)
     for fn in _local_functions(result.program):
         node = _find_node_at(fn, line, col)
         if node is not None:
             typ = result.type_map.get(id(node))
-            if isinstance(typ, StructType):
-                return types.CompletionList(
-                    is_incomplete=False,
-                    items=[
-                        types.CompletionItem(
-                            label=fname,
-                            kind=types.CompletionItemKind.Field,
-                            detail=str(ftype),
-                        )
-                        for fname, ftype in typ.fields
-                    ],
-                )
+            break
+
+    # Fallback: look up the identifier in scope by name
+    # (needed when the line doesn't parse, e.g. user just typed "a.")
+    if typ is None and prefix:
+        # Try precise scope lookup first
+        for var_name, var_type in _vars_in_scope(result, position):
+            if var_name == prefix and var_type is not None:
+                typ = var_type
+                break
+        # If scope lookup fails (cursor outside cached function span due to
+        # added lines), scan all function parameters from fn_table
+        if typ is None:
+            for fn in result.program.functions:
+                sig = result.fn_table.get(fn.name)
+                if sig:
+                    for pname, ptype in zip(sig.param_names, sig.param_types):
+                        if pname == prefix:
+                            typ = ptype
+                            break
+                if typ is not None:
+                    break
+
+    if typ is None:
+        return None
+
+    items: list[types.CompletionItem] = []
+
+    # Struct fields (sorted first)
+    if isinstance(typ, StructType):
+        for fname, ftype in typ.fields:
+            items.append(types.CompletionItem(
+                label=fname,
+                kind=types.CompletionItemKind.Field,
+                detail=str(ftype),
+                sort_text=f"0_{fname}",
+            ))
+
+    # Pipe-compatible functions
+    items.extend(_pipe_completions(result, typ, position))
+
+    if items:
+        return types.CompletionList(is_incomplete=False, items=items)
     return None
+
+
+def _is_pipe_compatible(
+    expr_type: MaomiType, fn_name: str, sig: "FnSignature",
+) -> bool:
+    """Check if a function's first parameter is compatible with expr_type for pipe completion."""
+    if not sig.param_types:
+        return False
+    first = sig.param_types[0]
+
+    # Generic functions (TypeVar first param) match anything
+    if isinstance(first, TypeVar):
+        return True
+
+    # Exact type match
+    if first == expr_type:
+        return True
+
+    # Elementwise builtins accept any float scalar/array/struct
+    if fn_name in _EW_NAMES:
+        if isinstance(expr_type, (ScalarType, ArrayType)):
+            return expr_type.base in FLOAT_BASES
+        if isinstance(expr_type, WildcardArrayType):
+            return expr_type.base in FLOAT_BASES
+        if isinstance(expr_type, StructType):
+            return True
+        return False
+
+    # Extract base types for family matching
+    expr_base = None
+    if isinstance(expr_type, (ScalarType, ArrayType)):
+        expr_base = expr_type.base
+    elif isinstance(expr_type, WildcardArrayType):
+        expr_base = expr_type.base
+
+    first_base = None
+    if isinstance(first, (ScalarType, ArrayType)):
+        first_base = first.base
+    elif isinstance(first, WildcardArrayType):
+        first_base = first.base
+
+    # Same base family match (f32 param matches f32[3,3] expr)
+    if first_base and expr_base and first_base == expr_base:
+        return True
+
+    # Struct name match
+    if isinstance(expr_type, StructType) and isinstance(first, StructType):
+        return first.name == expr_type.name
+
+    return False
+
+
+def _is_complex_builtin_pipe_compatible(
+    expr_type: MaomiType, category: str,
+) -> bool:
+    """Check if a complex builtin's category is compatible with expr_type for pipe completion."""
+    # Categories that operate on arrays/scalars of any float type
+    _FLOAT_ARRAY_CATEGORIES = {
+        "reduction", "shape", "array_manip", "sorting", "cumulative",
+        "two_arg_elementwise", "clip", "stop_grad", "where",
+    }
+    # Categories that require specific shapes
+    _ARRAY_ONLY_CATEGORIES = {"conv_pool", "linalg"}
+
+    if category in _FLOAT_ARRAY_CATEGORIES:
+        if isinstance(expr_type, (ScalarType, ArrayType)):
+            return expr_type.base in FLOAT_BASES
+        if isinstance(expr_type, WildcardArrayType):
+            return expr_type.base in FLOAT_BASES
+        if isinstance(expr_type, StructType):
+            # reductions like sum work on structs, shape ops generally don't
+            return category in {"reduction", "stop_grad"}
+        return False
+
+    if category in _ARRAY_ONLY_CATEGORIES:
+        if isinstance(expr_type, ArrayType):
+            return expr_type.base in FLOAT_BASES
+        return False
+
+    if category == "argmax":
+        # argmax/argmin take arrays
+        if isinstance(expr_type, ArrayType):
+            return expr_type.base in FLOAT_BASES
+        return False
+
+    if category == "bool_reduction":
+        # all/any take bool arrays
+        if isinstance(expr_type, (ScalarType, ArrayType)):
+            return expr_type.base == "bool"
+        return False
+
+    return False
+
+
+def _pipe_completions(
+    result: AnalysisResult, expr_type: MaomiType, position: types.Position,
+) -> list[types.CompletionItem]:
+    """Build completion items for functions compatible with piping from expr_type."""
+    items: list[types.CompletionItem] = []
+    dot_col = position.character - 1  # 0-indexed position of the '.'
+    dot_range = types.Range(
+        start=types.Position(line=position.line, character=dot_col),
+        end=types.Position(line=position.line, character=dot_col + 1),
+    )
+
+    seen: set[str] = set()
+
+    fn_docs: dict[str, str] = {}
+    if result.program:
+        fn_docs = {f.name: f.doc for f in result.program.functions if f.doc}
+
+    def _make_item(name: str, detail: str, doc_text: str | None) -> types.CompletionItem:
+        return types.CompletionItem(
+            label=name,
+            kind=types.CompletionItemKind.Function,
+            detail=detail,
+            documentation=types.MarkupContent(
+                kind=types.MarkupKind.Markdown, value=doc_text,
+            ) if doc_text else None,
+            text_edit=types.TextEdit(range=dot_range, new_text=f" |> {name}($0)"),
+            insert_text_format=types.InsertTextFormat.Snippet,
+            sort_text=f"1_{name}",
+        )
+
+    # 1) Functions in fn_table (elementwise builtins + user functions)
+    if result.fn_table:
+        for name, sig in result.fn_table.items():
+            if "." in name or "$" in name:
+                continue
+            if not _is_pipe_compatible(expr_type, name, sig):
+                continue
+
+            seen.add(name)
+
+            if name in _BUILTIN_SET:
+                detail = _BUILTIN_CATEGORIES.get(name, "builtin")
+            else:
+                params = ", ".join(
+                    f"{n}: {t}" for n, t in zip(sig.param_names, sig.param_types)
+                )
+                detail = f"({params}) -> {sig.return_type}"
+
+            doc_text = _BUILTIN_DOCS.get(name) or fn_docs.get(name)
+            items.append(_make_item(name, detail, doc_text))
+
+    # 2) Complex builtins not in fn_table — use category-based matching
+    for name, b in _CX_REGISTRY.items():
+        if name in seen or "." in name:
+            continue
+        if not _is_complex_builtin_pipe_compatible(expr_type, b.category):
+            continue
+
+        detail = _BUILTIN_CATEGORIES.get(name, "builtin")
+        doc_text = _BUILTIN_DOCS.get(name)
+        items.append(_make_item(name, detail, doc_text))
+
+    # 3) Generic user functions not in fn_table (have symbolic dims / type vars)
+    if result.program:
+        for fn in result.program.functions:
+            if fn.name in seen or "." in fn.name or fn.source_file is not None:
+                continue
+            if not fn.params:
+                continue
+            first_ann = fn.params[0].type_annotation
+            if _annotation_matches_type(first_ann, expr_type, result.struct_defs):
+                seen.add(fn.name)
+                ann_strs = [f"{p.name}: {_annotation_str(p.type_annotation)}" for p in fn.params]
+                detail = f"({', '.join(ann_strs)}) -> {_annotation_str(fn.return_type)}"
+                items.append(_make_item(fn.name, detail, fn.doc))
+
+    return items
+
+
+def _annotation_str(ann) -> str:
+    """Format a TypeAnnotation as a readable string."""
+    if ann.dims is None:
+        return ann.base
+    dims = ", ".join(str(d.value) for d in ann.dims)
+    return f"{ann.base}[{dims}]"
+
+
+def _annotation_matches_type(ann, expr_type: MaomiType, struct_defs: dict) -> bool:
+    """Check if a type annotation's base matches the expression type (for pipe completion)."""
+    base = ann.base
+
+    # Struct name match
+    if isinstance(expr_type, StructType):
+        return base == expr_type.name
+
+    # Scalar/array base match
+    expr_base = None
+    if isinstance(expr_type, (ScalarType, ArrayType)):
+        expr_base = expr_type.base
+    elif isinstance(expr_type, WildcardArrayType):
+        expr_base = expr_type.base
+
+    if expr_base and base == expr_base:
+        return True
+
+    # Single uppercase letter = type variable, matches anything
+    if len(base) == 1 and base.isupper():
+        return True
+
+    return False
 
 
 def _complete_module(result: AnalysisResult | None, module_name: str):

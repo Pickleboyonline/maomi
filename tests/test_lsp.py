@@ -301,6 +301,126 @@ fn f(p: Point) -> f32 { p.x }
         labels = {item.label for item in comp.items}
         assert "x" in labels
         assert "y" in labels
+
+    def test_pipe_completion_array(self):
+        """Dot on a float array suggests pipe-compatible functions."""
+        source = "fn f(x: f32[3, 3]) -> f32 { sum(x) }\n"
+        _, result = validate(source, "<test>")
+        # "fn f(x: f32[3, 3]) -> f32 { sum(x) }"
+        # x is at character 29, dot would be at character 30
+        # But we need x. in parsed code. Use a simpler approach:
+        # Position the dot after 'x' in the body — line 0, character 30
+        # Actually, the source that was parsed successfully has x at body start.
+        # Let's use a source where we can find x cleanly.
+        source2 = "fn f(x: f32[3, 3]) -> f32 { x }\n"
+        _, result2 = validate(source2, "<test>")
+        # "fn f(x: f32[3, 3]) -> f32 { x }"
+        # 'x' in body is at line 0, character 29 (0-indexed)
+        # dot would be at character 30
+        pos = types.Position(line=0, character=30)
+        comp = _complete_dot(result2, pos)
+        assert comp is not None
+        labels = {item.label for item in comp.items}
+        # Should include reductions and elementwise builtins
+        assert "sum" in labels
+        assert "mean" in labels
+        assert "exp" in labels
+        assert "transpose" in labels
+        # Should NOT include random.* or construction builtins
+        assert "random.key" not in labels
+        assert "iota" not in labels
+
+    def test_pipe_completion_scalar(self):
+        """Dot on a float scalar suggests elementwise builtins."""
+        source = "fn f(x: f32) -> f32 { x }\n"
+        _, result = validate(source, "<test>")
+        # 'x' in body at line 0, char 22; dot at char 23
+        pos = types.Position(line=0, character=23)
+        comp = _complete_dot(result, pos)
+        assert comp is not None
+        labels = {item.label for item in comp.items}
+        assert "exp" in labels
+        assert "sqrt" in labels
+        assert "relu" in labels
+
+    def test_pipe_completion_struct_fields_and_functions(self):
+        """Dot on a struct shows both fields and pipe-compatible functions."""
+        source = "struct Point { x: f32, y: f32 }\nfn f(p: Point) -> f32 { p.x }\n"
+        _, result = validate(source, "<test>")
+        # 'p' in body at line 1; "fn f(p: Point) -> f32 { p.x }"
+        # 'p' is at char 25, dot at char 26
+        pos = types.Position(line=1, character=26)
+        comp = _complete_dot(result, pos)
+        assert comp is not None
+
+        fields = [i for i in comp.items if i.kind == types.CompletionItemKind.Field]
+        functions = [i for i in comp.items if i.kind == types.CompletionItemKind.Function]
+        field_labels = {i.label for i in fields}
+        fn_labels = {i.label for i in functions}
+
+        # Fields should be present
+        assert "x" in field_labels
+        assert "y" in field_labels
+        # Elementwise builtins work on structs
+        assert "exp" in fn_labels
+        assert "sqrt" in fn_labels
+
+    def test_pipe_completion_text_edit(self):
+        """Selected pipe completion replaces the dot with |> syntax."""
+        source = "fn f(x: f32[3]) -> f32 { x }\n"
+        _, result = validate(source, "<test>")
+        # x at char 26, dot at char 27
+        pos = types.Position(line=0, character=27)
+        comp = _complete_dot(result, pos)
+        assert comp is not None
+
+        # Find the 'sum' completion
+        sum_item = next(i for i in comp.items if i.label == "sum")
+        assert sum_item.text_edit is not None
+        assert sum_item.text_edit.new_text.startswith(" |> sum(")
+        assert sum_item.insert_text_format == types.InsertTextFormat.Snippet
+        # The range should cover exactly the dot character
+        assert sum_item.text_edit.range.start.character == 26
+        assert sum_item.text_edit.range.end.character == 27
+
+    def test_pipe_completion_sort_order(self):
+        """Struct fields sort before pipe functions."""
+        source = "struct S { val: f32 }\nfn f(s: S) -> f32 { s.val }\n"
+        _, result = validate(source, "<test>")
+        # s at char 21, dot at char 22 on line 1
+        pos = types.Position(line=1, character=22)
+        comp = _complete_dot(result, pos)
+        assert comp is not None
+
+        fields = [i for i in comp.items if i.kind == types.CompletionItemKind.Field]
+        functions = [i for i in comp.items if i.kind == types.CompletionItemKind.Function]
+        # Fields have sort_text starting with "0_", functions with "1_"
+        for f in fields:
+            assert f.sort_text.startswith("0_")
+        for f in functions:
+            assert f.sort_text.startswith("1_")
+
+    def test_pipe_completion_user_function(self):
+        """User-defined functions appear in pipe completion when first param matches."""
+        source = "fn double(x: f32[3]) -> f32[3] { x }\nfn f(y: f32[3]) -> f32[3] { y }\n"
+        _, result = validate(source, "<test>")
+        # y in body at line 1: "fn f(y: f32[3]) -> f32[3] { y }"
+        # y at char 28, dot at char 29
+        pos = types.Position(line=1, character=29)
+        comp = _complete_dot(result, pos)
+        assert comp is not None
+        labels = {item.label for item in comp.items}
+        assert "double" in labels
+
+    def test_pipe_completion_excludes_monomorphized(self):
+        """Monomorphized function copies (name$...) should not appear."""
+        source = "fn f(x: f32[3]) -> f32 { sum(x) }\n"
+        _, result = validate(source, "<test>")
+        pos = types.Position(line=0, character=27)
+        comp = _complete_dot(result, pos)
+        assert comp is not None
+        for item in comp.items:
+            assert "$" not in item.label
 # ---------------------------------------------------------------------------
 # Go to Definition tests
 # ---------------------------------------------------------------------------

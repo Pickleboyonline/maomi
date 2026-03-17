@@ -77,3 +77,7 @@ for _name, _b in _CX_REGISTRY.items():
     _BUILTIN_CATEGORIES[_name] = _COMPLEX_CATEGORY_LABELS.get(_b.category, "builtin")
 
 _BUILTIN_CATEGORIES["config"] = "config"
+
+# Elementwise builtin names — used by pipe completion to know which builtins
+# accept any float scalar/array/struct despite being registered as ScalarType("f32")
+_EW_NAMES = set(_EW_REGISTRY.keys())
