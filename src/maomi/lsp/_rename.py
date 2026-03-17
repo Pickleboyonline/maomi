@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from pygls.lsp.server import LanguageServer
 from lsprotocol import types
 
@@ -11,6 +13,8 @@ from ..ast_nodes import (
 from ._core import server, _cache, AnalysisResult, _local_functions
 from ._ast_utils import _span_contains, _find_node_at, _children_of, classify_symbol
 from ._builtin_data import _BUILTIN_SET
+
+logger = logging.getLogger("maomi-lsp")
 
 
 def _rename_name_range(name: str, span, source_lines: list[str]) -> types.Range | None:
@@ -191,6 +195,8 @@ def rename_at(
 
 @server.feature(types.TEXT_DOCUMENT_PREPARE_RENAME)
 def prepare_rename(ls: LanguageServer, params: types.PrepareRenameParams):
+    logger.debug("prepare_rename: %s at %d:%d", params.text_document.uri,
+                 params.position.line, params.position.character)
     uri = params.text_document.uri
     result = _cache.get(uri)
     if not result or not result.program:
@@ -203,6 +209,8 @@ def prepare_rename(ls: LanguageServer, params: types.PrepareRenameParams):
 
 @server.feature(types.TEXT_DOCUMENT_RENAME)
 def rename(ls: LanguageServer, params: types.RenameParams):
+    logger.debug("rename: %s at %d:%d to %s", params.text_document.uri,
+                 params.position.line, params.position.character, params.new_name)
     uri = params.text_document.uri
     result = _cache.get(uri)
     if not result or not result.program:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from pygls.lsp.server import LanguageServer
 from lsprotocol import types
 
@@ -12,12 +14,16 @@ from ._builtin_data import (
     _BUILTIN_NAMESPACES, _BUILTIN_DOCS, _BUILTIN_CATEGORIES,
 )
 
+logger = logging.getLogger("maomi-lsp")
+
 
 @server.feature(
     types.TEXT_DOCUMENT_COMPLETION,
     types.CompletionOptions(trigger_characters=["."]),
 )
 def completions(ls: LanguageServer, params: types.CompletionParams):
+    logger.debug("completions: %s at %d:%d", params.text_document.uri,
+                 params.position.line, params.position.character)
     uri = params.text_document.uri
     result = _cache.get(uri)
     doc = ls.workspace.get_text_document(uri)

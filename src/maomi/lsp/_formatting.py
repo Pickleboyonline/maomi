@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import logging
+
 from pygls.lsp.server import LanguageServer
 from lsprotocol import types
 
 from ._core import server, _cache
+
+logger = logging.getLogger("maomi-lsp")
 
 
 def _compute_brace_depth(lines: list[str], target_line: int) -> int:
@@ -197,6 +201,8 @@ def _format_document(source: str) -> list[types.TextEdit]:
 def on_type_formatting(
     ls: LanguageServer, params: types.DocumentOnTypeFormattingParams
 ):
+    logger.debug("on_type_formatting: %s ch=%r at %d:%d", params.text_document.uri,
+                 params.ch, params.position.line, params.position.character)
     uri = params.text_document.uri
     doc = ls.workspace.get_text_document(uri)
     line = params.position.line  # already 0-indexed
@@ -221,6 +227,7 @@ def matching_brace(ls: LanguageServer, params):
 def document_formatting(
     ls: LanguageServer, params: types.DocumentFormattingParams
 ):
+    logger.debug("document_formatting: %s", params.text_document.uri)
     uri = params.text_document.uri
     doc = ls.workspace.get_text_document(uri)
     return _format_document(doc.source)
