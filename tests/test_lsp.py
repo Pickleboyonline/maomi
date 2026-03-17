@@ -1122,9 +1122,10 @@ fn f(p: Point) -> f32 { p.x }
         tokens = []
         _sem_collect_tokens(result.program.functions[0], tokens, set())
         kw_tokens = [t for t in tokens if t[3] == _ST_KEYWORD]
-        assert len(kw_tokens) >= 1
-        # "let" has length 3
-        assert kw_tokens[0][2] == 3
+        assert len(kw_tokens) >= 2  # "fn" + "let"
+        # "fn" has length 2, "let" has length 3
+        assert kw_tokens[0][2] == 2  # fn
+        assert kw_tokens[1][2] == 3  # let
 
     def test_let_variable_declaration(self):
         source = """fn f(x: f32) -> f32 {

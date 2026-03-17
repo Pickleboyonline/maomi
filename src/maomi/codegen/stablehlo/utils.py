@@ -25,7 +25,7 @@ from ...ast_nodes import (
     _ReduceSum,
     Expr,
 )
-from ...types import MaomiType, ScalarType, ArrayType, StructType
+from ...types import MaomiType, ScalarType, ArrayType, StructType, StructArrayType
 from ...errors import MaomiError
 
 from ...builtins import ELEMENTWISE as _EW_REGISTRY
@@ -135,6 +135,20 @@ def _mlir_type(t: MaomiType) -> str:
         return f"tensor<{shape}x{_MLIR_ETYPE[t.base]}>"
     if isinstance(t, StructType):
         field_types = ", ".join(_mlir_type(ft) for _, ft in t.fields)
+        return f"tuple<{field_types}>"
+    if isinstance(t, StructArrayType):
+        # SoA: each field gets batch dims prepended
+        def _batched_field_mlir(ft: MaomiType, batch_dims: tuple) -> str:
+            if isinstance(ft, ScalarType):
+                shape = "x".join(str(d) for d in batch_dims)
+                return f"tensor<{shape}x{_MLIR_ETYPE[ft.base]}>"
+            if isinstance(ft, ArrayType):
+                shape = "x".join(str(d) for d in batch_dims + ft.dims)
+                return f"tensor<{shape}x{_MLIR_ETYPE[ft.base]}>"
+            if isinstance(ft, StructType):
+                return _mlir_type(StructArrayType(ft, batch_dims))
+            return _mlir_type(ft)
+        field_types = ", ".join(_batched_field_mlir(ft, t.dims) for _, ft in t.struct_type.fields)
         return f"tuple<{field_types}>"
     raise MaomiError("codegen: unknown type", "<codegen>", 0, 0)
 

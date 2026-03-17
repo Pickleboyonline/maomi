@@ -12,12 +12,46 @@ from ...ast_nodes import (
     _WhileGrad,
     _FoldGrad,
 )
-from ...types import MaomiType, ScalarType, ArrayType
+from ...types import MaomiType, ScalarType, ArrayType, StructType, StructArrayType
 from ...errors import MaomiError
 from .utils import _mlir_type, _MLIR_ETYPE, _block_references_var
 
 
 class LoopCodegenMixin:
+
+    def _slice_struct_array_element(self, seq_ssa: str, idx_ssa: str,
+                                       sa_type: StructArrayType) -> str:
+        """Slice a single element from a StructArrayType at a dynamic index.
+        Extracts each field, slices axis 0, reconstructs the struct."""
+        elem_struct = sa_type.struct_type
+        field_results = []
+
+        for i, (fname, ftype) in enumerate(elem_struct.fields):
+            # Compute batched field type (field with leading dims)
+            if isinstance(ftype, ScalarType):
+                batched = ArrayType(ftype.base, sa_type.dims)
+            elif isinstance(ftype, ArrayType):
+                batched = ArrayType(ftype.base, sa_type.dims + ftype.dims)
+            else:
+                raise MaomiError("codegen: unsupported field type in struct array", "<codegen>", 0, 0)
+
+            # Extract field from SoA tuple
+            field_ssa = self._fresh()
+            self._emit(
+                f"{field_ssa} = stablehlo.get_tuple_element {seq_ssa}[{i}] "
+                f": ({_mlir_type(sa_type)}) -> {_mlir_type(batched)}"
+            )
+
+            # Slice this field using existing _slice_element
+            sliced = self._slice_element(field_ssa, idx_ssa, batched, ftype, iter_axis=0)
+            field_results.append(sliced)
+
+        # Reconstruct struct from sliced fields
+        vals_str = ", ".join(field_results)
+        result_mlir = _mlir_type(elem_struct)
+        var = self._fresh()
+        self._emit(f"{var} = stablehlo.tuple {vals_str} : {result_mlir}")
+        return var
 
     def _slice_element(self, seq_ssa: str, idx_ssa: str, seq_type: ArrayType, elem_type: MaomiType, iter_axis: int = 0) -> str:
         """Slice a single element from a 1D+ array at a dynamic index along iter_axis."""
@@ -436,40 +470,105 @@ class LoopCodegenMixin:
         seq_types = [self._type_of(s) for s in expr.sequences]
 
         for st in seq_types:
-            if not isinstance(st, ArrayType):
+            if not isinstance(st, (ArrayType, StructArrayType)):
                 raise MaomiError("codegen: fold sequence must be array", "<codegen>", 0, 0)
 
         bd = self._batch_depth
         iter_axis = bd
 
-        seq_len = seq_types[0].dims[iter_axis]
+        # Get sequence length from first sequence
+        first_st = seq_types[0]
+        if isinstance(first_st, StructArrayType):
+            seq_len = first_st.dims[0]
+        else:
+            seq_len = first_st.dims[iter_axis]
         if isinstance(seq_len, str):
             raise MaomiError(f"codegen: fold requires concrete sequence length, got '{seq_len}'", "<codegen>", 0, 0)
 
         elem_types: list[MaomiType] = []
         for st in seq_types:
-            remaining = st.dims[:iter_axis] + st.dims[iter_axis + 1:]
-            if len(remaining) == 0:
-                elem_types.append(ScalarType(st.base))
+            if isinstance(st, StructArrayType):
+                if len(st.dims) == 1:
+                    elem_types.append(st.struct_type)
+                else:
+                    elem_types.append(StructArrayType(st.struct_type, st.dims[1:]))
             else:
-                elem_types.append(ArrayType(st.base, remaining))
+                remaining = st.dims[:iter_axis] + st.dims[iter_axis + 1:]
+                if len(remaining) == 0:
+                    elem_types.append(ScalarType(st.base))
+                else:
+                    elem_types.append(ArrayType(st.base, remaining))
 
-        mlir_init = _mlir_type(init_type)
-        mlir_seqs = [_mlir_type(st) for st in seq_types]
         mlir_i32 = "tensor<i32>"
 
         counter_var = self._fresh()
         self._emit(f"{counter_var} = stablehlo.constant dense<0> : {mlir_i32}")
 
-        n_seqs = len(seq_vals)
         uid = self._counter
         ctr_name = f"foldC{uid}"
-        carry_name = f"foldK{uid}"
-        seq_names = [f"foldS{uid}_{i}" for i in range(n_seqs)]
 
-        arg_names = [ctr_name, carry_name] + seq_names
-        init_vals_list = [counter_var, init_val] + seq_vals
-        arg_types = [mlir_i32, mlir_init] + mlir_seqs
+        # --- Flatten carry if StructType (XLA while doesn't accept tuples) ---
+        carry_is_struct = isinstance(init_type, StructType)
+        if carry_is_struct:
+            carry_field_names: list[str] = []
+            carry_field_init_vals: list[str] = []
+            carry_field_mlir_types: list[str] = []
+            carry_field_types: list[MaomiType] = []
+            for fi, (fname, ftype) in enumerate(init_type.fields):
+                flat_name = f"foldK{uid}f{fi}"
+                field_ssa = self._fresh()
+                self._emit(
+                    f"{field_ssa} = stablehlo.get_tuple_element {init_val}[{fi}] "
+                    f": ({_mlir_type(init_type)}) -> {_mlir_type(ftype)}"
+                )
+                carry_field_names.append(flat_name)
+                carry_field_init_vals.append(field_ssa)
+                carry_field_mlir_types.append(_mlir_type(ftype))
+                carry_field_types.append(ftype)
+        else:
+            carry_field_names = [f"foldK{uid}"]
+            carry_field_init_vals = [init_val]
+            carry_field_mlir_types = [_mlir_type(init_type)]
+            carry_field_types = [init_type]
+
+        # --- Flatten StructArrayType sequences ---
+        flat_seq_names: list[str] = []
+        flat_seq_init_vals: list[str] = []
+        flat_seq_mlir_types: list[str] = []
+        seq_field_map: list[list[tuple[str, MaomiType]]] = []
+
+        for i, (sv, st) in enumerate(zip(seq_vals, seq_types)):
+            if isinstance(st, StructArrayType):
+                field_info = []
+                for fi, (fname, ftype) in enumerate(st.struct_type.fields):
+                    if isinstance(ftype, ScalarType):
+                        batched = ArrayType(ftype.base, st.dims)
+                    elif isinstance(ftype, ArrayType):
+                        batched = ArrayType(ftype.base, st.dims + ftype.dims)
+                    else:
+                        raise MaomiError("codegen: unsupported struct array field type", "<codegen>", 0, 0)
+                    flat_name = f"foldS{uid}_{i}f{fi}"
+                    field_ssa = self._fresh()
+                    self._emit(
+                        f"{field_ssa} = stablehlo.get_tuple_element {sv}[{fi}] "
+                        f": ({_mlir_type(st)}) -> {_mlir_type(batched)}"
+                    )
+                    flat_seq_names.append(flat_name)
+                    flat_seq_init_vals.append(field_ssa)
+                    flat_seq_mlir_types.append(_mlir_type(batched))
+                    field_info.append((flat_name, batched))
+                seq_field_map.append(field_info)
+            else:
+                flat_name = f"foldS{uid}_{i}"
+                flat_seq_names.append(flat_name)
+                flat_seq_init_vals.append(sv)
+                flat_seq_mlir_types.append(_mlir_type(st))
+                seq_field_map.append([(flat_name, st)])
+
+        # --- Build while loop ---
+        arg_names = [ctr_name] + carry_field_names + flat_seq_names
+        init_vals_list = [counter_var] + carry_field_init_vals + flat_seq_init_vals
+        arg_types = [mlir_i32] + carry_field_mlir_types + flat_seq_mlir_types
         n_args = len(arg_names)
 
         while_result = self._fresh()
@@ -494,13 +593,45 @@ class LoopCodegenMixin:
         self._indent += 1
 
         body_env = dict(env)
-        body_env[expr.carry_var] = f"%{carry_name}"
+
+        # Reconstruct carry tuple if struct
+        if carry_is_struct:
+            carry_field_ssas = [f"%{n}" for n in carry_field_names]
+            carry_types_str = ", ".join(carry_field_mlir_types)
+            carry_tup = self._fresh()
+            self._emit(f"{carry_tup} = stablehlo.tuple {', '.join(carry_field_ssas)} : tuple<{carry_types_str}>")
+            body_env[expr.carry_var] = carry_tup
+        else:
+            body_env[expr.carry_var] = f"%{carry_field_names[0]}"
+
+        # Slice sequence elements
         for i, (ev, st, et) in enumerate(zip(expr.elem_vars, seq_types, elem_types)):
             if _block_references_var(expr.body, ev):
-                b_elem = self._slice_element(f"%{seq_names[i]}", f"%{ctr_name}", st, et, iter_axis=iter_axis)
+                if isinstance(st, StructArrayType):
+                    field_info = seq_field_map[i]
+                    field_ssas = [f"%{fn}" for fn, _ in field_info]
+                    field_types_str = ", ".join(_mlir_type(bt) for _, bt in field_info)
+                    tup = self._fresh()
+                    self._emit(f"{tup} = stablehlo.tuple {', '.join(field_ssas)} : tuple<{field_types_str}>")
+                    b_elem = self._slice_struct_array_element(tup, f"%{ctr_name}", st)
+                else:
+                    b_elem = self._slice_element(f"%{seq_field_map[i][0][0]}", f"%{ctr_name}", st, et, iter_axis=iter_axis)
                 body_env[ev] = b_elem
 
         new_carry = self._gen_block(expr.body, body_env)
+
+        # Destructure new carry if struct
+        if carry_is_struct:
+            new_carry_fields = []
+            for fi, (fname, ftype) in enumerate(init_type.fields):
+                field_ssa = self._fresh()
+                self._emit(
+                    f"{field_ssa} = stablehlo.get_tuple_element {new_carry}[{fi}] "
+                    f": ({_mlir_type(init_type)}) -> {_mlir_type(ftype)}"
+                )
+                new_carry_fields.append(field_ssa)
+        else:
+            new_carry_fields = [new_carry]
 
         # Update counter
         one_v = self._fresh()
@@ -509,14 +640,22 @@ class LoopCodegenMixin:
         self._emit(f"{new_counter} = stablehlo.add %{ctr_name}, {one_v} : {mlir_i32}")
 
         # Return new values
-        new_vals = [new_counter, new_carry] + [f"%{sn}" for sn in seq_names]
+        new_vals = [new_counter] + new_carry_fields + [f"%{sn}" for sn in flat_seq_names]
         vals_str = ", ".join(new_vals)
         self._emit(f"stablehlo.return {vals_str} : {types_str}")
         self._indent -= 1
         self._emit("}")
 
-        # Result is the final carry (index 1)
-        return f"{while_result}#1"
+        # Reconstruct carry from while result
+        if carry_is_struct:
+            result_fields = [f"{while_result}#{1 + fi}" for fi in range(len(init_type.fields))]
+            fields_str = ", ".join(result_fields)
+            carry_types_str = ", ".join(carry_field_mlir_types)
+            result_tup = self._fresh()
+            self._emit(f"{result_tup} = stablehlo.tuple {fields_str} : tuple<{carry_types_str}>")
+            return result_tup
+        else:
+            return f"{while_result}#1"
 
     # -- Fold gradient codegen --
 
@@ -536,16 +675,22 @@ class LoopCodegenMixin:
         adj_type = self._type_of(expr.adj)
 
         for st in seq_types:
-            if not isinstance(st, ArrayType):
+            if not isinstance(st, (ArrayType, StructArrayType)):
                 raise MaomiError("codegen: _FoldGrad sequence must be array", "<codegen>", 0, 0)
 
-        seq_len = seq_types[0].dims[0]
+        first_st = seq_types[0]
+        seq_len = first_st.dims[0] if isinstance(first_st, StructArrayType) else first_st.dims[0]
         if isinstance(seq_len, str):
             raise MaomiError(f"codegen: _FoldGrad requires concrete length, got '{seq_len}'", "<codegen>", 0, 0)
 
         elem_types: list[MaomiType] = []
         for st in seq_types:
-            if len(st.dims) == 1:
+            if isinstance(st, StructArrayType):
+                if len(st.dims) == 1:
+                    elem_types.append(st.struct_type)
+                else:
+                    elem_types.append(StructArrayType(st.struct_type, st.dims[1:]))
+            elif len(st.dims) == 1:
                 elem_types.append(ScalarType(st.base))
             else:
                 elem_types.append(ArrayType(st.base, st.dims[1:]))

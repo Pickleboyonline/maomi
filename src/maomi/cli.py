@@ -29,11 +29,13 @@ class RelaxCompileResult:
     fn_table: dict[str, FnSignature]
 
 
-def compile_source(source: str, filename: str = "<stdin>") -> CompileResult:
+def compile_source(source: str, filename: str = "<stdin>", config: dict | None = None) -> CompileResult:
     """Full compilation pipeline: lex -> parse -> resolve imports -> typecheck -> AD -> codegen."""
     tokens = Lexer(source, filename=filename).tokenize()
     program = Parser(tokens, filename=filename).parse()
     program = resolve(program, filename)
+    if config is not None:
+        _substitute_config(program, config, filename)
     checker = TypeChecker(filename=filename)
     errors = checker.check(program)
     if errors:
@@ -42,6 +44,68 @@ def compile_source(source: str, filename: str = "<stdin>") -> CompileResult:
     codegen = StableHLOCodegen(program, checker.type_map)
     mlir_text = codegen.generate()
     return CompileResult(mlir_text, dict(checker.fn_table), codegen._callback_count, codegen._callback_labels, dict(checker.struct_defs))
+
+
+def _substitute_config(program, config: dict, filename: str):
+    """Replace config("key") calls with literal values from config dict."""
+    from .ast_nodes import (CallExpr, StringLiteral, FloatLiteral, IntLiteral,
+                            LetStmt, ExprStmt, Block, FnDef)
+
+    def _resolve_key(key: str, config: dict):
+        """Resolve dotted keys like 'optimizer.lr'."""
+        parts = key.split(".")
+        val = config
+        for part in parts:
+            if not isinstance(val, dict) or part not in val:
+                raise MaomiError(f"config key '{key}' not found", filename, 0, 0)
+            val = val[part]
+        return val
+
+    def _to_literal(value, span):
+        if isinstance(value, float):
+            return FloatLiteral(value, span)
+        if isinstance(value, int):
+            return IntLiteral(value, span)
+        if isinstance(value, str):
+            return StringLiteral(value, span)
+        raise MaomiError(f"config value type '{type(value).__name__}' not supported", filename, 0, 0)
+
+    def _walk_expr(expr):
+        if isinstance(expr, CallExpr) and expr.callee == "config":
+            if len(expr.args) != 1 or not isinstance(expr.args[0], StringLiteral):
+                raise MaomiError("config() requires exactly one string argument", filename,
+                                 expr.span.line_start, expr.span.col_start)
+            key = expr.args[0].value
+            value = _resolve_key(key, config)
+            return _to_literal(value, expr.span)
+        # Recurse into sub-expressions
+        if isinstance(expr, CallExpr):
+            expr.args[:] = [_walk_expr(a) for a in expr.args]
+        elif hasattr(expr, 'left') and hasattr(expr, 'right'):
+            expr.left = _walk_expr(expr.left)
+            expr.right = _walk_expr(expr.right)
+        elif hasattr(expr, 'operand'):
+            expr.operand = _walk_expr(expr.operand)
+        elif hasattr(expr, 'expr') and not hasattr(expr, 'wrt'):
+            expr.expr = _walk_expr(expr.expr)
+        elif hasattr(expr, 'condition'):
+            expr.condition = _walk_expr(expr.condition)
+        elif hasattr(expr, 'value') and hasattr(expr, 'name') and hasattr(expr, 'type_annotation'):
+            # LetStmt
+            expr.value = _walk_expr(expr.value)
+        return expr
+
+    def _walk_block(block):
+        for stmt in block.stmts:
+            if isinstance(stmt, LetStmt):
+                stmt.value = _walk_expr(stmt.value)
+            elif isinstance(stmt, ExprStmt):
+                stmt.expr = _walk_expr(stmt.expr)
+        if block.expr is not None:
+            block.expr = _walk_expr(block.expr)
+
+    for fn in program.functions:
+        _walk_block(fn.body)
 
 
 def compile_source_relax(source: str, filename: str = "<stdin>") -> RelaxCompileResult:
@@ -78,6 +142,7 @@ def main():
         default="stablehlo",
         help="Code generation backend (default: stablehlo)",
     )
+    compile_p.add_argument("--config", help="Path to TOML config file for compile-time constants")
 
     run_p = subparsers.add_parser("run", help="Compile and run a .mao file")
     run_p.add_argument("file", help="Path to .mao source file")
@@ -95,6 +160,7 @@ def main():
         default="llvm",
         help="Execution target for relax backend (default: llvm)",
     )
+    run_p.add_argument("--config", help="Path to TOML config file for compile-time constants")
 
     lsp_p = subparsers.add_parser("lsp", help="Start Language Server Protocol server")
     lsp_p.add_argument("--stdio", action="store_true", default=True, help="Use stdio transport (default)")
@@ -105,13 +171,15 @@ def main():
         sys.exit(1)
 
     if args.command == "compile":
-        _compile(args.file, args.emit, getattr(args, "backend", "stablehlo"))
+        _compile(args.file, args.emit, getattr(args, "backend", "stablehlo"),
+                 config_path=getattr(args, "config", None))
     elif args.command == "run":
         backend = getattr(args, "backend", "stablehlo")
+        config_path = getattr(args, "config", None)
         if backend == "relax":
             _run_relax(args.file, args.fn, args.seed, args.target)
         else:
-            _run(args.file, args.fn, args.seed)
+            _run(args.file, args.fn, args.seed, config_path=config_path)
     elif args.command == "lsp":
         try:
             from .lsp import start_server
@@ -125,7 +193,19 @@ def main():
         start_server()
 
 
-def _compile(path: str, emit: str, backend: str = "stablehlo"):
+def _load_config(config_path: str | None) -> dict | None:
+    if config_path is None:
+        return None
+    import tomllib
+    try:
+        with open(config_path, "rb") as f:
+            return tomllib.load(f)
+    except FileNotFoundError:
+        print(f"error: config file not found: {config_path}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _compile(path: str, emit: str, backend: str = "stablehlo", config_path: str | None = None):
     try:
         with open(path) as f:
             source = f.read()
@@ -146,6 +226,11 @@ def _compile(path: str, emit: str, backend: str = "stablehlo"):
 
         # Resolve imports
         program = resolve(program, path)
+
+        # Config substitution
+        config = _load_config(config_path)
+        if config is not None:
+            _substitute_config(program, config, path)
 
         if emit == "ast":
             print(json.dumps(asdict(program), indent=2, default=_json_default))
@@ -192,7 +277,7 @@ def _compile(path: str, emit: str, backend: str = "stablehlo"):
         sys.exit(1)
 
 
-def _run(path: str, fn_name: str, seed: int):
+def _run(path: str, fn_name: str, seed: int, config_path: str | None = None):
     try:
         with open(path) as f:
             source = f.read()
@@ -201,7 +286,7 @@ def _run(path: str, fn_name: str, seed: int):
         sys.exit(1)
 
     try:
-        result = compile_source(source, filename=path)
+        result = compile_source(source, filename=path, config=_load_config(config_path))
     except MaomiError as e:
         print(f"{e}", file=sys.stderr)
         sys.exit(1)
@@ -214,16 +299,18 @@ def _run(path: str, fn_name: str, seed: int):
     fn_sig = result.fn_table[fn_name]
 
     # Check all dims are concrete
+    from .api import flatten_type
     for pt in fn_sig.param_types:
-        if isinstance(pt, ArrayType):
-            for d in pt.dims:
-                if isinstance(d, str):
-                    print(
-                        f"error: cannot run function with symbolic dimension '{d}'. "
-                        f"All dimensions must be concrete integers.",
-                        file=sys.stderr,
-                    )
-                    sys.exit(1)
+        for leaf_t in flatten_type(pt):
+            if isinstance(leaf_t, ArrayType):
+                for d in leaf_t.dims:
+                    if isinstance(d, str):
+                        print(
+                            f"error: cannot run function with symbolic dimension '{d}'. "
+                            f"All dimensions must be concrete integers.",
+                            file=sys.stderr,
+                        )
+                        sys.exit(1)
 
     try:
         from .jax_runner import run_stablehlo

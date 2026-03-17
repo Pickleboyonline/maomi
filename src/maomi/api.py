@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from .cli import compile_source
-from .types import ScalarType, ArrayType, StructType, MaomiType
+from .types import ScalarType, ArrayType, StructType, StructArrayType, MaomiType
 
 if TYPE_CHECKING:
     from .type_checker import FnSignature
@@ -76,8 +76,26 @@ class MaomiStruct:
 # Flatten / unflatten
 # ---------------------------------------------------------------------------
 
+def _prepend_dims(batch_dims: tuple, ft: MaomiType) -> MaomiType:
+    """Prepend batch dims to a field type for StructArrayType."""
+    if isinstance(ft, ScalarType):
+        return ArrayType(ft.base, batch_dims)
+    if isinstance(ft, ArrayType):
+        return ArrayType(ft.base, batch_dims + ft.dims)
+    if isinstance(ft, StructType):
+        return StructArrayType(ft, batch_dims)
+    return ft
+
+
 def flatten_type(t: MaomiType) -> list[MaomiType]:
     """Return the list of leaf (non-struct) types in a MaomiType."""
+    if isinstance(t, StructArrayType):
+        # SoA: each field becomes a batched tensor
+        result = []
+        for _, ft in t.struct_type.fields:
+            batched = _prepend_dims(t.dims, ft)
+            result.extend(flatten_type(batched))
+        return result
     if isinstance(t, StructType):
         result = []
         for _, ft in t.fields:
@@ -88,6 +106,13 @@ def flatten_type(t: MaomiType) -> list[MaomiType]:
 
 def flatten_value(value, t: MaomiType) -> list[np.ndarray]:
     """Flatten a Python value into a list of numpy arrays matching leaf types."""
+    if isinstance(t, StructArrayType):
+        result = []
+        for fname, ft in t.struct_type.fields:
+            fval = getattr(value, fname)
+            batched = _prepend_dims(t.dims, ft)
+            result.extend(flatten_value(fval, batched))
+        return result
     if isinstance(t, StructType):
         result = []
         for fname, ft in t.fields:
@@ -99,6 +124,13 @@ def flatten_value(value, t: MaomiType) -> list[np.ndarray]:
 
 def unflatten_value(arrays: list[np.ndarray], t: MaomiType, struct_defs: dict[str, StructType], offset: int = 0):
     """Unflatten a list of numpy arrays into a Python value matching the type."""
+    if isinstance(t, StructArrayType):
+        fields = {}
+        for fname, ft in t.struct_type.fields:
+            batched = _prepend_dims(t.dims, ft)
+            val, offset = unflatten_value(arrays, batched, struct_defs, offset)
+            fields[fname] = val
+        return MaomiStruct(t.struct_type.name, t.struct_type, **fields), offset
     if isinstance(t, StructType):
         fields = {}
         for fname, ft in t.fields:
@@ -130,6 +162,12 @@ def _mlir_type(t: MaomiType) -> str:
     if isinstance(t, ArrayType):
         shape = "x".join(str(d) for d in t.dims)
         return f"tensor<{shape}x{_MLIR_ETYPE[t.base]}>"
+    if isinstance(t, StructArrayType):
+        field_types = ", ".join(
+            _mlir_type(_prepend_dims(t.dims, ft))
+            for _, ft in t.struct_type.fields
+        )
+        return f"tuple<{field_types}>"
     if isinstance(t, StructType):
         field_types = ", ".join(_mlir_type(ft) for _, ft in t.fields)
         return f"tuple<{field_types}>"
@@ -140,6 +178,20 @@ def _build_tuple_from_args(flat_types: list[MaomiType], t: MaomiType,
                            arg_names: list[str], offset: int,
                            lines: list[str], var_counter: list[int]) -> tuple[str, int]:
     """Generate MLIR ops to build a tuple from flat args. Returns (ssa_name, new_offset)."""
+    if isinstance(t, StructArrayType):
+        # SoA: fields are batched tensors, build tuple from them
+        field_ssas = []
+        for _, ft in t.struct_type.fields:
+            batched = _prepend_dims(t.dims, ft)
+            ssa, offset = _build_tuple_from_args(flat_types, batched, arg_names, offset, lines, var_counter)
+            field_ssas.append(ssa)
+        tup_var = f"%__tup{var_counter[0]}"
+        var_counter[0] += 1
+        mlir_t = _mlir_type(t)
+        field_refs = ", ".join(field_ssas)
+        field_mlir_types = ", ".join(_mlir_type(_prepend_dims(t.dims, ft)) for _, ft in t.struct_type.fields)
+        lines.append(f"    {tup_var} = \"stablehlo.tuple\"({field_refs}) : ({field_mlir_types}) -> {mlir_t}")
+        return tup_var, offset
     if isinstance(t, StructType):
         field_ssas = []
         for _, ft in t.fields:
@@ -159,7 +211,16 @@ def _destructure_tuple(t: MaomiType, src_ssa: str,
                        lines: list[str], var_counter: list[int],
                        result_ssas: list[str]):
     """Generate MLIR ops to destructure a tuple into flat tensors."""
-    if isinstance(t, StructType):
+    if isinstance(t, StructArrayType):
+        for i, (_, ft) in enumerate(t.struct_type.fields):
+            elem_var = f"%__gte{var_counter[0]}"
+            var_counter[0] += 1
+            batched = _prepend_dims(t.dims, ft)
+            elem_mlir = _mlir_type(batched)
+            src_mlir = _mlir_type(t)
+            lines.append(f"    {elem_var} = \"stablehlo.get_tuple_element\"({src_ssa}) {{index = {i} : i32}} : ({src_mlir}) -> {elem_mlir}")
+            _destructure_tuple(batched, elem_var, lines, var_counter, result_ssas)
+    elif isinstance(t, StructType):
         for i, (_, ft) in enumerate(t.fields):
             elem_var = f"%__gte{var_counter[0]}"
             var_counter[0] += 1
@@ -194,36 +255,58 @@ def _generate_wrapper(mlir_text: str, fn_name: str, fn_sig: FnSignature) -> str:
     lines.append(f"  func.func @main({', '.join(wrapper_params)}) -> ({', '.join(flat_ret_mlir)}) {{")
 
     # Build call args: reconstruct tuples from flat args where needed
+    # All struct/struct-array params are flattened in the codegen — pass flat tensors directly
     var_counter = [0]
     call_args = []
+    call_arg_types = []
     offset = 0
     for pt in fn_sig.param_types:
-        if isinstance(pt, StructType):
-            ssa, offset = _build_tuple_from_args(flat_param_types, pt, arg_names, offset, lines, var_counter)
-            call_args.append(ssa)
+        if isinstance(pt, (StructType, StructArrayType)):
+            # Codegen flattened these — pass flat tensors directly
+            n_fields = len(flatten_type(pt))
+            for j in range(n_fields):
+                call_args.append(arg_names[offset])
+                call_arg_types.append(_mlir_type(flat_param_types[offset]))
+                offset += 1
         else:
             call_args.append(arg_names[offset])
+            call_arg_types.append(_mlir_type(pt))
             offset += 1
 
-    # Call the original function
+    # Call the original function — return type is also flattened for structs
     call_arg_str = ", ".join(call_args)
-    call_type_str = ", ".join(_mlir_type(pt) for pt in fn_sig.param_types)
-    ret_mlir = _mlir_type(fn_sig.return_type)
+    call_type_str = ", ".join(call_arg_types)
+    if isinstance(fn_sig.return_type, (StructType, StructArrayType)):
+        ret_mlir_parts = [_mlir_type(ft) for ft in flat_ret_types]
+        ret_mlir = ", ".join(ret_mlir_parts)
+    else:
+        ret_mlir = _mlir_type(fn_sig.return_type)
     result_var = f"%__result{var_counter[0]}"
     var_counter[0] += 1
-    lines.append(f"    {result_var} = func.call @{fn_name}({call_arg_str}) : ({call_type_str}) -> {ret_mlir}")
 
-    # Destructure result if struct
-    if isinstance(fn_sig.return_type, StructType):
-        result_ssas: list[str] = []
-        _destructure_tuple(fn_sig.return_type, result_var, lines, var_counter, result_ssas)
+    if isinstance(fn_sig.return_type, (StructType, StructArrayType)):
+        # Function returns flat tensors — call with multi-result
+        n_rets = len(flat_ret_types)
+        lines.append(f"    {result_var}:{n_rets} = func.call @{fn_name}({call_arg_str}) : ({call_type_str}) -> ({ret_mlir})")
+        # Return the flat results directly
+        result_ssas = [f"{result_var}#{i}" for i in range(n_rets)]
         lines.append(f"    return {', '.join(result_ssas)} : {', '.join(flat_ret_mlir)}")
     else:
+        lines.append(f"    {result_var} = func.call @{fn_name}({call_arg_str}) : ({call_type_str}) -> {ret_mlir}")
         lines.append(f"    return {result_var} : {ret_mlir}")
 
     lines.append("  }")
 
     wrapper_text = "\n".join(lines)
+
+    # If the target function is named "main", rename it to avoid collision with the wrapper
+    internal_name = fn_name
+    if fn_name == "main":
+        internal_name = "__maomi_main"
+        mlir_text = mlir_text.replace(f"@main(", f"@{internal_name}(")
+        mlir_text = mlir_text.replace(f"@main ", f"@{internal_name} ")
+        # Fix the call in the wrapper
+        wrapper_text = wrapper_text.replace(f"func.call @{fn_name}(", f"func.call @{internal_name}(")
 
     # Inject wrapper into module: before the closing `}`
     # Also add module @main sym_name
@@ -280,7 +363,7 @@ class MaomiFunction:
         flat_ret_types = flatten_type(sig.return_type)
         result_arrays = [np.asarray(r) for r in results[:len(flat_ret_types)]]
 
-        if isinstance(sig.return_type, StructType):
+        if isinstance(sig.return_type, (StructType, StructArrayType)):
             value, _ = unflatten_value(result_arrays, sig.return_type, self._struct_defs)
             return value
         return result_arrays[0]
@@ -380,11 +463,12 @@ class MaomiModule:
 # compile() entry point
 # ---------------------------------------------------------------------------
 
-def compile(source_or_path: str) -> MaomiModule:
+def compile(source_or_path: str, config: dict | None = None) -> MaomiModule:
     """Compile a Maomi source string or .mao file into a callable module.
 
     Args:
         source_or_path: Either a path to a .mao file or a Maomi source string.
+        config: Optional dict of compile-time constants (replaces config("key") calls).
 
     Returns:
         A MaomiModule with callable functions and struct constructors.
@@ -397,7 +481,7 @@ def compile(source_or_path: str) -> MaomiModule:
         source = source_or_path
         filename = "<string>"
 
-    result = compile_source(source, filename)
+    result = compile_source(source, filename, config=config)
     return MaomiModule(
         result.mlir_text,
         result.fn_table,

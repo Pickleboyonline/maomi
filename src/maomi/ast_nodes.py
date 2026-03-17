@@ -28,6 +28,16 @@ class TypeAnnotation:
     wildcard: bool = False  # True for f32[..] shape wildcard
 
 
+# ---------- Type Aliases ----------
+
+
+@dataclass
+class TypeAlias:
+    name: str
+    type_annotation: TypeAnnotation
+    span: Span
+
+
 # ---------- Struct ----------
 
 
@@ -185,14 +195,14 @@ class MapExpr:
 @dataclass
 class GradExpr:
     expr: Expr
-    wrt: str  # variable name to differentiate with respect to
+    wrt: str | tuple[str, list[str]]  # "x" or ("state", ["params"]) for dotted paths
     span: Span
 
 
 @dataclass
 class ValueAndGradExpr:
     expr: Expr
-    wrt: str  # variable name to differentiate with respect to
+    wrt: str | tuple[str, list[str]]  # "x" or ("state", ["params"]) for dotted paths
     span: Span
 
 
@@ -296,6 +306,15 @@ class _IndexGrad:
 
 
 @dataclass
+class _StructArrayIndexGrad:
+    """Internal: backward pass of StructArrayType indexing. Scatters adjoint into zero SA."""
+    base_expr: Expr               # original struct array (for shape/type)
+    adj: Expr                     # adjoint of the indexed result (StructType)
+    index: Expr                   # the scalar index expression
+    span: Span
+
+
+@dataclass
 class _GatherGrad:
     """Internal: backward pass of array-based indexing (gather).
     Created by AD, compiled by codegen as stablehlo.scatter."""
@@ -390,7 +409,7 @@ class _SortGrad:
 
 
 # Union types for convenience
-Expr = IntLiteral | FloatLiteral | BoolLiteral | StringLiteral | Identifier | UnaryOp | BinOp | IfExpr | CallExpr | ScanExpr | WhileExpr | MapExpr | GradExpr | ValueAndGradExpr | CastExpr | FoldExpr | ArrayLiteral | StructLiteral | FieldAccess | WithExpr | IndexExpr | _ScanGrad | _WhileGrad | _IndexGrad | _GatherGrad | _Conv2dGrad | _MaxPoolGrad | _AvgPoolGrad | _FoldGrad | _BroadcastExpr | _CumsumGrad | _SortGrad
+Expr = IntLiteral | FloatLiteral | BoolLiteral | StringLiteral | Identifier | UnaryOp | BinOp | IfExpr | CallExpr | ScanExpr | WhileExpr | MapExpr | GradExpr | ValueAndGradExpr | CastExpr | FoldExpr | ArrayLiteral | StructLiteral | FieldAccess | WithExpr | IndexExpr | _ScanGrad | _WhileGrad | _IndexGrad | _StructArrayIndexGrad | _GatherGrad | _Conv2dGrad | _MaxPoolGrad | _AvgPoolGrad | _FoldGrad | _BroadcastExpr | _CumsumGrad | _SortGrad
 Stmt = LetStmt | ExprStmt
 
 
@@ -414,3 +433,4 @@ class Program:
     struct_defs: list[StructDef]
     functions: list[FnDef]
     span: Span
+    type_aliases: list[TypeAlias] = field(default_factory=list)

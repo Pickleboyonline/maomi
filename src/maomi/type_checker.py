@@ -33,7 +33,7 @@ from .ast_nodes import (
     TypeAnnotation,
     Expr,
 )
-from .types import MaomiType, ScalarType, ArrayType, StructType, WildcardArrayType, StringType, TypeVar, F32, F64, I32, I64, BOOL, STRING, FLOAT_BASES
+from .types import MaomiType, ScalarType, ArrayType, StructType, StructArrayType, WildcardArrayType, StringType, TypeVar, F32, F64, I32, I64, BOOL, STRING, FLOAT_BASES
 from .errors import MaomiTypeError
 
 
@@ -259,6 +259,7 @@ class TypeChecker:
         self.filename = filename
         self.fn_table: dict[str, FnSignature] = dict(BUILTINS)
         self.struct_defs: dict[str, StructType] = {}
+        self.type_aliases: dict[str, MaomiType] = {}
         self.errors: list[MaomiTypeError] = []
         self.type_map: dict[int, MaomiType] = {}  # id(expr) -> inferred type
         self._generic_fns: dict[str, FnDef] = {}   # name -> FnDef with wildcard types
@@ -266,6 +267,12 @@ class TypeChecker:
 
     def check(self, program: Program) -> list[MaomiTypeError]:
         self._program = program
+        # Pass 0a: register type aliases (before structs, since structs may use aliases)
+        for ta in program.type_aliases:
+            resolved = self._resolve_type_annotation(ta.type_annotation)
+            if resolved is not None:
+                self.type_aliases[ta.name] = resolved
+
         # Pass 0: register all struct definitions
         for sd in program.struct_defs:
             self._register_struct(sd)
@@ -391,8 +398,14 @@ class TypeChecker:
                 )
                 return None
             return KEY_TYPE
-        # Struct type
+        # Type alias
+        if ta.base in self.type_aliases:
+            return self.type_aliases[ta.base]
+        # Struct type (optionally with batch dims: Batch[N])
         if ta.base in self.struct_defs:
+            if ta.dims is not None:
+                dims = tuple(d.value for d in ta.dims)
+                return StructArrayType(self.struct_defs[ta.base], dims)
             return self.struct_defs[ta.base]
         # Type variable: single uppercase letter (A-Z)
         if len(ta.base) == 1 and ta.base.isupper() and ta.dims is None:
@@ -539,7 +552,7 @@ class TypeChecker:
             st = self._infer(seq, env)
             if st is None:
                 return None
-            if not isinstance(st, ArrayType):
+            if not isinstance(st, (ArrayType, StructArrayType)):
                 self._error(
                     f"scan sequence must be an array, got {st}",
                     seq.span.line_start,
@@ -552,7 +565,7 @@ class TypeChecker:
             return None
 
         # All sequences must have the same first dimension
-        first_dims = [st.dims[0] for st in seq_types]
+        first_dims = [self._seq_leading_dim(st) for st in seq_types]
         for i, fd in enumerate(first_dims[1:], 1):
             if not self._dims_match(fd, first_dims[0]):
                 self._error(
@@ -575,11 +588,7 @@ class TypeChecker:
         body_env = env.child()
         body_env.define(expr.carry_var, carry_type)
         for ev, st in zip(expr.elem_vars, seq_types):
-            if len(st.dims) == 1:
-                elem_type: MaomiType = ScalarType(st.base)
-            else:
-                elem_type = ArrayType(st.base, st.dims[1:])
-            body_env.define(ev, elem_type)
+            body_env.define(ev, self._seq_elem_type(st))
 
         body_type = self._check_block(expr.body, body_env)
 
@@ -667,14 +676,40 @@ class TypeChecker:
         else:
             return ArrayType(body_type.base, (seq_first,) + body_type.dims)
 
+    def _resolve_wrt_type(self, wrt, env: TypeEnv, context: str, span) -> MaomiType | None:
+        """Resolve the type of a wrt argument (plain string or dotted path)."""
+        if isinstance(wrt, tuple):
+            root, path = wrt
+            root_type = env.lookup(root)
+            if root_type is None:
+                self._error(f"{context}: undefined variable '{root}'", span.line_start, span.col_start)
+                return None
+            current = root_type
+            for field_name in path:
+                if not isinstance(current, StructType):
+                    self._error(f"{context}: '{root}' is not a struct, cannot access '.{field_name}'",
+                                span.line_start, span.col_start)
+                    return None
+                found = None
+                for fn, ft in current.fields:
+                    if fn == field_name:
+                        found = ft
+                        break
+                if found is None:
+                    self._error(f"{context}: struct '{current.name}' has no field '{field_name}'",
+                                span.line_start, span.col_start)
+                    return None
+                current = found
+            return current
+        else:
+            t = env.lookup(wrt)
+            if t is None:
+                self._error(f"{context}: undefined variable '{wrt}'", span.line_start, span.col_start)
+            return t
+
     def _check_grad(self, expr: GradExpr, env: TypeEnv) -> MaomiType | None:
-        wrt_type = env.lookup(expr.wrt)
+        wrt_type = self._resolve_wrt_type(expr.wrt, env, "grad", expr.span)
         if wrt_type is None:
-            self._error(
-                f"grad: undefined variable '{expr.wrt}'",
-                expr.span.line_start,
-                expr.span.col_start,
-            )
             return None
 
         expr_type = self._infer(expr.expr, env)
@@ -692,13 +727,8 @@ class TypeChecker:
         return wrt_type
 
     def _check_value_and_grad(self, expr: ValueAndGradExpr, env: TypeEnv) -> MaomiType | None:
-        wrt_type = env.lookup(expr.wrt)
+        wrt_type = self._resolve_wrt_type(expr.wrt, env, "value_and_grad", expr.span)
         if wrt_type is None:
-            self._error(
-                f"value_and_grad: undefined variable '{expr.wrt}'",
-                expr.span.line_start,
-                expr.span.col_start,
-            )
             return None
 
         expr_type = self._infer(expr.expr, env)
@@ -733,6 +763,28 @@ class TypeChecker:
             return ArrayType(expr.target_type, inner_type.dims)
         return None
 
+    @staticmethod
+    def _seq_leading_dim(st: MaomiType) -> int | str | None:
+        """Get the leading dimension of a sequence type (ArrayType or StructArrayType)."""
+        if isinstance(st, ArrayType):
+            return st.dims[0]
+        if isinstance(st, StructArrayType):
+            return st.dims[0]
+        return None
+
+    @staticmethod
+    def _seq_elem_type(st: MaomiType) -> MaomiType:
+        """Get the element type when iterating over a sequence."""
+        if isinstance(st, StructArrayType):
+            if len(st.dims) == 1:
+                return st.struct_type
+            return StructArrayType(st.struct_type, st.dims[1:])
+        if isinstance(st, ArrayType):
+            if len(st.dims) == 1:
+                return ScalarType(st.base)
+            return ArrayType(st.base, st.dims[1:])
+        return st
+
     def _check_fold(self, expr: FoldExpr, env: TypeEnv) -> MaomiType | None:
         carry_type = self._infer(expr.init, env)
 
@@ -741,7 +793,7 @@ class TypeChecker:
             st = self._infer(seq, env)
             if st is None:
                 return None
-            if not isinstance(st, ArrayType):
+            if not isinstance(st, (ArrayType, StructArrayType)):
                 self._error(f"fold sequence must be an array, got {st}", seq.span.line_start, seq.span.col_start)
                 return None
             seq_types.append(st)
@@ -749,7 +801,7 @@ class TypeChecker:
         if carry_type is None:
             return None
 
-        first_dims = [st.dims[0] for st in seq_types]
+        first_dims = [self._seq_leading_dim(st) for st in seq_types]
         for i, fd in enumerate(first_dims[1:], 1):
             if not self._dims_match(fd, first_dims[0]):
                 self._error(
@@ -768,11 +820,7 @@ class TypeChecker:
         body_env = env.child()
         body_env.define(expr.carry_var, carry_type)
         for ev, st in zip(expr.elem_vars, seq_types):
-            if len(st.dims) == 1:
-                elem_type: MaomiType = ScalarType(st.base)
-            else:
-                elem_type = ArrayType(st.base, st.dims[1:])
-            body_env.define(ev, elem_type)
+            body_env.define(ev, self._seq_elem_type(st))
 
         body_type = self._check_block(expr.body, body_env)
         if body_type is None:
@@ -842,9 +890,30 @@ class TypeChecker:
 
         return stype
 
+    @staticmethod
+    def _prepend_dims_to_type(dims: tuple, field_type: MaomiType) -> MaomiType:
+        """Prepend batch dims to a field type for StructArrayType field access."""
+        if isinstance(field_type, ScalarType):
+            return ArrayType(field_type.base, dims)
+        if isinstance(field_type, ArrayType):
+            return ArrayType(field_type.base, dims + field_type.dims)
+        if isinstance(field_type, StructType):
+            return StructArrayType(field_type, dims)
+        return field_type
+
     def _check_field_access(self, expr: FieldAccess, env: TypeEnv) -> MaomiType | None:
         obj_type = self._infer(expr.object, env)
         if obj_type is None:
+            return None
+        # StructArrayType: data.x where data: Batch[N] → f32[N, 64, 784]
+        if isinstance(obj_type, StructArrayType):
+            for field_name, field_type in obj_type.struct_type.fields:
+                if field_name == expr.field:
+                    return self._prepend_dims_to_type(obj_type.dims, field_type)
+            self._error(
+                f"struct '{obj_type.name}' has no field '{expr.field}'",
+                expr.span.line_start, expr.span.col_start,
+            )
             return None
         if not isinstance(obj_type, StructType):
             self._error(
@@ -909,6 +978,25 @@ class TypeChecker:
         base_type = self._infer(expr.base, env)
         if base_type is None:
             return None
+
+        # StructArrayType indexing: data[i] → Batch (single scalar index only for now)
+        if isinstance(base_type, StructArrayType):
+            if len(expr.indices) != 1 or expr.indices[0].kind != "single":
+                self._error(
+                    f"struct array indexing requires exactly one scalar index",
+                    expr.span.line_start, expr.span.col_start,
+                )
+                return None
+            idx_type = self._infer(expr.indices[0].value, env)
+            if idx_type is not None and idx_type != I32:
+                self._error(f"index must be i32, got {idx_type}",
+                            expr.indices[0].span.line_start, expr.indices[0].span.col_start)
+                return None
+            # Single index removes leading dim → base struct
+            if len(base_type.dims) == 1:
+                return base_type.struct_type
+            # Multi-dim: remove first dim
+            return StructArrayType(base_type.struct_type, base_type.dims[1:])
 
         if not isinstance(base_type, ArrayType):
             self._error(
@@ -1503,6 +1591,15 @@ class TypeChecker:
         # tril(x), triu(x) — triangular masks
         if expr.callee in ("tril", "triu"):
             return self._check_tril_triu(expr, env)
+
+        # config() — compile-time constant, resolved before codegen.
+        # Type is unknown at check time; default to f32 (most common for hyperparams).
+        if expr.callee == "config":
+            if len(expr.args) != 1 or not isinstance(expr.args[0], StringLiteral):
+                self._error("config() requires exactly one string argument",
+                            expr.span.line_start, expr.span.col_start)
+                return None
+            return F32
 
         sig = self.fn_table.get(expr.callee)
         if sig is None:
@@ -3485,6 +3582,17 @@ class TypeChecker:
             )
             return False
 
+        # StructArrayType vs StructArrayType
+        if isinstance(arg_type, StructArrayType) and isinstance(param_type, StructArrayType):
+            if self._types_compatible(arg_type, param_type):
+                return True
+            self._error(
+                f"argument {arg_index} of '{expr.callee}': expected {param_type}, got {arg_type}",
+                expr.args[arg_index].span.line_start,
+                expr.args[arg_index].span.col_start,
+            )
+            return False
+
         # Scalar arg for array param (e.g. builtin elementwise functions accept scalars too)
         if isinstance(arg_type, ScalarType) and isinstance(param_type, ArrayType):
             if arg_type.base == param_type.base:
@@ -3560,6 +3668,10 @@ class TypeChecker:
             return all(self._dims_match(d1, d2) for d1, d2 in zip(a.dims, b.dims))
         if isinstance(a, StructType) and isinstance(b, StructType):
             return a.name == b.name
+        if isinstance(a, StructArrayType) and isinstance(b, StructArrayType):
+            if a.struct_type.name != b.struct_type.name or len(a.dims) != len(b.dims):
+                return False
+            return all(self._dims_match(d1, d2) for d1, d2 in zip(a.dims, b.dims))
         return False
 
     def _dims_match(self, a: int | str, b: int | str) -> bool:

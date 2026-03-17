@@ -4,9 +4,15 @@ from ..ast_nodes import (
     Identifier,
     IntLiteral,
     FloatLiteral,
+    BinOp,
+    UnaryOp,
     CallExpr,
     Block,
+    LetStmt,
+    ExprStmt,
     IfExpr,
+    FieldAccess,
+    IndexExpr,
     ScanExpr,
     MapExpr,
     _ScanGrad,
@@ -556,6 +562,146 @@ class ComplexGradRulesMixin:
             if seq_type is not None:
                 self.type_map[id(grad_seq)] = seq_type
             self._accumulate(adjoints, seq_name, grad_seq)
+
+        # Propagate to free variables (variables from outer scope used in fold body)
+        # For free var p, grad = sum over iterations of: d(body)/d(p) evaluated per step
+        # We implement this by creating a new fold: fold(zero, seqs) { acc + d_body_d_fv }
+        from ..ast_nodes import FoldExpr, Block as _Block
+        bound_vars = {carry_var} | set(elem_vars)
+        free_vars = self._find_free_vars(body, bound_vars)
+        for fv_name in free_vars:
+            # var_map is id(expr) → tape_name. We need to find fv_name in tape_name values.
+            if fv_name not in adjoints and fv_name not in {v for v in var_map.values()}:
+                continue
+            d_body_d_fv = self._differentiate_branch(body_expr, fv_name)
+            # Check if the derivative is non-zero
+            if isinstance(d_body_d_fv, FloatLiteral) and d_body_d_fv.value == 0.0:
+                continue
+
+            fv_type = self._type_of_name(fv_name, var_map)
+            if fv_type is None:
+                continue
+
+            # Build: fold (__grad_acc, (carry_var, *elem_vars)) in (zero, (init_traj?, *sequences)) {
+            #   __grad_acc + d_body_d_fv
+            # }
+            # Simplified: since d_body_d_fv references carry_var and elem_vars,
+            # we need those in scope. Create a fold that iterates over sequences,
+            # evaluates d_body_d_fv per step, and sums.
+            # For the common case (body = acc + f(elem, p)), d_body_d_fv doesn't
+            # depend on carry_var, so we can just fold-sum d_body_d_fv over sequences.
+
+            grad_acc_var = f"__grad_acc_{fv_name}"
+            zero_init = self._make_zero(fv_type)
+            # Build body: grad_acc + d_body_d_fv
+            acc_ident = Identifier(grad_acc_var, _DUMMY_SPAN)
+            self.type_map[id(acc_ident)] = fv_type
+            sum_expr = self._make_binop("+", acc_ident, d_body_d_fv)
+            self.type_map[id(sum_expr)] = fv_type
+            sum_body = _Block([], sum_expr, _DUMMY_SPAN)
+
+            grad_fold = FoldExpr(
+                carry_var=grad_acc_var,
+                elem_vars=list(elem_vars),
+                init=zero_init,
+                sequences=list(sequences),
+                body=sum_body,
+                span=_DUMMY_SPAN,
+            )
+            self.type_map[id(grad_fold)] = fv_type
+            self._accumulate(adjoints, fv_name, grad_fold)
+
+    def _find_free_vars(self, body: Block, bound_vars: set[str]) -> set[str]:
+        """Find variable names referenced in a block that aren't in bound_vars."""
+        free = set()
+        self._collect_idents(body, bound_vars, free)
+        return free
+
+    def _collect_idents(self, node, bound: set[str], free: set[str]):
+        """Recursively collect Identifier names not in bound set."""
+        if isinstance(node, Identifier):
+            if node.name not in bound:
+                free.add(node.name)
+            return
+        if isinstance(node, Block):
+            inner_bound = set(bound)
+            for stmt in node.stmts:
+                if isinstance(stmt, LetStmt):
+                    self._collect_idents(stmt.value, inner_bound, free)
+                    inner_bound.add(stmt.name)
+                elif isinstance(stmt, ExprStmt):
+                    self._collect_idents(stmt.expr, inner_bound, free)
+            if node.expr is not None:
+                self._collect_idents(node.expr, inner_bound, free)
+            return
+        # Recurse into all expr fields
+        if isinstance(node, (BinOp,)):
+            self._collect_idents(node.left, bound, free)
+            self._collect_idents(node.right, bound, free)
+        elif isinstance(node, (UnaryOp,)):
+            self._collect_idents(node.operand, bound, free)
+        elif isinstance(node, CallExpr):
+            for a in node.args:
+                self._collect_idents(a, bound, free)
+        elif isinstance(node, FieldAccess):
+            self._collect_idents(node.object, bound, free)
+        elif isinstance(node, IndexExpr):
+            self._collect_idents(node.base, bound, free)
+        elif isinstance(node, IfExpr):
+            self._collect_idents(node.condition, bound, free)
+            self._collect_idents(node.then_block, bound, free)
+            self._collect_idents(node.else_block, bound, free)
+        elif isinstance(node, LetStmt):
+            self._collect_idents(node.value, bound, free)
+        elif isinstance(node, ExprStmt):
+            self._collect_idents(node.expr, bound, free)
+
+    def _collect_free_ident_nodes(self, body: Block, bound_vars: set[str]) -> list[Identifier]:
+        """Collect actual Identifier AST nodes that are free in the body (not just names)."""
+        result = []
+        seen_names = set()
+        def _walk(node):
+            if isinstance(node, Identifier):
+                if node.name not in bound_vars and node.name not in seen_names:
+                    result.append(node)
+                    seen_names.add(node.name)
+                return
+            if isinstance(node, Block):
+                inner_bound = set(bound_vars)
+                for stmt in node.stmts:
+                    if isinstance(stmt, LetStmt):
+                        _walk(stmt.value)
+                        inner_bound.add(stmt.name)
+                    elif isinstance(stmt, ExprStmt):
+                        _walk(stmt.expr)
+                if node.expr is not None:
+                    _walk(node.expr)
+                return
+            if isinstance(node, BinOp):
+                _walk(node.left)
+                _walk(node.right)
+            elif isinstance(node, UnaryOp):
+                _walk(node.operand)
+            elif isinstance(node, CallExpr):
+                for a in node.args:
+                    _walk(a)
+            elif isinstance(node, FieldAccess):
+                _walk(node.object)
+            elif isinstance(node, IndexExpr):
+                _walk(node.base)
+            elif isinstance(node, IfExpr):
+                _walk(node.condition)
+                _walk(node.then_block)
+                _walk(node.else_block)
+        _walk(body)
+        return result
+
+    def _type_of_name(self, name: str, var_map: dict[int, str]) -> MaomiType | None:
+        """Try to find the type of a variable by name from var_map reverse lookup."""
+        for expr_id, vname in var_map.items():
+            if vname == name:
+                return self.type_map.get(expr_id)
+        return None
 
     def _backprop_cumulative(self, callee: str, args: list[Expr], adj: Expr,
                               adjoints: dict[str, Expr], var_map: dict[int, str],

@@ -13,6 +13,15 @@ def _build_document_symbols(result: AnalysisResult) -> list[types.DocumentSymbol
 
     symbols: list[types.DocumentSymbol] = []
 
+    for ta in result.program.type_aliases:
+        r = _span_to_range(ta.span)
+        symbols.append(types.DocumentSymbol(
+            name=ta.name,
+            kind=types.SymbolKind.TypeParameter,
+            range=r,
+            selection_range=r,
+        ))
+
     for sd in result.program.struct_defs:
         r = _span_to_range(sd.span)
         children = []
@@ -61,6 +70,15 @@ def _workspace_symbols(query: str) -> list[types.SymbolInformation]:
     for uri, analysis in _cache.items():
         if not analysis.program:
             continue
+
+        for ta in analysis.program.type_aliases:
+            if q and q not in ta.name.lower():
+                continue
+            result_symbols.append(types.SymbolInformation(
+                name=ta.name,
+                kind=types.SymbolKind.TypeParameter,
+                location=types.Location(uri=uri, range=_span_to_range(ta.span)),
+            ))
 
         for sd in analysis.program.struct_defs:
             if q and q not in sd.name.lower():

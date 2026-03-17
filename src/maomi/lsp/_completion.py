@@ -9,7 +9,7 @@ from ._core import server, _cache, AnalysisResult, _local_functions
 from ._ast_utils import _span_contains, _find_node_at
 from ._builtin_data import (
     _KEYWORDS, _TYPE_NAMES, _BUILTINS, _BUILTIN_SET,
-    _BUILTIN_NAMESPACES, _BUILTIN_DOCS,
+    _BUILTIN_NAMESPACES, _BUILTIN_DOCS, _BUILTIN_CATEGORIES,
 )
 
 
@@ -136,7 +136,7 @@ def _complete_general(result: AnalysisResult | None, position: types.Position):
             continue  # namespaced builtins offered via dot-completion
         doc = _BUILTIN_DOCS.get(b)
         items.append(types.CompletionItem(
-            label=b, kind=types.CompletionItemKind.Function, detail="builtin",
+            label=b, kind=types.CompletionItemKind.Function, detail=_BUILTIN_CATEGORIES.get(b, "builtin"),
             documentation=types.MarkupContent(
                 kind=types.MarkupKind.Markdown, value=doc,
             ) if doc else None,
@@ -188,6 +188,17 @@ def _complete_general(result: AnalysisResult | None, position: types.Position):
                 documentation=types.MarkupContent(
                     kind=types.MarkupKind.Markdown, value=doc,
                 ) if doc else None,
+            ))
+
+        # Type aliases
+        for ta in result.program.type_aliases:
+            items.append(types.CompletionItem(
+                label=ta.name,
+                kind=types.CompletionItemKind.TypeParameter,
+                detail=f"type {ta.name} = {ta.type_annotation.base}" + (
+                    f"[{', '.join(str(d.value) for d in ta.type_annotation.dims)}]"
+                    if ta.type_annotation.dims else ""
+                ),
             ))
 
         # Variables in scope

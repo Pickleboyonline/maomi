@@ -28,6 +28,7 @@ from ...ast_nodes import (
     _ScanGrad,
     _WhileGrad,
     _IndexGrad,
+    _StructArrayIndexGrad,
     _GatherGrad,
     _Conv2dGrad,
     _MaxPoolGrad,
@@ -39,7 +40,7 @@ from ...ast_nodes import (
     _SortGrad,
     Expr,
 )
-from ...types import MaomiType, ScalarType, ArrayType, StructType, FLOAT_BASES
+from ...types import MaomiType, ScalarType, ArrayType, StructType, StructArrayType, FLOAT_BASES
 from ...errors import MaomiError
 from .utils import (
     _mlir_type,
@@ -142,27 +143,140 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
 
     # -- Function generation --
 
+    def _flatten_struct_fields(self, stype):
+        """Get flat list of leaf types for a struct/struct-array type (recursive)."""
+        from ...api import flatten_type
+        return flatten_type(stype)
+
+    def _destructure_to_flat(self, ssa: str, stype, result_ssas: list[str]):
+        """Recursively destructure a tuple SSA into flat tensor SSAs."""
+        if isinstance(stype, StructArrayType):
+            fields = []
+            for fname, ftype in stype.struct_type.fields:
+                if isinstance(ftype, ScalarType):
+                    fields.append(ArrayType(ftype.base, stype.dims))
+                elif isinstance(ftype, ArrayType):
+                    fields.append(ArrayType(ftype.base, stype.dims + ftype.dims))
+                else:
+                    fields.append(ftype)
+            for fi, ft in enumerate(fields):
+                field_ssa = self._fresh()
+                self._emit(
+                    f"{field_ssa} = stablehlo.get_tuple_element {ssa}[{fi}] "
+                    f": ({_mlir_type(stype)}) -> {_mlir_type(ft)}"
+                )
+                if isinstance(ft, (StructType, StructArrayType)):
+                    self._destructure_to_flat(field_ssa, ft, result_ssas)
+                else:
+                    result_ssas.append(field_ssa)
+        elif isinstance(stype, StructType):
+            for fi, (fname, ftype) in enumerate(stype.fields):
+                field_ssa = self._fresh()
+                self._emit(
+                    f"{field_ssa} = stablehlo.get_tuple_element {ssa}[{fi}] "
+                    f": ({_mlir_type(stype)}) -> {_mlir_type(ftype)}"
+                )
+                if isinstance(ftype, (StructType, StructArrayType)):
+                    self._destructure_to_flat(field_ssa, ftype, result_ssas)
+                else:
+                    result_ssas.append(field_ssa)
+
+    def _reconstruct_from_flat(self, flat_ssas: list[str], stype, offset: list[int]) -> str:
+        """Recursively reconstruct a tuple from flat tensor SSAs."""
+        if isinstance(stype, StructArrayType):
+            field_ssas = []
+            field_types = []
+            for fname, ftype in stype.struct_type.fields:
+                if isinstance(ftype, ScalarType):
+                    batched = ArrayType(ftype.base, stype.dims)
+                elif isinstance(ftype, ArrayType):
+                    batched = ArrayType(ftype.base, stype.dims + ftype.dims)
+                else:
+                    batched = ftype
+                if isinstance(batched, (StructType, StructArrayType)):
+                    field_ssa = self._reconstruct_from_flat(flat_ssas, batched, offset)
+                else:
+                    field_ssa = flat_ssas[offset[0]]
+                    offset[0] += 1
+                field_ssas.append(field_ssa)
+                field_types.append(batched)
+            tup = self._fresh()
+            types_str = ", ".join(_mlir_type(ft) for ft in field_types)
+            self._emit(f"{tup} = stablehlo.tuple {', '.join(field_ssas)} : tuple<{types_str}>")
+            return tup
+        elif isinstance(stype, StructType):
+            field_ssas = []
+            field_types = []
+            for fname, ftype in stype.fields:
+                if isinstance(ftype, (StructType, StructArrayType)):
+                    field_ssa = self._reconstruct_from_flat(flat_ssas, ftype, offset)
+                else:
+                    field_ssa = flat_ssas[offset[0]]
+                    offset[0] += 1
+                field_ssas.append(field_ssa)
+                field_types.append(ftype)
+            tup = self._fresh()
+            types_str = ", ".join(_mlir_type(ft) for ft in field_types)
+            self._emit(f"{tup} = stablehlo.tuple {', '.join(field_ssas)} : tuple<{types_str}>")
+            return tup
+        else:
+            ssa = flat_ssas[offset[0]]
+            offset[0] += 1
+            return ssa
+
     def _gen_function(self, fn: FnDef):
         env: dict[str, str] = {}  # maomi variable name -> SSA name
+        # (var_name, param_type, field_ssas) for struct params that need tuple reconstruction
+        struct_params: list[tuple[str, MaomiType, list[str]]] = []
 
-        # Build parameter list
+        # Build parameter list — flatten struct/struct-array types into individual tensors
         params = []
-        for i, p in enumerate(fn.params):
-            ssa = f"%arg{i}"
-            t = self.type_map.get(id(p)) if hasattr(p, 'span') else None
-            # Look up param type from the fn signature in the type_map
-            # We need to resolve param types from annotations
+        arg_idx = 0
+        for p in fn.params:
             param_type = self._resolve_param_type(p)
-            params.append(f"{ssa}: {_mlir_type(param_type)}")
-            env[p.name] = ssa
+            if isinstance(param_type, (StructType, StructArrayType)):
+                flat_types = self._flatten_struct_fields(param_type)
+                field_ssas = []
+                for ft in flat_types:
+                    ssa = f"%arg{arg_idx}"
+                    arg_idx += 1
+                    params.append(f"{ssa}: {_mlir_type(ft)}")
+                    field_ssas.append(ssa)
+                struct_params.append((p.name, param_type, field_ssas))
+            else:
+                ssa = f"%arg{arg_idx}"
+                arg_idx += 1
+                params.append(f"{ssa}: {_mlir_type(param_type)}")
+                env[p.name] = ssa
 
         ret_type = self._resolve_annotation_type(fn.return_type)
+        ret_is_struct = isinstance(ret_type, (StructType, StructArrayType))
+
+        if ret_is_struct:
+            flat_ret_types = self._flatten_struct_fields(ret_type)
+            ret_mlir = ", ".join(_mlir_type(ft) for ft in flat_ret_types)
+            ret_sig = f"({ret_mlir})"
+        else:
+            ret_sig = _mlir_type(ret_type)
+
         params_str = ", ".join(params)
-        self._emit(f"func.func @{fn.name}({params_str}) -> {_mlir_type(ret_type)} {{")
+        self._emit(f"func.func @{fn.name}({params_str}) -> {ret_sig} {{")
         self._indent += 1
 
+        # Reconstruct struct tuples from flat args inside function body
+        for var_name, param_type, field_ssas in struct_params:
+            tup = self._reconstruct_from_flat(field_ssas, param_type, [0])
+            env[var_name] = tup
+
         result = self._gen_block(fn.body, env)
-        self._emit(f"return {result} : {_mlir_type(ret_type)}")
+
+        # Flatten struct return
+        if ret_is_struct:
+            flat_rets: list[str] = []
+            self._destructure_to_flat(result, ret_type, flat_rets)
+            self._emit(f"return {', '.join(flat_rets)} : {ret_mlir}")
+        else:
+            self._emit(f"return {result} : {_mlir_type(ret_type)}")
 
         self._indent -= 1
         self._emit("}")
@@ -187,7 +301,11 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
                 field_types = []
                 for field_name, field_ta in sd.fields:
                     field_types.append((field_name, self._resolve_annotation_type(field_ta)))
-                return StructType(sd.name, tuple(field_types))
+                st = StructType(sd.name, tuple(field_types))
+                if ta.dims is not None:
+                    dims = tuple(d.value for d in ta.dims)
+                    return StructArrayType(st, dims)
+                return st
         # Fallback: treat as scalar (will likely error later)
         if ta.dims is None:
             return ScalarType(ta.base)
@@ -260,6 +378,8 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
                 return self._gen_while_grad(expr, env)
             case _IndexGrad():
                 return self._gen_index_grad(expr, env)
+            case _StructArrayIndexGrad():
+                return self._gen_struct_array_index_grad(expr, env)
             case _GatherGrad():
                 return self._gen_gather_grad(expr, env)
             case _Conv2dGrad():
@@ -733,11 +853,37 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
         arg_types = [self._type_of(a) for a in expr.args]
         result_type = self._type_of(expr)
 
-        args_str = ", ".join(args)
-        types_str = ", ".join(_mlir_type(t) for t in arg_types)
-        var = self._fresh()
-        self._emit(f"{var} = func.call @{expr.callee}({args_str}) : ({types_str}) -> {_mlir_type(result_type)}")
-        return var
+        # Flatten struct/struct-array args (function signatures are flattened)
+        flat_args = []
+        flat_arg_types = []
+        for arg_ssa, arg_t in zip(args, arg_types):
+            if isinstance(arg_t, (StructType, StructArrayType)):
+                field_ssas: list[str] = []
+                self._destructure_to_flat(arg_ssa, arg_t, field_ssas)
+                leaf_types = self._flatten_struct_fields(arg_t)
+                flat_args.extend(field_ssas)
+                flat_arg_types.extend(leaf_types)
+            else:
+                flat_args.append(arg_ssa)
+                flat_arg_types.append(arg_t)
+
+        args_str = ", ".join(flat_args)
+        types_str = ", ".join(_mlir_type(t) for t in flat_arg_types)
+
+        # Handle struct/struct-array return (function returns flat tensors, need to reconstruct tuple)
+        if isinstance(result_type, (StructType, StructArrayType)):
+            flat_ret_types = self._flatten_struct_fields(result_type)
+            ret_mlir = ", ".join(_mlir_type(ft) for ft in flat_ret_types)
+            n_rets = len(flat_ret_types)
+            call_var = self._fresh()
+            self._emit(f"{call_var}:{n_rets} = func.call @{expr.callee}({args_str}) : ({types_str}) -> ({ret_mlir})")
+            # Reconstruct tuple from flat results
+            field_ssas = [f"{call_var}#{i}" for i in range(n_rets)]
+            return self._reconstruct_from_flat(field_ssas, result_type, [0])
+        else:
+            var = self._fresh()
+            self._emit(f"{var} = func.call @{expr.callee}({args_str}) : ({types_str}) -> {_mlir_type(result_type)}")
+            return var
 
     def _gen_elementwise_builtin(self, expr: CallExpr, env: dict[str, str]) -> str:
         arg = self._gen_expr(expr.args[0], env)
@@ -2011,9 +2157,13 @@ class StableHLOCodegen(LoopCodegenMixin, ConvCodegenMixin, MapCodegenMixin,
         obj = self._gen_expr(expr.object, env)
         obj_type = self._type_of(expr.object)
         result_type = self._type_of(expr)
-        if not isinstance(obj_type, StructType):
+        # Both StructType and StructArrayType use tuple representation
+        if isinstance(obj_type, StructArrayType):
+            field_idx = next(i for i, (fn, _) in enumerate(obj_type.struct_type.fields) if fn == expr.field)
+        elif isinstance(obj_type, StructType):
+            field_idx = next(i for i, (fn, _) in enumerate(obj_type.fields) if fn == expr.field)
+        else:
             raise MaomiError("codegen: field access on non-struct", "<codegen>", 0, 0)
-        field_idx = next(i for i, (fn, _) in enumerate(obj_type.fields) if fn == expr.field)
         var = self._fresh()
         self._emit(
             f"{var} = stablehlo.get_tuple_element {obj}[{field_idx}] "

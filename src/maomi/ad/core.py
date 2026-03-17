@@ -56,6 +56,7 @@ from ..ast_nodes import (
     _ScanGrad,
     _WhileGrad,
     _IndexGrad,
+    _StructArrayIndexGrad,
     _GatherGrad,
     _Conv2dGrad,
     _MaxPoolGrad,
@@ -67,7 +68,7 @@ from ..ast_nodes import (
     _SortGrad,
     Expr,
 )
-from ..types import MaomiType, ScalarType, ArrayType, StructType, FLOAT_BASES
+from ..types import MaomiType, ScalarType, ArrayType, StructType, StructArrayType, FLOAT_BASES
 from ..errors import MaomiError
 
 from .constants import (
@@ -269,9 +270,15 @@ class ADTransform(SimpleGradRulesMixin, ComplexGradRulesMixin):
 
     # -- Reverse-mode AD core --
 
-    def _differentiate(self, expr: Expr, wrt: str, grad_expr: GradExpr,
+    def _differentiate(self, expr: Expr, wrt: str | tuple[str, list[str]], grad_expr: GradExpr,
                         let_env: dict[str, Expr]) -> Expr:
         """Compute d(expr)/d(wrt) using reverse-mode AD."""
+        # Handle dotted wrt: grad w.r.t. root, then extract field path
+        if isinstance(wrt, tuple):
+            root, path = wrt
+        else:
+            root, path = wrt, []
+
         # Collect the computation into a tape
         tape: list[tuple[str, Expr]] = []  # (name, expr)
         var_map: dict[int, str] = {}  # id(expr) -> tape variable name
@@ -297,15 +304,30 @@ class ADTransform(SimpleGradRulesMixin, ComplexGradRulesMixin):
             adj = adjoints[name]
             self._backprop(name, node, adj, adjoints, var_map)
 
-        # Return the adjoint for wrt
-        if wrt in adjoints:
-            result = adjoints[wrt]
+        # Return the adjoint for the root variable
+        if root in adjoints:
+            result = adjoints[root]
         else:
             # wrt doesn't appear in the expression — gradient is zero
-            if result_type is not None:
+            if result_type is not None and not path:
                 result = self._make_zero(result_type)
             else:
+                # For dotted path, we need the root type to make zero
                 result = self._make_float(0.0)
+
+        # For dotted paths, extract the field from the struct gradient
+        if path:
+            from ..ast_nodes import FieldAccess
+            root_type = self.type_map.get(id(result))
+            for field_name in path:
+                result = FieldAccess(result, field_name, grad_expr.span)
+                # Resolve field type for type_map
+                if root_type is not None and isinstance(root_type, StructType):
+                    for fn, ft in root_type.fields:
+                        if fn == field_name:
+                            root_type = ft
+                            break
+                    self.type_map[id(result)] = root_type
 
         # Register the result type in type_map
         if result_type is not None:
@@ -313,10 +335,16 @@ class ADTransform(SimpleGradRulesMixin, ComplexGradRulesMixin):
 
         return result
 
-    def _differentiate_value_and_grad(self, expr: Expr, wrt: str,
+    def _differentiate_value_and_grad(self, expr: Expr, wrt: str | tuple[str, list[str]],
                                        vag_expr: ValueAndGradExpr,
                                        let_env: dict[str, Expr]) -> Expr:
         """Compute both the forward value and d(expr)/d(wrt)."""
+        # Handle dotted wrt
+        if isinstance(wrt, tuple):
+            root, path = wrt
+        else:
+            root, path = wrt, []
+
         # Collect the computation into a tape
         tape: list[tuple[str, Expr]] = []
         var_map: dict[int, str] = {}
@@ -350,13 +378,26 @@ class ADTransform(SimpleGradRulesMixin, ComplexGradRulesMixin):
             adj = adjoints[name]
             self._backprop(name, node, adj, adjoints, var_map)
 
-        if wrt in adjoints:
-            grad_result = adjoints[wrt]
+        if root in adjoints:
+            grad_result = adjoints[root]
         else:
             if grad_type is not None:
                 grad_result = self._make_zero(grad_type)
             else:
                 grad_result = self._make_float(0.0)
+
+        # For dotted paths, extract the field from the struct gradient
+        if path:
+            from ..ast_nodes import FieldAccess
+            current_type = self.type_map.get(id(grad_result))
+            for field_name in path:
+                grad_result = FieldAccess(grad_result, field_name, vag_expr.span)
+                if current_type is not None and isinstance(current_type, StructType):
+                    for fn, ft in current_type.fields:
+                        if fn == field_name:
+                            current_type = ft
+                            break
+                    self.type_map[id(grad_result)] = current_type
 
         if grad_type is not None:
             self.type_map[id(grad_result)] = grad_type
@@ -492,6 +533,14 @@ class ADTransform(SimpleGradRulesMixin, ComplexGradRulesMixin):
                 self._linearize(init, tape, var_map, let_env)
                 for s in seqs:
                     self._linearize(s, tape, var_map, let_env)
+                # Also linearize free variables used in the fold body
+                # so they appear on the tape and can receive gradients
+                bound = {expr.carry_var} | set(expr.elem_vars)
+                if hasattr(self, '_find_free_vars'):
+                    free_idents = self._collect_free_ident_nodes(expr.body, bound)
+                    for fv_ident in free_idents:
+                        if id(fv_ident) not in var_map:
+                            self._linearize(fv_ident, tape, var_map, let_env)
                 name = self._fresh_name("v")
                 var_map[id(expr)] = name
                 tape.append((name, expr))
@@ -1082,7 +1131,10 @@ class ADTransform(SimpleGradRulesMixin, ComplexGradRulesMixin):
                 # adj of obj += struct with only 'field' set to adj
                 obj_name = var_map[id(obj)]
                 obj_type = self._type_of(obj)
-                if isinstance(obj_type, StructType):
+                if isinstance(obj_type, StructArrayType):
+                    partial = self._make_struct_array_with_field(obj_type, field, adj)
+                    self._accumulate(adjoints, obj_name, partial)
+                elif isinstance(obj_type, StructType):
                     partial = self._make_struct_with_field(obj_type, field, adj)
                     self._accumulate(adjoints, obj_name, partial)
 
@@ -1119,25 +1171,32 @@ class ADTransform(SimpleGradRulesMixin, ComplexGradRulesMixin):
                 base_name = var_map[id(base)]
                 base_type = self._type_of(base)
 
-                # Check if any index is an array (gather case)
-                gather_axis = None
-                gather_indices = None
-                for ic_i, ic in enumerate(indices):
-                    if ic.kind == "single":
-                        idx_type = self._type_of(ic.value)
-                        if isinstance(idx_type, ArrayType):
-                            gather_axis = ic_i
-                            gather_indices = ic.value
-                            break
-
-                if gather_axis is not None:
-                    grad_node = _GatherGrad(base, adj, gather_indices, gather_axis, _DUMMY_SPAN)
+                # StructArrayType indexing: scatter adjoint into zero SA
+                if isinstance(base_type, StructArrayType):
+                    if len(indices) == 1 and indices[0].kind == "single":
+                        grad_node = _StructArrayIndexGrad(base, adj, indices[0].value, _DUMMY_SPAN)
+                        self.type_map[id(grad_node)] = base_type
+                        self._accumulate(adjoints, base_name, grad_node)
                 else:
-                    grad_node = _IndexGrad(base, adj, indices, _DUMMY_SPAN)
+                    # Check if any index is an array (gather case)
+                    gather_axis = None
+                    gather_indices = None
+                    for ic_i, ic in enumerate(indices):
+                        if ic.kind == "single":
+                            idx_type = self._type_of(ic.value)
+                            if isinstance(idx_type, ArrayType):
+                                gather_axis = ic_i
+                                gather_indices = ic.value
+                                break
 
-                if base_type is not None:
-                    self.type_map[id(grad_node)] = base_type
-                self._accumulate(adjoints, base_name, grad_node)
+                    if gather_axis is not None:
+                        grad_node = _GatherGrad(base, adj, gather_indices, gather_axis, _DUMMY_SPAN)
+                    else:
+                        grad_node = _IndexGrad(base, adj, indices, _DUMMY_SPAN)
+
+                    if base_type is not None:
+                        self.type_map[id(grad_node)] = base_type
+                    self._accumulate(adjoints, base_name, grad_node)
 
             # -- Grad-of-grad: backprop through internal gradient nodes --
 
@@ -1282,6 +1341,15 @@ class ADTransform(SimpleGradRulesMixin, ComplexGradRulesMixin):
             broadcast = _BroadcastExpr(zero, list(t.dims), _DUMMY_SPAN)
             self.type_map[id(broadcast)] = t
             return broadcast
+        # StructArrayType: create struct literal with zero batched fields
+        if isinstance(t, StructArrayType):
+            fields = []
+            for fname, ftype in t.struct_type.fields:
+                batched = self._prepend_dims_to_type(t.dims, ftype)
+                fields.append((fname, self._make_zero(batched)))
+            node = StructLiteral(t.struct_type.name, fields, _DUMMY_SPAN)
+            self.type_map[id(node)] = t
+            return node
         # Struct: create a struct literal with zero fields
         if isinstance(t, StructType):
             fields = []
@@ -1291,6 +1359,16 @@ class ADTransform(SimpleGradRulesMixin, ComplexGradRulesMixin):
             self.type_map[id(node)] = t
             return node
         return self._make_float(0.0)
+
+    @staticmethod
+    def _prepend_dims_to_type(dims: tuple, ftype: MaomiType) -> MaomiType:
+        if isinstance(ftype, ScalarType):
+            return ArrayType(ftype.base, dims)
+        if isinstance(ftype, ArrayType):
+            return ArrayType(ftype.base, dims + ftype.dims)
+        if isinstance(ftype, StructType):
+            return StructArrayType(ftype, dims)
+        return ftype
 
     def _reduce_broadcast(self, adj: Expr, operand_type: MaomiType) -> Expr:
         """Reduce adj to match operand_type by summing over broadcast dims.
@@ -1462,6 +1540,19 @@ class ADTransform(SimpleGradRulesMixin, ComplexGradRulesMixin):
         self.type_map[id(node)] = stype
         return node
 
+    def _make_struct_array_with_field(self, sa_type: StructArrayType, field_name: str, value: Expr) -> Expr:
+        """Create a struct array literal with one field set to value, rest zeroed."""
+        fields = []
+        for fn, ft in sa_type.struct_type.fields:
+            batched = self._prepend_dims_to_type(sa_type.dims, ft)
+            if fn == field_name:
+                fields.append((fn, value))
+            else:
+                fields.append((fn, self._make_zero(batched)))
+        node = StructLiteral(sa_type.struct_type.name, fields, _DUMMY_SPAN)
+        self.type_map[id(node)] = sa_type
+        return node
+
     def _accumulate(self, adjoints: dict[str, Expr], name: str, contribution: Expr):
         """Add contribution to the adjoint of name."""
         if name in adjoints:
@@ -1470,6 +1561,8 @@ class ADTransform(SimpleGradRulesMixin, ComplexGradRulesMixin):
             existing_type = self.type_map.get(id(existing))
             if isinstance(existing_type, StructType):
                 adjoints[name] = self._struct_add(existing, contribution, existing_type)
+            elif isinstance(existing_type, StructArrayType):
+                adjoints[name] = self._struct_array_add(existing, contribution, existing_type)
             else:
                 adjoints[name] = self._make_binop("+", existing, contribution)
         else:
@@ -1489,4 +1582,18 @@ class ADTransform(SimpleGradRulesMixin, ComplexGradRulesMixin):
                 fields.append((fn, self._make_binop("+", fa, fb)))
         node = StructLiteral(stype.name, fields, _DUMMY_SPAN)
         self.type_map[id(node)] = stype
+        return node
+
+    def _struct_array_add(self, a: Expr, b: Expr, sa_type: StructArrayType) -> Expr:
+        """Field-wise addition of two struct-array-typed expressions."""
+        fields = []
+        for fn, ft in sa_type.struct_type.fields:
+            batched = self._prepend_dims_to_type(sa_type.dims, ft)
+            fa = FieldAccess(a, fn, _DUMMY_SPAN)
+            fb = FieldAccess(b, fn, _DUMMY_SPAN)
+            self.type_map[id(fa)] = batched
+            self.type_map[id(fb)] = batched
+            fields.append((fn, self._make_binop("+", fa, fb)))
+        node = StructLiteral(sa_type.struct_type.name, fields, _DUMMY_SPAN)
+        self.type_map[id(node)] = sa_type
         return node

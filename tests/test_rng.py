@@ -87,10 +87,8 @@ class TestKeyTypeAlias:
         assert ret == ArrayType("i32", (4,))
 
     def test_key_with_dims_error(self):
-        """Key[2] is a parse error — parser only allows dims on base types."""
-        from maomi.errors import MaomiError
-        with pytest.raises(MaomiError):
-            codegen("fn f(k: Key[2]) -> Key { k }")
+        """Key[2] should error — Key type doesn't take dimensions."""
+        check_err("fn f(k: Key[2]) -> Key { k }", "does not take dimensions")
 
 
 class TestRngKeyTypeCheck:

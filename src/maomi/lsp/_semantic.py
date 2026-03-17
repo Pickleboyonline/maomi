@@ -5,9 +5,11 @@ from lsprotocol import types
 
 from ..ast_nodes import (
     FnDef, Block, LetStmt, ExprStmt, Param,
-    CallExpr, ScanExpr, MapExpr,
-    Identifier, IntLiteral, FloatLiteral, StringLiteral,
-    StructLiteral, FieldAccess, StructDef, TypeAnnotation,
+    CallExpr, ScanExpr, MapExpr, FoldExpr, WhileExpr, IfExpr,
+    GradExpr, ValueAndGradExpr, CastExpr,
+    Identifier, IntLiteral, FloatLiteral, BoolLiteral, StringLiteral,
+    StructLiteral, FieldAccess, StructDef, TypeAlias, TypeAnnotation,
+    ImportDecl,
 )
 from ._core import server, _cache, _local_functions
 from ._ast_utils import _children_of
@@ -42,6 +44,15 @@ _MOD_DEFINITION = 2
 def _sem_collect_tokens(node, tokens: list, param_names: set[str]):
     """Recursively collect semantic tokens from AST nodes."""
     if isinstance(node, FnDef):
+        # "fn" keyword
+        tokens.append((
+            node.span.line_start - 1,
+            node.span.col_start - 1,
+            2,  # len("fn")
+            _ST_KEYWORD,
+            0,
+        ))
+        # function name
         tokens.append((
             node.span.line_start - 1,
             node.span.col_start - 1 + 3,
@@ -49,6 +60,8 @@ def _sem_collect_tokens(node, tokens: list, param_names: set[str]):
             _ST_FUNCTION,
             _MOD_DECLARATION | _MOD_DEFINITION,
         ))
+        # return type annotation
+        _sem_add_type_annotation(node.return_type, tokens)
         fn_param_names = {p.name for p in node.params}
         for p in node.params:
             _sem_collect_tokens(p, tokens, fn_param_names)
@@ -67,6 +80,15 @@ def _sem_collect_tokens(node, tokens: list, param_names: set[str]):
         return
 
     if isinstance(node, StructDef):
+        # "struct" keyword
+        tokens.append((
+            node.span.line_start - 1,
+            node.span.col_start - 1,
+            6,  # len("struct")
+            _ST_KEYWORD,
+            0,
+        ))
+        # struct name
         tokens.append((
             node.span.line_start - 1,
             node.span.col_start - 1 + 7,
@@ -74,8 +96,35 @@ def _sem_collect_tokens(node, tokens: list, param_names: set[str]):
             _ST_STRUCT,
             _MOD_DECLARATION | _MOD_DEFINITION,
         ))
-        for _, type_ann in node.fields:
+        for field_name, type_ann in node.fields:
+            # field name as property
+            tokens.append((
+                type_ann.span.line_start - 1,
+                type_ann.span.col_start - 1 - len(field_name) - 2,  # before ": type"
+                len(field_name),
+                _ST_PROPERTY,
+                _MOD_DECLARATION,
+            ))
             _sem_add_type_annotation(type_ann, tokens)
+        return
+
+    if isinstance(node, TypeAlias):
+        # "type" keyword + alias name
+        tokens.append((
+            node.span.line_start - 1,
+            node.span.col_start - 1,
+            4,  # len("type")
+            _ST_KEYWORD,
+            0,
+        ))
+        tokens.append((
+            node.span.line_start - 1,
+            node.span.col_start - 1 + 5,
+            len(node.name),
+            _ST_TYPE,
+            _MOD_DECLARATION | _MOD_DEFINITION,
+        ))
+        _sem_add_type_annotation(node.type_annotation, tokens)
         return
 
     if isinstance(node, Identifier):
@@ -144,11 +193,21 @@ def _sem_collect_tokens(node, tokens: list, param_names: set[str]):
         ))
         return
 
+    if isinstance(node, BoolLiteral):
+        tokens.append((
+            node.span.line_start - 1,
+            node.span.col_start - 1,
+            node.span.col_end - node.span.col_start,
+            _ST_KEYWORD,
+            0,
+        ))
+        return
+
     if isinstance(node, LetStmt):
         tokens.append((
             node.span.line_start - 1,
             node.span.col_start - 1,
-            3,
+            3,  # "let"
             _ST_KEYWORD,
             0,
         ))
@@ -160,6 +219,69 @@ def _sem_collect_tokens(node, tokens: list, param_names: set[str]):
             _MOD_DECLARATION,
         ))
         _sem_collect_tokens(node.value, tokens, param_names)
+        return
+
+    if isinstance(node, IfExpr):
+        tokens.append((
+            node.span.line_start - 1,
+            node.span.col_start - 1,
+            2,  # "if"
+            _ST_KEYWORD,
+            0,
+        ))
+        _sem_collect_tokens(node.condition, tokens, param_names)
+        _sem_collect_tokens(node.then_block, tokens, param_names)
+        _sem_collect_tokens(node.else_block, tokens, param_names)
+        return
+
+    if isinstance(node, (ScanExpr, FoldExpr)):
+        kw = "scan" if isinstance(node, ScanExpr) else "fold"
+        tokens.append((
+            node.span.line_start - 1,
+            node.span.col_start - 1,
+            len(kw),
+            _ST_KEYWORD,
+            0,
+        ))
+        _sem_collect_tokens(node.init, tokens, param_names)
+        for seq in node.sequences:
+            _sem_collect_tokens(seq, tokens, param_names)
+        _sem_collect_tokens(node.body, tokens, param_names)
+        return
+
+    if isinstance(node, MapExpr):
+        tokens.append((
+            node.span.line_start - 1,
+            node.span.col_start - 1,
+            3,  # "map"
+            _ST_KEYWORD,
+            0,
+        ))
+        _sem_collect_tokens(node.sequence, tokens, param_names)
+        _sem_collect_tokens(node.body, tokens, param_names)
+        return
+
+    if isinstance(node, (GradExpr, ValueAndGradExpr)):
+        kw = "grad" if isinstance(node, GradExpr) else "value_and_grad"
+        tokens.append((
+            node.span.line_start - 1,
+            node.span.col_start - 1,
+            len(kw),
+            _ST_KEYWORD,
+            0,
+        ))
+        _sem_collect_tokens(node.expr, tokens, param_names)
+        return
+
+    if isinstance(node, CastExpr):
+        tokens.append((
+            node.span.line_start - 1,
+            node.span.col_start - 1,
+            4,  # "cast"
+            _ST_KEYWORD,
+            0,
+        ))
+        _sem_collect_tokens(node.expr, tokens, param_names)
         return
 
     for child in _children_of(node):
@@ -203,6 +325,9 @@ def semantic_tokens_full(ls: LanguageServer, params: types.SemanticTokensParams)
         return types.SemanticTokens(data=[])
 
     tokens: list[tuple] = []
+
+    for ta in result.program.type_aliases:
+        _sem_collect_tokens(ta, tokens, set())
 
     for sd in result.program.struct_defs:
         _sem_collect_tokens(sd, tokens, set())

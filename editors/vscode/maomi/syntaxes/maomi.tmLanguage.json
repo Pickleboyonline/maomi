@@ -2,30 +2,22 @@
   "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
   "name": "Maomi",
   "scopeName": "source.maomi",
+  "comment": "Minimal TextMate grammar — LSP semantic tokens handle most highlighting. TextMate covers imports (not in AST after resolution), comments, strings, numbers, operators.",
   "patterns": [
     { "include": "#doc-comments" },
     { "include": "#comments" },
     { "include": "#strings" },
-    { "include": "#struct-definition" },
-    { "include": "#function-definition" },
-    { "include": "#builtin-functions" },
     { "include": "#keywords-import" },
-    { "include": "#keywords-control" },
-    { "include": "#keyword-grad" },
-    { "include": "#keyword-let" },
-    { "include": "#constants-boolean" },
+    { "include": "#keywords-all" },
     { "include": "#types" },
-    { "include": "#struct-literal" },
+    { "include": "#constants-boolean" },
     { "include": "#numbers-float" },
     { "include": "#numbers-integer" },
-    { "include": "#qualified-call" },
-    { "include": "#function-call" },
+    { "include": "#struct-literal" },
     { "include": "#operator-arrow" },
     { "include": "#operator-pipe" },
     { "include": "#operators-comparison" },
     { "include": "#operators-arithmetic" },
-    { "include": "#operator-assignment" },
-    { "include": "#dot-accessor" },
     { "include": "#punctuation" }
   ],
   "repository": {
@@ -36,6 +28,36 @@
     "comments": {
       "match": "//.*$",
       "name": "comment.line.double-slash.maomi"
+    },
+    "keywords-import": {
+      "match": "\\b(import|from|as)\\b",
+      "name": "keyword.control.import.maomi"
+    },
+    "keywords-all": {
+      "match": "\\b(fn|let|if|else|struct|type|with|scan|map|fold|while|do|limit|grad|value_and_grad|cast|comptime|in|and|or|not)\\b",
+      "name": "keyword.other.maomi"
+    },
+    "types": {
+      "patterns": [
+        {
+          "match": "\\b(f32|f64|bf16|i32|i64|bool|Key)\\b",
+          "name": "storage.type.primitive.maomi"
+        },
+        {
+          "match": "(?<=:\\s*)([A-Z]\\w*)\\b",
+          "name": "entity.name.type.struct.maomi"
+        }
+      ]
+    },
+    "constants-boolean": {
+      "match": "\\b(true|false)\\b",
+      "name": "constant.language.boolean.maomi"
+    },
+    "struct-literal": {
+      "match": "\\b([A-Z]\\w*)\\s*(?=\\{)",
+      "captures": {
+        "1": { "name": "entity.name.type.struct.maomi" }
+      }
     },
     "strings": {
       "begin": "\"",
@@ -48,56 +70,6 @@
         "0": { "name": "punctuation.definition.string.end.maomi" }
       }
     },
-    "struct-definition": {
-      "match": "\\b(struct)\\s+([A-Z]\\w*)",
-      "captures": {
-        "1": { "name": "storage.type.struct.maomi" },
-        "2": { "name": "entity.name.type.struct.maomi" }
-      }
-    },
-    "function-definition": {
-      "match": "\\b(fn)\\s+([a-zA-Z_]\\w*)",
-      "captures": {
-        "1": { "name": "storage.type.function.maomi" },
-        "2": { "name": "entity.name.function.maomi" }
-      }
-    },
-    "builtin-functions": {
-      "match": "\\b(exp|log|tanh|sqrt|abs|mean|sum|max|min|argmax|argmin|callback|transpose|reshape|concat|iota|stop_gradient|where|conv2d|max_pool|avg_pool|random\\.key|random\\.split|random\\.uniform|random\\.normal)\\b(?=\\s*\\()",
-      "name": "support.function.builtin.maomi"
-    },
-    "keywords-import": {
-      "match": "\\b(import|from|as)\\b",
-      "name": "keyword.control.import.maomi"
-    },
-    "keywords-control": {
-      "match": "\\b(if|else|scan|map|in|with|while|do|limit|fold)\\b",
-      "name": "keyword.control.maomi"
-    },
-    "keyword-grad": {
-      "match": "\\b(grad|cast)\\b",
-      "name": "keyword.other.grad.maomi"
-    },
-    "keyword-let": {
-      "match": "\\blet\\b",
-      "name": "storage.type.maomi"
-    },
-    "constants-boolean": {
-      "match": "\\b(true|false)\\b",
-      "name": "constant.language.boolean.maomi"
-    },
-    "types": {
-      "patterns": [
-        {
-          "match": "\\b(f32|f64|i32|i64|bool)\\b",
-          "name": "storage.type.primitive.maomi"
-        },
-        {
-          "match": "(?<=:\\s*)([A-Z]\\w*)\\b",
-          "name": "entity.name.type.struct.maomi"
-        }
-      ]
-    },
     "numbers-float": {
       "match": "\\b\\d+\\.\\d+([eE][+-]?\\d+)?\\b|\\b\\d+[eE][+-]?\\d+\\b",
       "name": "constant.numeric.float.maomi"
@@ -105,26 +77,6 @@
     "numbers-integer": {
       "match": "\\b\\d+\\b",
       "name": "constant.numeric.integer.maomi"
-    },
-    "struct-literal": {
-      "match": "\\b([A-Z]\\w*)\\s*(?=\\{)",
-      "captures": {
-        "1": { "name": "entity.name.type.struct.maomi" }
-      }
-    },
-    "qualified-call": {
-      "match": "\\b([a-zA-Z_]\\w*)(\\.)([a-zA-Z_]\\w*)\\s*(?=\\()",
-      "captures": {
-        "1": { "name": "entity.name.namespace.maomi" },
-        "2": { "name": "punctuation.accessor.dot.maomi" },
-        "3": { "name": "entity.name.function.call.maomi" }
-      }
-    },
-    "function-call": {
-      "match": "\\b([a-zA-Z_]\\w*)\\s*(?=\\()",
-      "captures": {
-        "1": { "name": "entity.name.function.call.maomi" }
-      }
     },
     "operator-arrow": {
       "match": "->",
@@ -142,14 +94,6 @@
       "match": "\\*\\*|[+\\-*/]|@",
       "name": "keyword.operator.arithmetic.maomi"
     },
-    "operator-assignment": {
-      "match": "(?<![!=])=(?!=)",
-      "name": "keyword.operator.assignment.maomi"
-    },
-    "dot-accessor": {
-      "match": "\\.",
-      "name": "punctuation.accessor.dot.maomi"
-    },
     "punctuation": {
       "patterns": [
         { "match": "[{}]", "name": "punctuation.section.block.maomi" },
@@ -157,7 +101,9 @@
         { "match": "[\\[\\]]", "name": "punctuation.section.brackets.maomi" },
         { "match": ",", "name": "punctuation.separator.comma.maomi" },
         { "match": ":", "name": "punctuation.separator.colon.maomi" },
-        { "match": ";", "name": "punctuation.terminator.statement.maomi" }
+        { "match": ";", "name": "punctuation.terminator.statement.maomi" },
+        { "match": "\\.", "name": "punctuation.accessor.dot.maomi" },
+        { "match": "(?<![!=])=(?!=)", "name": "keyword.operator.assignment.maomi" }
       ]
     }
   }

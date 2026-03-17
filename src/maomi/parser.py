@@ -35,6 +35,7 @@ from .ast_nodes import (
     WithExpr,
     IndexComponent,
     IndexExpr,
+    TypeAlias,
     Expr,
 )
 from .errors import ParseError
@@ -105,13 +106,16 @@ class Parser:
             imports.append(self._parse_import())
         struct_defs: list[StructDef] = []
         functions: list[FnDef] = []
+        type_aliases: list[TypeAlias] = []
         while not self._at_end():
             doc = self._collect_doc_comments()
             if self._check(TokenType.STRUCT):
                 struct_defs.append(self._parse_struct_def(doc))
+            elif self._check(TokenType.TYPE):
+                type_aliases.append(self._parse_type_alias())
             else:
                 functions.append(self._parse_fn_def(doc))
-        return Program(imports, struct_defs, functions, self._span_from(start))
+        return Program(imports, struct_defs, functions, self._span_from(start), type_aliases=type_aliases)
 
     # -- Import declarations --
 
@@ -183,6 +187,16 @@ class Parser:
         self._expect(TokenType.RBRACE)
         return StructDef(name, fields, self._span_from(start), doc=doc)
 
+    # -- Type alias --
+
+    def _parse_type_alias(self) -> TypeAlias:
+        start = self._expect(TokenType.TYPE)
+        name = self._expect(TokenType.IDENT).value
+        self._expect(TokenType.ASSIGN)
+        type_ann = self._parse_type()
+        self._expect(TokenType.SEMICOLON)
+        return TypeAlias(name, type_ann, self._span_from(start))
+
     # -- Function definition --
 
     def _parse_fn_def(self, doc: str | None = None) -> FnDef:
@@ -236,7 +250,14 @@ class Parser:
             while self._check(TokenType.DOT):
                 self._advance()  # consume '.'
                 base += "." + self._expect(TokenType.IDENT).value
-            return TypeAnnotation(base, None, self._span_from(start))
+            # Allow dims for struct array types: Batch[N], Batch[100]
+            dims = None
+            if self._match(TokenType.LBRACKET):
+                dims = [self._parse_dim()]
+                while self._match(TokenType.COMMA):
+                    dims.append(self._parse_dim())
+                self._expect(TokenType.RBRACKET)
+            return TypeAnnotation(base, dims, self._span_from(start))
         raise self._error(f"expected type, got {start.type.value}")
 
     def _parse_dim(self) -> Dim:
@@ -417,12 +438,20 @@ class Parser:
         body = self._parse_block()
         return MapExpr(elem_var, sequence, body, self._span_from(start))
 
+    def _parse_wrt(self) -> str | tuple[str, list[str]]:
+        """Parse wrt argument: 'x' or 'state.params.w1' (dotted path)."""
+        root = self._expect(TokenType.IDENT).value
+        path: list[str] = []
+        while self._match(TokenType.DOT):
+            path.append(self._expect(TokenType.IDENT).value)
+        return (root, path) if path else root
+
     def _parse_grad(self) -> GradExpr:
         start = self._expect(TokenType.GRAD)
         self._expect(TokenType.LPAREN)
         expr = self._parse_expr()
         self._expect(TokenType.COMMA)
-        wrt = self._expect(TokenType.IDENT).value
+        wrt = self._parse_wrt()
         self._expect(TokenType.RPAREN)
         return GradExpr(expr, wrt, self._span_from(start))
 
@@ -431,7 +460,7 @@ class Parser:
         self._expect(TokenType.LPAREN)
         expr = self._parse_expr()
         self._expect(TokenType.COMMA)
-        wrt = self._expect(TokenType.IDENT).value
+        wrt = self._parse_wrt()
         self._expect(TokenType.RPAREN)
         return ValueAndGradExpr(expr, wrt, self._span_from(start))
 
@@ -542,12 +571,58 @@ class Parser:
             self._advance()
             rhs = self._parse_or()
             span = Span(expr.span.line_start, expr.span.col_start, rhs.span.line_end, rhs.span.col_end)
-            if isinstance(rhs, CallExpr):
+            if self._contains_placeholder(rhs):
+                expr = self._substitute_placeholder(rhs, expr)
+            elif isinstance(rhs, CallExpr):
                 expr = CallExpr(rhs.callee, [expr] + rhs.args, span, named_args=rhs.named_args)
             elif isinstance(rhs, Identifier):
                 expr = CallExpr(rhs.name, [expr], span)
             else:
-                raise self._error("expected function name or call after '|>'")
+                raise self._error("expected function name, call, or expression with '_' after '|>'")
+        return expr
+
+    @staticmethod
+    def _contains_placeholder(expr: Expr) -> bool:
+        """Check if an expression tree contains Identifier('_')."""
+        if isinstance(expr, Identifier):
+            return expr.name == "_"
+        if isinstance(expr, BinOp):
+            return Parser._contains_placeholder(expr.left) or Parser._contains_placeholder(expr.right)
+        if isinstance(expr, UnaryOp):
+            return Parser._contains_placeholder(expr.operand)
+        if isinstance(expr, CallExpr):
+            return any(Parser._contains_placeholder(a) for a in expr.args)
+        if isinstance(expr, FieldAccess):
+            return Parser._contains_placeholder(expr.object)
+        if isinstance(expr, IndexExpr):
+            return Parser._contains_placeholder(expr.base)
+        if isinstance(expr, IfExpr):
+            return (Parser._contains_placeholder(expr.condition)
+                    or any(Parser._contains_placeholder(s.value) if isinstance(s, LetStmt)
+                           else Parser._contains_placeholder(s.expr) for s in expr.then_block.stmts)
+                    or (expr.then_block.expr is not None and Parser._contains_placeholder(expr.then_block.expr)))
+        return False
+
+    @staticmethod
+    def _substitute_placeholder(expr: Expr, replacement: Expr) -> Expr:
+        """Replace all Identifier('_') in expr with replacement."""
+        if isinstance(expr, Identifier):
+            return replacement if expr.name == "_" else expr
+        if isinstance(expr, BinOp):
+            return BinOp(expr.op,
+                         Parser._substitute_placeholder(expr.left, replacement),
+                         Parser._substitute_placeholder(expr.right, replacement),
+                         expr.span)
+        if isinstance(expr, UnaryOp):
+            return UnaryOp(expr.op, Parser._substitute_placeholder(expr.operand, replacement), expr.span)
+        if isinstance(expr, CallExpr):
+            return CallExpr(expr.callee,
+                            [Parser._substitute_placeholder(a, replacement) for a in expr.args],
+                            expr.span, named_args=expr.named_args)
+        if isinstance(expr, FieldAccess):
+            return FieldAccess(Parser._substitute_placeholder(expr.object, replacement), expr.field, expr.span)
+        if isinstance(expr, IndexExpr):
+            return IndexExpr(Parser._substitute_placeholder(expr.base, replacement), expr.indices, expr.span)
         return expr
 
     def _parse_or(self) -> Expr:

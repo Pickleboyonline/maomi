@@ -82,6 +82,7 @@ class TokenType(StrEnum):
 
     # Compile-time
     COMPTIME = auto()
+    TYPE = auto()
 
     # Special
     EOF = auto()
@@ -124,6 +125,7 @@ KEYWORDS: dict[str, TokenType] = {
     "cast": TokenType.CAST,
     "fold": TokenType.FOLD,
     "comptime": TokenType.COMPTIME,
+    "type": TokenType.TYPE,
     "and": TokenType.AND,
     "or": TokenType.OR,
     "not": TokenType.NOT,

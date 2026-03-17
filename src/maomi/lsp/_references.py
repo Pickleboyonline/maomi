@@ -26,10 +26,14 @@ def _refs_walk_node(node, name, kind, spans):
     elif kind == "variable":
         if isinstance(node, Identifier) and node.name == name:
             spans.append(node.span)
-        if isinstance(node, GradExpr) and node.wrt == name:
-            spans.append(node.span)
-        if isinstance(node, ValueAndGradExpr) and node.wrt == name:
-            spans.append(node.span)
+        if isinstance(node, GradExpr):
+            wrt_root = node.wrt[0] if isinstance(node.wrt, tuple) else node.wrt
+            if wrt_root == name:
+                spans.append(node.span)
+        if isinstance(node, ValueAndGradExpr):
+            wrt_root = node.wrt[0] if isinstance(node.wrt, tuple) else node.wrt
+            if wrt_root == name:
+                spans.append(node.span)
     elif kind == "struct":
         if isinstance(node, StructLiteral) and node.name == name:
             spans.append(node.span)

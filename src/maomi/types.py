@@ -53,7 +53,24 @@ class TypeVar:
         return self.name
 
 
-MaomiType = ScalarType | ArrayType | StructType | WildcardArrayType | StringType | TypeVar
+@dataclass(frozen=True)
+class StructArrayType:
+    """Array of structs, stored as struct-of-arrays (SoA).
+    Batch[N] where Batch{x: f32[64,784], y: f32[64,10]}
+    → XLA tuple<tensor<N×64×784×f32>, tensor<N×64×10×f32>>"""
+    struct_type: StructType
+    dims: tuple[int | str, ...]  # leading batch dimensions
+
+    @property
+    def name(self) -> str:
+        return self.struct_type.name
+
+    def __str__(self) -> str:
+        dims_str = ", ".join(str(d) for d in self.dims)
+        return f"{self.struct_type.name}[{dims_str}]"
+
+
+MaomiType = ScalarType | ArrayType | StructType | StructArrayType | WildcardArrayType | StringType | TypeVar
 
 # Convenience constants
 F32 = ScalarType("f32")
