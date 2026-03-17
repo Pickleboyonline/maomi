@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from lsprotocol import types
 
 from ..ast_nodes import (
@@ -8,6 +10,8 @@ from ..ast_nodes import (
 from ._core import server, _cache, AnalysisResult, _local_functions
 from ._ast_utils import _find_node_at
 from ._builtin_data import _BUILTIN_SIGNATURES, _BUILTIN_DOCS
+
+logger = logging.getLogger("maomi-lsp")
 
 
 def _fmt_annotation(ta) -> str:
@@ -97,6 +101,8 @@ def _get_hover_text(node, fn: FnDef, result: AnalysisResult) -> str | None:
 
 @server.feature(types.TEXT_DOCUMENT_HOVER)
 def hover(ls, params: types.HoverParams):
+    logger.debug("hover: %s at %d:%d", params.text_document.uri,
+                 params.position.line, params.position.character)
     uri = params.text_document.uri
     result = _cache.get(uri)
     if not result or not result.program:

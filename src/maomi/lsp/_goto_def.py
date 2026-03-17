@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from lsprotocol import types
@@ -12,6 +13,8 @@ from ..ast_nodes import (
 from ..types import StructType
 from ._core import server, _cache, _local_functions
 from ._ast_utils import _span_contains, _find_node_at, _span_to_range
+
+logger = logging.getLogger("maomi-lsp")
 
 
 def _goto_find_binding_in_block(name, block, line, col):
@@ -114,6 +117,8 @@ def _goto_find_definition(node, fn, result):
 
 @server.feature(types.TEXT_DOCUMENT_DEFINITION)
 def goto_definition(ls, params: types.DefinitionParams):
+    logger.debug("goto_definition: %s at %d:%d", params.text_document.uri,
+                 params.position.line, params.position.character)
     uri = params.text_document.uri
     result = _cache.get(uri)
     if not result or not result.program:

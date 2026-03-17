@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from lsprotocol import types
 
 from ..ast_nodes import (
@@ -12,6 +14,8 @@ from ._ast_utils import (
     _span_contains, _find_node_at, _span_to_range, _children_of,
     classify_symbol,
 )
+
+logger = logging.getLogger("maomi-lsp")
 
 
 # Keep _refs_classify_node as alias for backward compat (tests import it)
@@ -94,6 +98,8 @@ def _refs_find_let_decl(block, name, spans):
 
 @server.feature(types.TEXT_DOCUMENT_REFERENCES)
 def find_references(ls, params: types.ReferenceParams):
+    logger.debug("find_references: %s at %d:%d", params.text_document.uri,
+                 params.position.line, params.position.character)
     uri = params.text_document.uri
     result = _cache.get(uri)
     if not result or not result.program:
