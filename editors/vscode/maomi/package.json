@@ -58,6 +58,11 @@
           "description": "Path to the maomi executable (install LSP support with: uv sync --extra lsp)"
         }
       }
+    },
+    "configurationDefaults": {
+      "[maomi]": {
+        "editor.semanticHighlighting.enabled": true
+      }
     }
   },
   "dependencies": {
