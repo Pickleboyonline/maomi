@@ -14,6 +14,10 @@
       {
         "command": "maomi.run",
         "title": "Maomi: Run Function"
+      },
+      {
+        "command": "maomi.matchBrace",
+        "title": "Maomi: Go to Matching Brace"
       }
     ],
     "languages": [
@@ -35,12 +39,6 @@
         "path": "./syntaxes/maomi.tmLanguage.json"
       }
     ],
-    "commands": [
-      {
-        "command": "maomi.matchBrace",
-        "title": "Maomi: Go to Matching Brace"
-      }
-    ],
     "keybindings": [
       {
         "command": "maomi.matchBrace",
@@ -57,6 +55,46 @@
           "default": "maomi",
           "description": "Path to the maomi executable (install LSP support with: uv sync --extra lsp)"
         }
+      }
+    },
+    "semanticTokenTypes": [
+      { "id": "builtinFunction", "superType": "function", "description": "Built-in function (sum, exp, relu, etc.)" },
+      { "id": "builtinType", "superType": "type", "description": "Built-in type (f32, i32, bool, etc.)" },
+      { "id": "boolean", "superType": "keyword", "description": "Boolean literal (true/false)" },
+      { "id": "typeAlias", "superType": "type", "description": "Type alias name" }
+    ],
+    "semanticTokenModifiers": [
+      { "id": "controlFlow", "description": "Control flow keyword (if, else, while, scan, map, fold)" },
+      { "id": "builtin", "description": "Built-in identifier" },
+      { "id": "readonly", "description": "Immutable binding" }
+    ],
+    "semanticTokenScopes": [
+      {
+        "language": "maomi",
+        "scopes": {
+          "function": ["entity.name.function.maomi"],
+          "builtinFunction": ["support.function.maomi"],
+          "parameter": ["variable.parameter.maomi"],
+          "variable": ["variable.other.maomi"],
+          "struct": ["entity.name.type.struct.maomi"],
+          "property": ["variable.other.property.maomi"],
+          "type": ["entity.name.type.maomi"],
+          "builtinType": ["support.type.primitive.maomi"],
+          "typeAlias": ["entity.name.type.alias.maomi"],
+          "number": ["constant.numeric.maomi"],
+          "keyword": ["keyword.other.maomi"],
+          "keyword.controlFlow": ["keyword.control.maomi"],
+          "string": ["string.quoted.double.maomi"],
+          "namespace": ["entity.name.namespace.maomi"],
+          "operator": ["keyword.operator.maomi"],
+          "boolean": ["constant.language.boolean.maomi"],
+          "comment": ["comment.line.double-slash.maomi"]
+        }
+      }
+    ],
+    "configurationDefaults": {
+      "[maomi]": {
+        "editor.semanticHighlighting.enabled": true
       }
     }
   },
