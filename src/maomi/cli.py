@@ -10,6 +10,7 @@ from .codegen.stablehlo import StableHLOCodegen
 from .ad import transform_grad
 from .resolver import resolve
 from .errors import MaomiError
+from .render import render_error
 from .ast_nodes import Span
 from .types import MaomiType, ArrayType, StructType
 
@@ -240,8 +241,9 @@ def _compile(path: str, emit: str, backend: str = "stablehlo", config_path: str 
         checker = TypeChecker(filename=path)
         errors = checker.check(program)
         if errors:
+            use_color = sys.stderr.isatty()
             for err in errors:
-                print(f"{err}", file=sys.stderr)
+                print(render_error(err, source, use_color=use_color), file=sys.stderr)
             sys.exit(1)
         if emit == "types":
             if program.struct_defs:
@@ -273,7 +275,7 @@ def _compile(path: str, emit: str, backend: str = "stablehlo", config_path: str 
             print(output)
 
     except MaomiError as e:
-        print(f"{e}", file=sys.stderr)
+        print(render_error(e, source, use_color=sys.stderr.isatty()), file=sys.stderr)
         sys.exit(1)
 
 
@@ -288,7 +290,7 @@ def _run(path: str, fn_name: str, seed: int, config_path: str | None = None):
     try:
         result = compile_source(source, filename=path, config=_load_config(config_path))
     except MaomiError as e:
-        print(f"{e}", file=sys.stderr)
+        print(render_error(e, source, use_color=sys.stderr.isatty()), file=sys.stderr)
         sys.exit(1)
 
     if fn_name not in result.fn_table:
@@ -361,7 +363,7 @@ def _run_relax(path: str, fn_name: str, seed: int, target: str):
     try:
         result = compile_source_relax(source, filename=path)
     except MaomiError as e:
-        print(f"{e}", file=sys.stderr)
+        print(render_error(e, source, use_color=sys.stderr.isatty()), file=sys.stderr)
         sys.exit(1)
 
     if fn_name not in result.fn_table:
