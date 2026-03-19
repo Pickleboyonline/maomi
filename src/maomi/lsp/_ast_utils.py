@@ -145,6 +145,8 @@ def classify_symbol(node, line=None, col=None, struct_names=None):
         return node.name, "struct"
     if isinstance(node, StructLiteral):
         return node.name, "struct"
+    if isinstance(node, FieldAccess):
+        return node.field, "field"
     if isinstance(node, Identifier):
         return node.name, "variable"
     if isinstance(node, Param):

@@ -39,10 +39,9 @@ def _get_hover_text(node, fn: FnDef, result: AnalysisResult) -> str | None:
 
     # Param: show "param name: type"
     if isinstance(node, Param):
-        return f"```maomi\n{node.name}: {node.type_annotation.base}" + (
-            f"[{', '.join(str(d.value) for d in node.type_annotation.dims)}]"
-            if node.type_annotation.dims else ""
-        ) + "\n```"
+        prefix = "comptime " if getattr(node, 'comptime', False) else ""
+        type_str = _fmt_annotation(node.type_annotation)
+        return f"```maomi\n{prefix}{node.name}: {type_str}\n```"
 
     # FnDef: show full signature + doc
     if isinstance(node, FnDef):
