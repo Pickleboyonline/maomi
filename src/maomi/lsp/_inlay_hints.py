@@ -7,6 +7,7 @@ from ..ast_nodes import (
     Block, LetStmt, ExprStmt, ScanExpr, MapExpr, IfExpr,
     CallExpr, WhileExpr, FoldExpr, Identifier,
 )
+from ..types import StructType
 from ._core import server, _cache, AnalysisResult, _local_functions
 from ._ast_utils import _children_of
 from ._builtin_data import _BUILTIN_SET, _BUILTIN_SIGNATURES
@@ -27,9 +28,11 @@ def _inlay_collect_hints(
                 name_start = line_text.find("let ", search_start)
                 if name_start >= 0:
                     name_end = name_start + 4 + len(stmt.name)
+                    # E3: For struct types, show just the struct name
+                    type_label = typ.name if isinstance(typ, StructType) else str(typ)
                     hints.append(types.InlayHint(
                         position=types.Position(line=line_idx, character=name_end),
-                        label=f": {typ}",
+                        label=f": {type_label}",
                         kind=types.InlayHintKind.Type,
                         padding_left=False,
                         padding_right=True,
@@ -79,17 +82,6 @@ def _inlay_collect_from_expr(expr, type_map, start_line, end_line, hints, source
         )
         _inlay_collect_hints(
             expr.else_block, type_map, start_line, end_line, hints, source_lines,
-        )
-    elif isinstance(expr, WhileExpr):
-        _inlay_collect_hints(
-            expr.cond, type_map, start_line, end_line, hints, source_lines,
-        )
-        _inlay_collect_hints(
-            expr.body, type_map, start_line, end_line, hints, source_lines,
-        )
-    elif isinstance(expr, FoldExpr):
-        _inlay_collect_hints(
-            expr.body, type_map, start_line, end_line, hints, source_lines,
         )
 
 
