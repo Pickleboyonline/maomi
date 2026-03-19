@@ -9,6 +9,7 @@ from ..ast_nodes import (
     CallExpr, GradExpr, ValueAndGradExpr,
     Identifier, StructLiteral, StructDef,
     FieldAccess, WithExpr,
+    ScanExpr, MapExpr, FoldExpr, WhileExpr,
 )
 from ._core import server, _cache, _local_functions
 from ._ast_utils import (
@@ -55,6 +56,58 @@ def _wrt_span(node, source_lines):
     return node.span
 
 
+def _find_name_in_span(name, container_span, source_lines):
+    """Find a standalone identifier *name* within *container_span*.
+
+    Searches source text line-by-line within the span bounds.  Returns a
+    narrow Span covering just the name, or *container_span* as fallback.
+    """
+    if not source_lines:
+        return container_span
+    for line_idx in range(container_span.line_start - 1, min(container_span.line_end, len(source_lines))):
+        line_text = source_lines[line_idx]
+        start = container_span.col_start - 1 if line_idx == container_span.line_start - 1 else 0
+        while True:
+            idx = line_text.find(name, start)
+            if idx < 0:
+                break
+            end_idx = idx + len(name)
+            before_ok = idx == 0 or not (line_text[idx - 1].isalnum() or line_text[idx - 1] == '_')
+            after_ok = end_idx >= len(line_text) or not (line_text[end_idx].isalnum() or line_text[end_idx] == '_')
+            if before_ok and after_ok:
+                return Span(line_idx + 1, idx + 1, line_idx + 1, end_idx + 1)
+            start = idx + 1
+    return container_span
+
+
+def _refs_find_loop_var_decl(fn, name, source_lines):
+    """Walk a function body looking for scan/map/fold/while binding variables.
+
+    Returns a Span for the declaration if found, None otherwise.
+    """
+    def _walk(node):
+        if isinstance(node, ScanExpr):
+            if node.carry_var == name or name in node.elem_vars:
+                return _find_name_in_span(name, node.span, source_lines)
+        elif isinstance(node, MapExpr):
+            if node.elem_var == name:
+                return _find_name_in_span(name, node.span, source_lines)
+        elif isinstance(node, FoldExpr):
+            if node.carry_var == name or name in node.elem_vars:
+                return _find_name_in_span(name, node.span, source_lines)
+        elif isinstance(node, WhileExpr):
+            if node.state_var == name:
+                return _find_name_in_span(name, node.span, source_lines)
+
+        for child in _children_of(node):
+            result = _walk(child)
+            if result is not None:
+                return result
+        return None
+
+    return _walk(fn.body)
+
+
 def _refs_walk_node(node, name, kind, spans, source_lines=None):
     """Recursively walk AST collecting spans of references to the named symbol."""
     if kind == "function":
@@ -71,15 +124,18 @@ def _refs_walk_node(node, name, kind, spans, source_lines=None):
             spans.append(node.span)
     elif kind == "field":
         if isinstance(node, FieldAccess) and node.field == name:
-            spans.append(node.span)
+            # Narrow span: field name starts after the dot
+            col_start = node.span.col_end - len(node.field)
+            col_end = node.span.col_end
+            spans.append(Span(node.span.line_end, col_start, node.span.line_end, col_end))
         if isinstance(node, StructLiteral):
             for field_name, _ in node.fields:
                 if field_name == name:
-                    spans.append(node.span)
+                    spans.append(_find_name_in_span(field_name, node.span, source_lines))
         if isinstance(node, WithExpr):
             for path, _ in node.updates:
                 if name in path:
-                    spans.append(node.span)
+                    spans.append(_find_name_in_span(name, node.span, source_lines))
 
     if kind == "struct":
         if isinstance(node, Param) and node.type_annotation and node.type_annotation.base == name:
@@ -115,6 +171,11 @@ def _refs_collect_all(result, name, kind, include_declaration, fn_scope=None, so
                         break
                 else:
                     _refs_find_let_decl(fn_scope.body, name, spans)
+                    # G8: scan/map/fold/while variable declarations
+                    if not spans:
+                        loop_span = _refs_find_loop_var_decl(fn_scope, name, source_lines)
+                        if loop_span is not None:
+                            spans.append(loop_span)
             _refs_walk_node(fn_scope.body, name, kind, spans, source_lines=source_lines)
 
     elif kind == "struct":
