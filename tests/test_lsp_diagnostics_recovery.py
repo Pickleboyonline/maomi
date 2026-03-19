@@ -667,7 +667,19 @@ class TestDiagnosticsSpecificConstructs:
         assert len(diags) >= 1
 
     def test_if_else_type_mismatch(self):
-        """If/else branches with different types should produce type error."""
+        """If/else branches with different types should produce type error (variables, not literals)."""
+        source = """fn f(x: f32, n: i32) -> f32 {
+    if x > 0.0 {
+        x
+    } else {
+        n
+    }
+}"""
+        diags, result = validate(source, "<test>")
+        assert len(diags) >= 1, "If/else branch type mismatch should be reported"
+
+    def test_if_else_literal_promotion(self):
+        """Int literal in if/else branch auto-promotes to match other branch."""
         source = """fn f(x: f32) -> f32 {
     if x > 0.0 {
         x
@@ -676,7 +688,7 @@ class TestDiagnosticsSpecificConstructs:
     }
 }"""
         diags, result = validate(source, "<test>")
-        assert len(diags) >= 1, "If/else branch type mismatch should be reported"
+        assert len(diags) == 0, f"Literal promotion should avoid type error, got: {diags}"
 
     def test_struct_literal_wrong_field(self):
         """Struct literal with wrong field name should produce error."""

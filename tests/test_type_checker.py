@@ -55,6 +55,97 @@ class TestLiterals:
         check_ok("fn f() -> bool { true }")
 
 
+class TestLiteralPromotion:
+    # -- Binary arithmetic --
+    def test_int_literal_times_f32(self):
+        check_ok("fn f(x: f32) -> f32 { 2 * x }")
+
+    def test_f32_plus_int_literal(self):
+        check_ok("fn f(x: f32) -> f32 { x + 1 }")
+
+    def test_neg_int_literal_times_f32(self):
+        check_ok("fn f(x: f32) -> f32 { -3 * x }")
+
+    def test_int_literal_times_f32_array(self):
+        check_ok("fn f(x: f32[10]) -> f32[10] { 2 * x }")
+
+    def test_int_literal_plus_f64(self):
+        check_ok("fn f(x: f64) -> f64 { x + 1 }")
+
+    def test_int_literal_times_i64(self):
+        check_ok("fn f(x: i64) -> i64 { 2 * x }")
+
+    def test_float_literal_times_f64(self):
+        check_ok("fn f(x: f64) -> f64 { 2.0 * x }")
+
+    # -- Comparisons --
+    def test_comparison_int_literal_f32(self):
+        check_ok("fn f(x: f32) -> bool { x > 0 }")
+
+    def test_comparison_f32_eq_int_literal(self):
+        check_ok("fn f(x: f32) -> bool { x == 0 }")
+
+    # -- Let bindings --
+    def test_let_f32_from_int_literal(self):
+        check_ok("fn f() -> f32 { let x: f32 = 2; x }")
+
+    def test_let_f64_from_float_literal(self):
+        check_ok("fn f() -> f64 { let x: f64 = 1.0; x }")
+
+    # -- Return type --
+    def test_return_f32_int_literal(self):
+        check_ok("fn f() -> f32 { 2 }")
+
+    def test_return_f64_float_literal(self):
+        check_ok("fn f() -> f64 { 1.0 }")
+
+    # -- If/else --
+    def test_if_else_literal_promotion(self):
+        check_ok("fn f(x: f32) -> f32 { if true { x } else { 0 } }")
+
+    def test_if_else_both_literals_different(self):
+        check_ok("fn f() -> f32 { if true { 1.0 } else { 2 } }")
+
+    # -- Function calls --
+    def test_call_with_int_literal_for_f32_param(self):
+        check_ok("""
+            fn g(x: f32) -> f32 { x }
+            fn f() -> f32 { g(2) }
+        """)
+
+    # -- Struct literals --
+    def test_struct_literal_int_to_f32(self):
+        check_ok("""
+            struct S { x: f32 }
+            fn f() -> S { S { x: 2 } }
+        """)
+
+    # -- Negative cases: these should still error --
+    def test_variable_mismatch_still_errors(self):
+        check_err(
+            "fn f(a: f32, b: i32) -> f32 { a + b }",
+            "mismatched types",
+        )
+
+    def test_float_to_int_rejected(self):
+        check_err(
+            "fn f(x: i32) -> i32 { 2.0 * x }",
+            "mismatched types",
+        )
+
+    def test_narrowing_rejected(self):
+        check_err(
+            "fn f() -> f32 { let x: f64 = 1.0; let y: f32 = x; y }",
+            "type mismatch",
+        )
+
+    def test_float_literal_to_int_let_rejected(self):
+        check_err(
+            "fn f() -> i32 { let x: i32 = 2.0; x }",
+            "type mismatch",
+        )
+
+
 class TestMatmul:
     def test_basic_2d(self):
         check_ok("fn f(a: f32[M, K], b: f32[K, N]) -> f32[M, N] { a @ b }")
@@ -97,10 +188,15 @@ class TestIfExpr:
         check_ok("fn f(x: f32) -> f32 { if true { x } else { 0.0 } }")
 
     def test_branch_type_mismatch(self):
+        # Variable type mismatches still error
         check_err(
-            "fn f(x: f32) -> f32 { if true { x } else { 42 } }",
+            "fn f(x: f32, y: i32) -> f32 { if true { x } else { y } }",
             "different types",
         )
+
+    def test_branch_literal_promotion(self):
+        # Int literal 42 auto-promotes to f32 to match x
+        check_ok("fn f(x: f32) -> f32 { if true { x } else { 42 } }")
 
 
 class TestLetBindings:
@@ -508,10 +604,18 @@ class TestStructTypes:
         """, "expected field")
 
     def test_wrong_field_type(self):
+        # Variable type mismatch still errors
         check_err("""
             struct Point { x: f32, y: f32 }
-            fn f() -> Point { Point { x: 1, y: 2.0 } }
+            fn f(n: i32) -> Point { Point { x: n, y: 2.0 } }
         """, "expected")
+
+    def test_literal_field_promotion(self):
+        # Int literal auto-promotes to f32 for struct field
+        check_ok("""
+            struct Point { x: f32, y: f32 }
+            fn f() -> Point { Point { x: 1, y: 2.0 } }
+        """)
 
     def test_field_access_nonexistent(self):
         check_err("""
