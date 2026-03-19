@@ -28,8 +28,16 @@ def _ca_edit_distance(a: str, b: str) -> int:
     return prev[len(b)]
 
 
-def _ca_find_similar(name: str, candidates, max_distance: int = 2) -> list[str]:
-    """Find candidate names within edit distance of the given name."""
+def _ca_find_similar(name: str, candidates, max_distance: int | None = None) -> list[str]:
+    """Find candidate names within edit distance of the given name.
+
+    Uses proportional edit distance by default: max(len(name) // 3, 2).
+    Short names get max_distance=2 (catches transpositions like 'epx' -> 'exp'),
+    while long names scale up (e.g. 15-char name allows 5 edits).
+    Falls back to case-insensitive exact matching if no edit-distance matches found.
+    """
+    if max_distance is None:
+        max_distance = max(len(name) // 3, 2)
     results = []
     for c in candidates:
         if c == name:
@@ -37,7 +45,13 @@ def _ca_find_similar(name: str, candidates, max_distance: int = 2) -> list[str]:
         dist = _ca_edit_distance(name, c)
         if dist <= max_distance:
             results.append((dist, c))
-    results.sort()
+    # Case-insensitive fallback when no edit-distance matches found
+    if not results:
+        name_lower = name.lower()
+        for candidate in candidates:
+            if candidate.lower() == name_lower and candidate != name:
+                results.append((0, candidate))
+    results.sort(key=lambda x: (x[0], len(x[1]), x[1]))
     return [c for _, c in results[:5]]
 
 
