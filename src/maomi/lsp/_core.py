@@ -85,10 +85,11 @@ def validate(source: str, filename: str) -> tuple[list[types.Diagnostic], Analys
 def _error_to_diagnostic(e: MaomiError) -> types.Diagnostic:
     line = max(0, e.line - 1)
     col = max(0, e.col - 1)
+    col_end = max(col + 1, e.col_end - 1)
     return types.Diagnostic(
         range=types.Range(
             start=types.Position(line=line, character=col),
-            end=types.Position(line=line, character=col + 1),
+            end=types.Position(line=line, character=col_end),
         ),
         message=e.message,
         severity=types.DiagnosticSeverity.Error,

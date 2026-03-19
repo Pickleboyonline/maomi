@@ -273,12 +273,22 @@ class TypeChecker:
             if resolved is not None:
                 self.type_aliases[ta.name] = resolved
 
-        # Pass 0: register all struct definitions
+        # Pass 0: register all struct definitions and check for duplicate fields
         for sd in program.struct_defs:
+            self._check_struct_duplicate_fields(sd)
             self._register_struct(sd)
 
-        # Pass 1: register all function signatures
+        # Pass 1: register all function signatures, checking for duplicate names
+        seen_fn_names: set[str] = set()
         for fn in program.functions:
+            if fn.name in seen_fn_names:
+                self._error(
+                    f"duplicate function name '{fn.name}'",
+                    fn.span.line_start,
+                    fn.span.col_start,
+                    fn.span.col_start + len("fn ") + len(fn.name),
+                )
+            seen_fn_names.add(fn.name)
             sig = self._resolve_signature(fn)
             if sig:
                 if self._is_generic_sig(sig):
@@ -292,6 +302,29 @@ class TypeChecker:
                 self._check_fn(fn)
 
         return self.errors
+
+    def _check_struct_duplicate_fields(self, sd):
+        """Report errors for duplicate field names in a struct definition."""
+        seen: dict[str, int] = {}  # field_name -> index
+        for i, (field_name, field_ta) in enumerate(sd.fields):
+            if field_name in seen:
+                # Use field_name_spans if available, otherwise fall back to field type span
+                if hasattr(sd, 'field_name_spans') and i < len(sd.field_name_spans):
+                    span = sd.field_name_spans[i]
+                    self._error(
+                        f"duplicate field '{field_name}' in struct '{sd.name}'",
+                        span.line_start,
+                        span.col_start,
+                        span.col_end,
+                    )
+                else:
+                    self._error(
+                        f"duplicate field '{field_name}' in struct '{sd.name}'",
+                        field_ta.span.line_start,
+                        field_ta.span.col_start,
+                    )
+            else:
+                seen[field_name] = i
 
     def _register_struct(self, sd):
         # Alias: reuse the canonical StructType for type identity
@@ -359,8 +392,8 @@ class TypeChecker:
         while expr.args and expr.args[-1] is None:
             expr.args.pop()
 
-    def _error(self, msg: str, line: int, col: int):
-        self.errors.append(MaomiTypeError(msg, self.filename, line, col))
+    def _error(self, msg: str, line: int, col: int, col_end: int | None = None):
+        self.errors.append(MaomiTypeError(msg, self.filename, line, col, col_end))
 
     # -- Signature resolution --
 
@@ -426,8 +459,32 @@ class TypeChecker:
             if t:
                 env.define(p.name, t)
 
+        # Check for duplicate parameter names
+        seen_params: set[str] = set()
+        for p in fn.params:
+            if p.name in seen_params:
+                self._error(
+                    f"duplicate parameter name '{p.name}' in function '{fn.name}'",
+                    p.span.line_start,
+                    p.span.col_start,
+                    p.span.col_end,
+                )
+            seen_params.add(p.name)
+
         body_type = self._check_block(fn.body, env)
         if body_type is None:
+            # Only report empty body if there is truly no trailing expression.
+            # body_type can also be None when the trailing expression has a type error,
+            # but that error is already reported separately.
+            if fn.body.expr is None:
+                expected = self._resolve_type_annotation(fn.return_type)
+                if expected is not None:
+                    self._error(
+                        f"function '{fn.name}' declares return type {expected} but body is empty",
+                        fn.span.line_start,
+                        fn.span.col_start,
+                        fn.span.col_end,
+                    )
             return
 
         expected = self._resolve_type_annotation(fn.return_type)
@@ -506,7 +563,7 @@ class TypeChecker:
             case Identifier(name=name):
                 t = env.lookup(name)
                 if t is None:
-                    self._error(f"undefined variable: '{name}'", expr.span.line_start, expr.span.col_start)
+                    self._error(f"undefined variable: '{name}'", expr.span.line_start, expr.span.col_start, expr.span.col_end)
                 return t
             case UnaryOp(op=op, operand=operand):
                 return self._check_unary(op, operand, expr, env)
@@ -1610,6 +1667,7 @@ class TypeChecker:
                 f"undefined function: '{expr.callee}'",
                 expr.span.line_start,
                 expr.span.col_start,
+                expr.span.col_start + len(expr.callee),
             )
             return None
 
@@ -1621,6 +1679,7 @@ class TypeChecker:
                 f"function '{expr.callee}' expects {len(sig.param_types)} arguments, got {len(expr.args)}",
                 expr.span.line_start,
                 expr.span.col_start,
+                expr.span.col_end,
             )
             return None
 
@@ -3515,13 +3574,16 @@ class TypeChecker:
         expr: CallExpr,
         arg_index: int,
     ) -> bool:
+        arg_span = expr.args[arg_index].span
+
         # Scalar vs Scalar
         if isinstance(arg_type, ScalarType) and isinstance(param_type, ScalarType):
             if arg_type.base != param_type.base:
                 self._error(
                     f"argument {arg_index} of '{expr.callee}': expected {param_type}, got {arg_type}",
-                    expr.args[arg_index].span.line_start,
-                    expr.args[arg_index].span.col_start,
+                    arg_span.line_start,
+                    arg_span.col_start,
+                    arg_span.col_end,
                 )
                 return False
             return True
@@ -3531,16 +3593,18 @@ class TypeChecker:
             if arg_type.base != param_type.base:
                 self._error(
                     f"argument {arg_index} of '{expr.callee}': base type mismatch: {arg_type.base} vs {param_type.base}",
-                    expr.args[arg_index].span.line_start,
-                    expr.args[arg_index].span.col_start,
+                    arg_span.line_start,
+                    arg_span.col_start,
+                    arg_span.col_end,
                 )
                 return False
 
             if len(arg_type.dims) != len(param_type.dims):
                 self._error(
                     f"argument {arg_index} of '{expr.callee}': rank mismatch: {len(arg_type.dims)} vs {len(param_type.dims)}",
-                    expr.args[arg_index].span.line_start,
-                    expr.args[arg_index].span.col_start,
+                    arg_span.line_start,
+                    arg_span.col_start,
+                    arg_span.col_end,
                 )
                 return False
 
@@ -3551,8 +3615,9 @@ class TypeChecker:
                         if not self._dims_match(subst[pd], ad):
                             self._error(
                                 f"argument {arg_index} of '{expr.callee}': dimension '{pd}' was bound to {subst[pd]} but got {ad}",
-                                expr.args[arg_index].span.line_start,
-                                expr.args[arg_index].span.col_start,
+                                arg_span.line_start,
+                                arg_span.col_start,
+                                arg_span.col_end,
                             )
                             return False
                     else:
@@ -3565,8 +3630,9 @@ class TypeChecker:
                     if ad != pd:
                         self._error(
                             f"argument {arg_index} of '{expr.callee}': dimension mismatch at axis {j}: {ad} vs {pd}",
-                            expr.args[arg_index].span.line_start,
-                            expr.args[arg_index].span.col_start,
+                            arg_span.line_start,
+                            arg_span.col_start,
+                            arg_span.col_end,
                         )
                         return False
             return True
@@ -3577,8 +3643,9 @@ class TypeChecker:
                 return True
             self._error(
                 f"argument {arg_index} of '{expr.callee}': expected {param_type}, got {arg_type}",
-                expr.args[arg_index].span.line_start,
-                expr.args[arg_index].span.col_start,
+                arg_span.line_start,
+                arg_span.col_start,
+                arg_span.col_end,
             )
             return False
 
@@ -3588,8 +3655,9 @@ class TypeChecker:
                 return True
             self._error(
                 f"argument {arg_index} of '{expr.callee}': expected {param_type}, got {arg_type}",
-                expr.args[arg_index].span.line_start,
-                expr.args[arg_index].span.col_start,
+                arg_span.line_start,
+                arg_span.col_start,
+                arg_span.col_end,
             )
             return False
 
@@ -3605,8 +3673,9 @@ class TypeChecker:
 
         self._error(
             f"argument {arg_index} of '{expr.callee}': expected {param_type}, got {arg_type}",
-            expr.args[arg_index].span.line_start,
-            expr.args[arg_index].span.col_start,
+            arg_span.line_start,
+            arg_span.col_start,
+            arg_span.col_end,
         )
         return False
 
