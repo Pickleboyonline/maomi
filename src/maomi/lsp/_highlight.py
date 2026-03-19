@@ -12,14 +12,17 @@ def _spans_to_highlights(result, name, kind, fn_scope=None):
     """Convert symbol spans to DocumentHighlight items with Read/Write classification."""
     all_spans = _refs_collect_all(result, name, kind,
                                   include_declaration=True, fn_scope=fn_scope)
-    usage_spans = _refs_collect_all(result, name, kind,
-                                    include_declaration=False, fn_scope=fn_scope)
-    usage_set = {id(s) for s in usage_spans}
+    decl_spans = set()
+    if all_spans:
+        usage_spans = _refs_collect_all(result, name, kind,
+                                        include_declaration=False, fn_scope=fn_scope)
+        usage_set = set(usage_spans)
+        decl_spans = {s for s in all_spans if s not in usage_set}
     highlights = []
     for s in all_spans:
-        hk = (types.DocumentHighlightKind.Read
-               if id(s) in usage_set
-               else types.DocumentHighlightKind.Write)
+        hk = (types.DocumentHighlightKind.Write
+               if s in decl_spans
+               else types.DocumentHighlightKind.Read)
         highlights.append(types.DocumentHighlight(
             range=_span_to_range(s), kind=hk))
     return highlights or None

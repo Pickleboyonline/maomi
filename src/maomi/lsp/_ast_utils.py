@@ -107,14 +107,17 @@ def _span_to_range(span) -> types.Range:
     )
 
 
-def classify_symbol(node, line=None, col=None):
+def classify_symbol(node, line=None, col=None, struct_names=None):
     """Determine the symbol name and kind from the node under cursor.
 
-    Returns (name, kind) where kind is "function", "variable", or "struct",
-    or (None, None) if the node is not a classifiable symbol.
+    Returns (name, kind) where kind is "function", "variable", "struct",
+    "type", or "field", or (None, None) if the node is not a classifiable
+    symbol.
 
     When line/col are provided, checks if cursor is on a Param's type
-    annotation (returns "struct"). Without them, Param always returns "variable".
+    annotation. If *struct_names* is given, distinguishes "struct" from
+    primitive "type"; without it, falls back to "struct" for backward
+    compatibility.
     """
     if isinstance(node, CallExpr):
         return node.callee, "function"
@@ -130,7 +133,11 @@ def classify_symbol(node, line=None, col=None):
         if line is not None and col is not None:
             ta = node.type_annotation
             if ta and _span_contains(ta.span, line, col):
-                return ta.base, "struct"
+                if struct_names and ta.base in struct_names:
+                    return ta.base, "struct"
+                elif struct_names:
+                    return ta.base, "type"
+                return ta.base, "struct"  # backward compat
         return node.name, "variable"
     if isinstance(node, LetStmt):
         return node.name, "variable"
