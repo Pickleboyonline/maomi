@@ -57,6 +57,7 @@ from ._semantic import (
     _sem_collect_tokens, _sem_delta_encode,
     _ST_FUNCTION, _ST_PARAMETER, _ST_VARIABLE, _ST_STRUCT,
     _ST_PROPERTY, _ST_TYPE, _ST_NUMBER, _ST_KEYWORD,
+    _ST_BUILTIN_TYPE, _ST_BUILTIN_FUNCTION, _ST_BOOLEAN, _ST_OPERATOR,
     _MOD_DECLARATION, _MOD_DEFINITION,
 )
 from ._code_actions import _ca_edit_distance, _ca_find_similar, code_actions

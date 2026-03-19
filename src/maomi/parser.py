@@ -36,6 +36,7 @@ from .ast_nodes import (
     IndexComponent,
     IndexExpr,
     TypeAlias,
+    ErrorExpr,
     Expr,
 )
 from .errors import ParseError
@@ -56,6 +57,7 @@ class Parser:
         self.filename = filename
         self.pos = 0
         self._destruct_counter = 0
+        self.errors: list[ParseError] = []
 
     # -- Helpers --
 
@@ -86,6 +88,7 @@ class Parser:
                 self.filename,
                 tok.line,
                 tok.col,
+                tok.col + max(len(tok.value), 1),
             )
         return self._advance()
 
@@ -95,7 +98,15 @@ class Parser:
 
     def _error(self, msg: str) -> ParseError:
         tok = self._current()
-        return ParseError(msg, self.filename, tok.line, tok.col)
+        col_end = tok.col + max(len(tok.value), 1)
+        return ParseError(msg, self.filename, tok.line, tok.col, col_end)
+
+    def _synchronize(self, *targets: TokenType) -> None:
+        """Skip tokens until finding one of the target types or EOF."""
+        while not self._at_end():
+            if self._current().type in targets:
+                return
+            self._advance()
 
     # -- Top level --
 
@@ -103,18 +114,26 @@ class Parser:
         start = self._current()
         imports: list[ImportDecl] = []
         while self._check(TokenType.IMPORT) or self._check(TokenType.FROM):
-            imports.append(self._parse_import())
+            try:
+                imports.append(self._parse_import())
+            except ParseError as e:
+                self.errors.append(e)
+                self._synchronize(TokenType.IMPORT, TokenType.FROM, TokenType.FN, TokenType.STRUCT, TokenType.TYPE, TokenType.DOC_COMMENT)
         struct_defs: list[StructDef] = []
         functions: list[FnDef] = []
         type_aliases: list[TypeAlias] = []
         while not self._at_end():
             doc = self._collect_doc_comments()
-            if self._check(TokenType.STRUCT):
-                struct_defs.append(self._parse_struct_def(doc))
-            elif self._check(TokenType.TYPE):
-                type_aliases.append(self._parse_type_alias())
-            else:
-                functions.append(self._parse_fn_def(doc))
+            try:
+                if self._check(TokenType.STRUCT):
+                    struct_defs.append(self._parse_struct_def(doc))
+                elif self._check(TokenType.TYPE):
+                    type_aliases.append(self._parse_type_alias())
+                else:
+                    functions.append(self._parse_fn_def(doc))
+            except ParseError as e:
+                self.errors.append(e)
+                self._synchronize(TokenType.FN, TokenType.STRUCT, TokenType.TYPE, TokenType.DOC_COMMENT)
         return Program(imports, struct_defs, functions, self._span_from(start), type_aliases=type_aliases)
 
     # -- Import declarations --
@@ -127,35 +146,48 @@ class Parser:
     def _parse_qualified_import(self) -> ImportDecl:
         """Parse: import math; | import "../lib/nn" as nn;"""
         start = self._expect(TokenType.IMPORT)
-        module_path, alias = self._parse_module_ref()
+        module_path, alias, mod_span, alias_span = self._parse_module_ref()
         self._expect(TokenType.SEMICOLON)
-        return ImportDecl(module_path, alias, None, self._span_from(start))
+        return ImportDecl(module_path, alias, None, self._span_from(start),
+                          module_span=mod_span, alias_span=alias_span)
 
     def _parse_from_import(self) -> ImportDecl:
         """Parse: from math import { relu, linear };"""
         start = self._expect(TokenType.FROM)
-        module_path, alias = self._parse_module_ref()
+        module_path, alias, mod_span, alias_span = self._parse_module_ref()
         self._expect(TokenType.IMPORT)
         self._expect(TokenType.LBRACE)
-        names = [self._expect(TokenType.IDENT).value]
+        names: list[str] = []
+        name_spans: list[Span] = []
+        tok = self._expect(TokenType.IDENT)
+        names.append(tok.value)
+        name_spans.append(Span(tok.line, tok.col, tok.line, tok.col + len(tok.value)))
         while self._match(TokenType.COMMA):
-            names.append(self._expect(TokenType.IDENT).value)
+            tok = self._expect(TokenType.IDENT)
+            names.append(tok.value)
+            name_spans.append(Span(tok.line, tok.col, tok.line, tok.col + len(tok.value)))
         self._expect(TokenType.RBRACE)
         self._expect(TokenType.SEMICOLON)
-        return ImportDecl(module_path, alias, names, self._span_from(start))
+        return ImportDecl(module_path, alias, names, self._span_from(start),
+                          module_span=mod_span, alias_span=alias_span, name_spans=name_spans)
 
-    def _parse_module_ref(self) -> tuple[str, str | None]:
-        """Parse module path + optional alias. Returns (path, alias)."""
+    def _parse_module_ref(self) -> tuple[str, str | None, Span, Span | None]:
+        """Parse module path + optional alias. Returns (path, alias, mod_span, alias_span)."""
         if self._check(TokenType.STRING_LIT):
-            path = self._advance().value
+            tok = self._advance()
+            mod_span = Span(tok.line, tok.col, tok.line, tok.col + len(tok.value))
             self._expect(TokenType.AS)
-            alias = self._expect(TokenType.IDENT).value
-            return (path, alias)
-        name = self._expect(TokenType.IDENT).value
-        alias = None
+            alias_tok = self._expect(TokenType.IDENT)
+            alias_span = Span(alias_tok.line, alias_tok.col, alias_tok.line, alias_tok.col + len(alias_tok.value))
+            return (tok.value, alias_tok.value, mod_span, alias_span)
+        tok = self._expect(TokenType.IDENT)
+        mod_span = Span(tok.line, tok.col, tok.line, tok.col + len(tok.value))
+        alias_span = None
         if self._match(TokenType.AS):
-            alias = self._expect(TokenType.IDENT).value
-        return (name, alias)
+            alias_tok = self._expect(TokenType.IDENT)
+            alias_span = Span(alias_tok.line, alias_tok.col, alias_tok.line, alias_tok.col + len(alias_tok.value))
+            return (tok.value, alias_tok.value, mod_span, alias_span)
+        return (tok.value, None, mod_span, None)
 
     # -- Doc comments --
 
@@ -172,20 +204,23 @@ class Parser:
         name = self._expect(TokenType.IDENT).value
         self._expect(TokenType.LBRACE)
         fields: list[tuple[str, TypeAnnotation]] = []
+        field_name_spans: list[Span] = []
         if not self._check(TokenType.RBRACE):
-            field_name = self._expect(TokenType.IDENT).value
+            ftok = self._expect(TokenType.IDENT)
+            field_name_spans.append(Span(ftok.line, ftok.col, ftok.line, ftok.col + len(ftok.value)))
             self._expect(TokenType.COLON)
             field_type = self._parse_type()
-            fields.append((field_name, field_type))
+            fields.append((ftok.value, field_type))
             while self._match(TokenType.COMMA):
                 if self._check(TokenType.RBRACE):
                     break  # trailing comma
-                field_name = self._expect(TokenType.IDENT).value
+                ftok = self._expect(TokenType.IDENT)
+                field_name_spans.append(Span(ftok.line, ftok.col, ftok.line, ftok.col + len(ftok.value)))
                 self._expect(TokenType.COLON)
                 field_type = self._parse_type()
-                fields.append((field_name, field_type))
+                fields.append((ftok.value, field_type))
         self._expect(TokenType.RBRACE)
-        return StructDef(name, fields, self._span_from(start), doc=doc)
+        return StructDef(name, fields, self._span_from(start), doc=doc, field_name_spans=field_name_spans)
 
     # -- Type alias --
 
@@ -277,23 +312,32 @@ class Parser:
         stmts: list[LetStmt | ExprStmt] = []
         trailing_expr: Expr | None = None
 
-        while not self._check(TokenType.RBRACE):
-            if self._check(TokenType.LET):
-                result = self._parse_let_stmt()
-                if isinstance(result, list):
-                    stmts.extend(result)
+        while not self._check(TokenType.RBRACE) and not self._at_end():
+            try:
+                if self._check(TokenType.LET):
+                    result = self._parse_let_stmt()
+                    if isinstance(result, list):
+                        stmts.extend(result)
+                    else:
+                        stmts.append(result)
                 else:
-                    stmts.append(result)
-            else:
-                expr = self._parse_expr()
+                    expr = self._parse_expr()
+                    if self._match(TokenType.SEMICOLON):
+                        stmts.append(ExprStmt(expr, expr.span))
+                    elif self._check(TokenType.RBRACE):
+                        trailing_expr = expr
+                    else:
+                        raise self._error("expected ';' or '}'")
+            except ParseError as e:
+                self.errors.append(e)
+                self._synchronize(TokenType.SEMICOLON, TokenType.RBRACE)
                 if self._match(TokenType.SEMICOLON):
-                    stmts.append(ExprStmt(expr, expr.span))
-                elif self._check(TokenType.RBRACE):
-                    trailing_expr = expr
-                else:
-                    raise self._error("expected ';' or '}'")
+                    pass  # consume ; to move past broken statement
 
-        self._expect(TokenType.RBRACE)
+        if not self._at_end():
+            self._expect(TokenType.RBRACE)
+        else:
+            self.errors.append(self._error("expected '}'"))
         return Block(stmts, trailing_expr, self._span_from(start))
 
     # -- Statements --

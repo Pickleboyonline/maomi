@@ -21,6 +21,9 @@ build/
 # Claude Code
 .claude/
 
+# References
+references/
+
 # uv
 uv.lock
 /editors/vscode/maomi/node_modules

@@ -16,6 +16,7 @@ from maomi.lsp import (
     _sem_collect_tokens, _sem_delta_encode,
     _ST_FUNCTION, _ST_PARAMETER, _ST_VARIABLE, _ST_STRUCT,
     _ST_PROPERTY, _ST_TYPE, _ST_NUMBER, _ST_KEYWORD,
+    _ST_BUILTIN_TYPE, _ST_BUILTIN_FUNCTION, _ST_BOOLEAN, _ST_OPERATOR,
     _MOD_DECLARATION, _MOD_DEFINITION,
     _ca_edit_distance, _ca_find_similar, code_actions, _cache,
     _build_folding_ranges,
@@ -35,6 +36,7 @@ from maomi.ast_nodes import (
     ScanExpr, MapExpr, Param,
 )
 from maomi.errors import MaomiError
+from tests.lsp_validation import assert_all_completions_valid, check_edit
 
 
 # ---------------------------------------------------------------------------
@@ -52,15 +54,24 @@ class TestValidation:
     def test_lexer_error(self):
         source = "fn f() -> f32 { ! }"  # '!' alone is invalid
         diags, result = validate(source, "<test>")
-        assert len(diags) == 1
+        assert len(diags) >= 1
         assert "unexpected" in diags[0].message.lower() or "!" in diags[0].message
-        assert result.program is None
+        # Lexer recovers — skips bad char, program still parses
+        assert result.program is not None
 
     def test_parse_error(self):
         source = "fn f( -> f32 { x }"  # missing ')'
         diags, result = validate(source, "<test>")
-        assert len(diags) == 1
-        assert result.program is None
+        assert len(diags) >= 1  # parser recovery may produce multiple diagnostics
+
+    def test_parse_error_recovery_partial_program(self):
+        """Parser recovery produces partial AST with diagnostics."""
+        source = "fn broken() -> f32 { + }\nfn good(x: f32) -> f32 { x }"
+        diags, result = validate(source, "<test>")
+        assert len(diags) >= 1
+        assert result.program is not None
+        fn_names = [f.name for f in result.program.functions]
+        assert "good" in fn_names
 
     def test_type_error(self):
         source = "fn f(x: f32) -> i32 { x }"
@@ -304,29 +315,17 @@ fn f(p: Point) -> f32 { p.x }
 
     def test_pipe_completion_array(self):
         """Dot on a float array suggests pipe-compatible functions."""
-        source = "fn f(x: f32[3, 3]) -> f32 { sum(x) }\n"
-        _, result = validate(source, "<test>")
-        # "fn f(x: f32[3, 3]) -> f32 { sum(x) }"
-        # x is at character 29, dot would be at character 30
-        # But we need x. in parsed code. Use a simpler approach:
-        # Position the dot after 'x' in the body — line 0, character 30
-        # Actually, the source that was parsed successfully has x at body start.
-        # Let's use a source where we can find x cleanly.
         source2 = "fn f(x: f32[3, 3]) -> f32 { x }\n"
         _, result2 = validate(source2, "<test>")
-        # "fn f(x: f32[3, 3]) -> f32 { x }"
-        # 'x' in body is at line 0, character 29 (0-indexed)
-        # dot would be at character 30
         pos = types.Position(line=0, character=30)
         comp = _complete_dot(result2, pos)
         assert comp is not None
+        assert_all_completions_valid(comp, pos)
         labels = {item.label for item in comp.items}
-        # Should include reductions and elementwise builtins
         assert "sum" in labels
         assert "mean" in labels
         assert "exp" in labels
         assert "transpose" in labels
-        # Should NOT include random.* or construction builtins
         assert "random.key" not in labels
         assert "iota" not in labels
 
@@ -334,10 +333,10 @@ fn f(p: Point) -> f32 { p.x }
         """Dot on a float scalar suggests elementwise builtins."""
         source = "fn f(x: f32) -> f32 { x }\n"
         _, result = validate(source, "<test>")
-        # 'x' in body at line 0, char 22; dot at char 23
         pos = types.Position(line=0, character=23)
         comp = _complete_dot(result, pos)
         assert comp is not None
+        assert_all_completions_valid(comp, pos)
         labels = {item.label for item in comp.items}
         assert "exp" in labels
         assert "sqrt" in labels
@@ -347,21 +346,18 @@ fn f(p: Point) -> f32 { p.x }
         """Dot on a struct shows both fields and pipe-compatible functions."""
         source = "struct Point { x: f32, y: f32 }\nfn f(p: Point) -> f32 { p.x }\n"
         _, result = validate(source, "<test>")
-        # 'p' in body at line 1; "fn f(p: Point) -> f32 { p.x }"
-        # 'p' is at char 25, dot at char 26
         pos = types.Position(line=1, character=26)
         comp = _complete_dot(result, pos)
         assert comp is not None
+        assert_all_completions_valid(comp, pos)
 
         fields = [i for i in comp.items if i.kind == types.CompletionItemKind.Field]
         functions = [i for i in comp.items if i.kind == types.CompletionItemKind.Function]
         field_labels = {i.label for i in fields}
         fn_labels = {i.label for i in functions}
 
-        # Fields should be present
         assert "x" in field_labels
         assert "y" in field_labels
-        # Elementwise builtins work on structs
         assert "exp" in fn_labels
         assert "sqrt" in fn_labels
 
@@ -369,32 +365,73 @@ fn f(p: Point) -> f32 { p.x }
         """Selected pipe completion replaces the dot with |> syntax."""
         source = "fn f(x: f32[3]) -> f32 { x }\n"
         _, result = validate(source, "<test>")
-        # x at char 26, dot at char 27
         pos = types.Position(line=0, character=27)
         comp = _complete_dot(result, pos)
         assert comp is not None
+        assert_all_completions_valid(comp, pos)
 
-        # Find the 'sum' completion
         sum_item = next(i for i in comp.items if i.label == "sum")
-        assert sum_item.text_edit is not None
-        assert sum_item.text_edit.new_text.startswith(" |> sum(")
         assert sum_item.insert_text_format == types.InsertTextFormat.Snippet
-        # The range should cover exactly the dot character
-        assert sum_item.text_edit.range.start.character == 26
+        assert sum_item.text_edit is not None
+        assert sum_item.text_edit.new_text.startswith("sum(")
+        assert sum_item.text_edit.range.start.character == 27
         assert sum_item.text_edit.range.end.character == 27
+        assert len(sum_item.additional_text_edits) == 1
+        dot_edit = sum_item.additional_text_edits[0]
+        assert dot_edit.new_text == " |> "
+        assert dot_edit.range.start.character == 26
+        assert dot_edit.range.end.character == 27
+
+    def test_pipe_completion_check_edit_sum(self):
+        """Applying 'sum' pipe completion produces correct source.
+
+        Completions are generated from cached valid source, but edits are
+        applied to the source WITH the dot (what the editor actually has).
+        """
+        source_valid = "fn f(x: f32[3]) -> f32 { x }\n"
+        source_with_dot = "fn f(x: f32[3]) -> f32 { x. }\n"
+        _, result = validate(source_valid, "<test>")
+        # dot at char 26, cursor at char 27 (same position used by other pipe tests)
+        pos = types.Position(line=0, character=27)
+        comp = _complete_dot(result, pos)
+        assert comp is not None
+        check_edit(source_with_dot, pos, comp, "sum",
+                   "fn f(x: f32[3]) -> f32 { x |> sum() }\n")
+
+    def test_pipe_completion_check_edit_struct_field(self):
+        """Applying a struct field completion produces correct source (no pipe)."""
+        source_valid = "struct S { val: f32 }\nfn f(s: S) -> f32 { s.val }\n"
+        source_with_dot = "struct S { val: f32 }\nfn f(s: S) -> f32 { s. }\n"
+        _, result = validate(source_valid, "<test>")
+        # dot at char 21, cursor at char 22
+        pos = types.Position(line=1, character=22)
+        comp = _complete_dot(result, pos)
+        assert comp is not None
+        check_edit(source_with_dot, pos, comp, "val",
+                   "struct S { val: f32 }\nfn f(s: S) -> f32 { s.val }\n")
+
+    def test_pipe_completion_check_edit_pipe_on_struct(self):
+        """Applying a pipe function on struct produces correct source."""
+        source_valid = "struct S { val: f32 }\nfn f(s: S) -> f32 { s.val }\n"
+        source_with_dot = "struct S { val: f32 }\nfn f(s: S) -> f32 { s. }\n"
+        _, result = validate(source_valid, "<test>")
+        pos = types.Position(line=1, character=22)
+        comp = _complete_dot(result, pos)
+        assert comp is not None
+        check_edit(source_with_dot, pos, comp, "exp",
+                   "struct S { val: f32 }\nfn f(s: S) -> f32 { s |> exp() }\n")
 
     def test_pipe_completion_sort_order(self):
         """Struct fields sort before pipe functions."""
         source = "struct S { val: f32 }\nfn f(s: S) -> f32 { s.val }\n"
         _, result = validate(source, "<test>")
-        # s at char 21, dot at char 22 on line 1
         pos = types.Position(line=1, character=22)
         comp = _complete_dot(result, pos)
         assert comp is not None
+        assert_all_completions_valid(comp, pos)
 
         fields = [i for i in comp.items if i.kind == types.CompletionItemKind.Field]
         functions = [i for i in comp.items if i.kind == types.CompletionItemKind.Function]
-        # Fields have sort_text starting with "0_", functions with "1_"
         for f in fields:
             assert f.sort_text.startswith("0_")
         for f in functions:
@@ -404,11 +441,10 @@ fn f(p: Point) -> f32 { p.x }
         """User-defined functions appear in pipe completion when first param matches."""
         source = "fn double(x: f32[3]) -> f32[3] { x }\nfn f(y: f32[3]) -> f32[3] { y }\n"
         _, result = validate(source, "<test>")
-        # y in body at line 1: "fn f(y: f32[3]) -> f32[3] { y }"
-        # y at char 28, dot at char 29
         pos = types.Position(line=1, character=29)
         comp = _complete_dot(result, pos)
         assert comp is not None
+        assert_all_completions_valid(comp, pos)
         labels = {item.label for item in comp.items}
         assert "double" in labels
 
@@ -421,6 +457,49 @@ fn f(p: Point) -> f32 { p.x }
         assert comp is not None
         for item in comp.items:
             assert "$" not in item.label
+
+
+class TestCompletionFakeId:
+    """Tests for fake identifier insertion — completions on incomplete code."""
+
+    def test_fake_id_struct_dot(self):
+        """Completion on 's.' in incomplete code gets fresh struct fields."""
+        from maomi.lsp._core import completion_validate
+        source = "struct S { x: f32, y: f32 }\nfn f(s: S) -> f32 {\n  s.\n}\n"
+        # cursor after "s." — line 2, col 4
+        result = completion_validate(source, "<test>", 2, 4)
+        assert result.program is not None
+        # The type_map should have an entry for "s"
+        assert len(result.type_map) > 0
+
+    def test_fake_id_not_in_general_completions(self):
+        """The fake identifier must not appear in completion suggestions."""
+        from maomi.lsp._core import completion_validate, _FAKE_ID
+        source = "fn f(x: f32) -> f32 {\n  \n}\n"
+        result = completion_validate(source, "<test>", 1, 2)
+        if result.program is not None:
+            pos = types.Position(line=1, character=2)
+            from maomi.lsp._completion import _complete_general
+            comp = _complete_general(result, pos)
+            if comp:
+                labels = {item.label for item in comp.items}
+                assert _FAKE_ID not in labels
+
+    def test_fake_id_dot_completion_fresh(self):
+        """Dot completion with fake ID produces fresh results for incomplete code."""
+        from maomi.lsp._core import completion_validate
+        source = "struct Point { x: f32, y: f32 }\nfn f(p: Point) -> f32 {\n  p.\n}\n"
+        result = completion_validate(source, "<test>", 2, 4)
+        assert result.program is not None
+        pos = types.Position(line=2, character=4)
+        comp = _complete_dot(result, pos)
+        if comp:
+            labels = {item.label for item in comp.items}
+            # Should have struct fields from fresh parse
+            assert "x" in labels
+            assert "y" in labels
+
+
 # ---------------------------------------------------------------------------
 # Go to Definition tests
 # ---------------------------------------------------------------------------
@@ -1185,7 +1264,7 @@ fn f(p: Point) -> f32 { p.x }
         tokens = []
         for sd in result.program.struct_defs:
             _sem_collect_tokens(sd, tokens, set())
-        type_tokens = [t for t in tokens if t[3] == _ST_TYPE]
+        type_tokens = [t for t in tokens if t[3] in (_ST_TYPE, _ST_BUILTIN_TYPE)]
         # "f32" appears twice in struct fields
         assert len(type_tokens) >= 2
 
@@ -1214,10 +1293,11 @@ fn f(p: Point) -> f32 { p.x }
         _, result = validate(source, "<test>")
         tokens = []
         _sem_collect_tokens(result.program.functions[0], tokens, set())
-        call_tokens = [t for t in tokens if t[3] == _ST_FUNCTION and t[4] == 0]
+        # "exp" is a builtin function
+        call_tokens = [t for t in tokens if t[3] in (_ST_FUNCTION, _ST_BUILTIN_FUNCTION)]
         assert len(call_tokens) >= 1
-        # "exp" has length 3
-        assert call_tokens[0][2] == 3
+        exp_token = [t for t in call_tokens if t[2] == 3]  # length 3 = "exp"
+        assert len(exp_token) >= 1
 
     def test_field_access_token(self):
         source = """
@@ -1265,7 +1345,7 @@ fn f(p: Point) -> f32 { p.x }
         _, result = validate(source, "<test>")
         tokens = []
         _sem_collect_tokens(result.program.functions[0], tokens, set())
-        type_tokens = [t for t in tokens if t[3] == _ST_TYPE]
+        type_tokens = [t for t in tokens if t[3] in (_ST_TYPE, _ST_BUILTIN_TYPE)]
         # "f32" appears in param type annotation
         assert len(type_tokens) >= 1
         assert type_tokens[0][2] == 3  # "f32"

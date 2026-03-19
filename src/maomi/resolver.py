@@ -141,7 +141,7 @@ class _ResolveContext:
         all_structs = merged_structs + list(program.struct_defs)
         # Main file's own functions come last (can call imported ones)
         merged_fns.extend(program.functions)
-        return Program([], all_structs, merged_fns, program.span,
+        return Program(program.imports, all_structs, merged_fns, program.span,
                        type_aliases=program.type_aliases)
 
     def _load_module(self, mod_path: str, module_name: str) -> tuple[list[FnDef], list[StructDef]]:

@@ -10,6 +10,7 @@ class Lexer:
         self.line = 1
         self.col = 1
         self.tokens: list[Token] = []
+        self.errors: list[LexerError] = []
 
     def tokenize(self) -> list[Token]:
         while self.pos < len(self.source):
@@ -17,7 +18,12 @@ class Lexer:
                 continue  # doc comment emitted, re-enter skip loop
             if self.pos >= len(self.source):
                 break
-            self._read_token()
+            try:
+                self._read_token()
+            except LexerError as e:
+                self.errors.append(e)
+                if self.pos < len(self.source):
+                    self._advance()  # skip bad character
         self.tokens.append(Token(TokenType.EOF, "", self.line, self.col))
         return self.tokens
 

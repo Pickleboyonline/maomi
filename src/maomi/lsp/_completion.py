@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import logging
+import os
+import re
 
 from pygls.lsp.server import LanguageServer
 from lsprotocol import types
 
-from ..ast_nodes import Block, LetStmt, ExprStmt, ScanExpr, MapExpr, IfExpr
+from ..ast_nodes import Block, LetStmt, ExprStmt, ScanExpr, MapExpr, IfExpr, FoldExpr, WhileExpr
 from ..types import MaomiType, ScalarType, ArrayType, StructType, WildcardArrayType, TypeVar, FLOAT_BASES
-from ._core import server, _cache, AnalysisResult, _local_functions
+from ._core import server, _cache, AnalysisResult, _local_functions, completion_validate, _uri_to_path, _FAKE_ID
 from ._ast_utils import _span_contains, _find_node_at
 from ._builtin_data import (
     _KEYWORDS, _TYPE_NAMES, _BUILTINS, _BUILTIN_SET,
@@ -18,6 +20,175 @@ from ..builtins import COMPLEX as _CX_REGISTRY
 
 logger = logging.getLogger("maomi-lsp")
 
+_STDLIB_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "stdlib")
+
+
+def _complete_import(line_text: str, col: int, filepath: str) -> types.CompletionList | None:
+    """Detect import context from line text and return appropriate completions."""
+    text_before = line_text[:col]
+
+    # Pattern 1: "from X import { names..." — inside braces
+    m = re.match(r'^\s*from\s+("?[^"\s]+"?)\s+import\s*\{([^}]*)$', text_before)
+    if m:
+        module_name = m.group(1).strip('"')
+        return _complete_import_names(module_name, filepath)
+
+    # Also handle: "from X as Y import { names..."
+    m = re.match(r'^\s*from\s+("?[^"\s]+"?)\s+as\s+\w+\s+import\s*\{([^}]*)$', text_before)
+    if m:
+        module_name = m.group(1).strip('"')
+        return _complete_import_names(module_name, filepath)
+
+    # Pattern 2: "from ___" or "import ___" — module name position
+    m = re.match(r'^\s*(?:from|import)\s+(\w*)$', text_before)
+    if m:
+        return _complete_import_modules(filepath)
+
+    return None
+
+
+def _complete_import_modules(filepath: str) -> types.CompletionList:
+    """List available modules — sibling .mao files + stdlib modules."""
+    items: list[types.CompletionItem] = []
+    seen: set[str] = set()
+
+    # Sibling .mao files in the same directory
+    if filepath:
+        dir_path = os.path.dirname(filepath)
+        basename = os.path.basename(filepath)
+        if os.path.isdir(dir_path):
+            for f in sorted(os.listdir(dir_path)):
+                if f.endswith(".mao") and f != basename:
+                    name = f[:-4]
+                    if name not in seen:
+                        seen.add(name)
+                        items.append(types.CompletionItem(
+                            label=name,
+                            kind=types.CompletionItemKind.Module,
+                            detail="local module",
+                        ))
+
+    # Stdlib modules
+    if os.path.isdir(_STDLIB_DIR):
+        for f in sorted(os.listdir(_STDLIB_DIR)):
+            if f.endswith(".mao"):
+                name = f[:-4]
+                if name not in seen:
+                    seen.add(name)
+                    items.append(types.CompletionItem(
+                        label=name,
+                        kind=types.CompletionItemKind.Module,
+                        detail="stdlib",
+                    ))
+
+    return types.CompletionList(is_incomplete=False, items=items)
+
+
+def _complete_import_names(module_name: str, filepath: str) -> types.CompletionList | None:
+    """List functions and structs exported by a module."""
+    mod_path = _find_module_file(module_name, filepath)
+    if mod_path is None:
+        return None
+    try:
+        from ..lexer import Lexer
+        from ..parser import Parser
+        source = open(mod_path).read()
+        tokens = Lexer(source, filename=mod_path).tokenize()
+        parser = Parser(tokens, filename=mod_path)
+        program = parser.parse()
+    except Exception:
+        return None
+
+    items: list[types.CompletionItem] = []
+    for fn in program.functions:
+        doc = fn.doc
+        items.append(types.CompletionItem(
+            label=fn.name,
+            kind=types.CompletionItemKind.Function,
+            detail="function",
+            documentation=types.MarkupContent(
+                kind=types.MarkupKind.Markdown, value=doc,
+            ) if doc else None,
+        ))
+    for sd in program.struct_defs:
+        items.append(types.CompletionItem(
+            label=sd.name,
+            kind=types.CompletionItemKind.Struct,
+            detail="struct",
+        ))
+    return types.CompletionList(is_incomplete=False, items=items)
+
+
+def _find_module_file(module_name: str, importing_file: str) -> str | None:
+    """Find the .mao file for a module name. Returns path or None."""
+    if importing_file:
+        dir_path = os.path.dirname(importing_file)
+        # Check local sibling
+        candidate = os.path.join(dir_path, module_name + ".mao")
+        if os.path.isfile(candidate):
+            return candidate
+    # Check stdlib
+    candidate = os.path.join(_STDLIB_DIR, module_name + ".mao")
+    if os.path.isfile(candidate):
+        return candidate
+    return None
+
+
+def _complete_struct_literal(
+    line_text: str, col: int, result: AnalysisResult | None,
+    source: str, position: types.Position,
+) -> types.CompletionList | None:
+    """Suggest remaining fields inside a struct literal like 'Point { x: 1.0, |}'."""
+    if not result or not result.struct_defs:
+        return None
+    # Look backward through source for an unclosed struct literal pattern
+    # Find the struct name by scanning for 'Name {' with unmatched brace
+    text_before = source.splitlines(keepends=True)
+    # Collect all text up to cursor
+    lines_before = text_before[:position.line]
+    partial = "".join(lines_before) + line_text[:col]
+    # Find last unmatched '{' preceded by an identifier
+    depth = 0
+    i = len(partial) - 1
+    while i >= 0:
+        if partial[i] == '}':
+            depth += 1
+        elif partial[i] == '{':
+            if depth > 0:
+                depth -= 1
+            else:
+                # Found unmatched '{' — check if preceded by identifier
+                j = i - 1
+                while j >= 0 and partial[j] == ' ':
+                    j -= 1
+                if j >= 0 and (partial[j].isalnum() or partial[j] == '_'):
+                    end = j + 1
+                    while j >= 0 and (partial[j].isalnum() or partial[j] == '_'):
+                        j -= 1
+                    struct_name = partial[j + 1:end]
+                    # Check if it's a known struct
+                    sd = result.struct_defs.get(struct_name)
+                    if sd is not None:
+                        # Find already-written fields in the literal
+                        inside = partial[i + 1:]
+                        written = set(re.findall(r'(\w+)\s*:', inside))
+                        # Offer remaining fields
+                        items = []
+                        for fname, ftype in sd.fields:
+                            if fname not in written:
+                                items.append(types.CompletionItem(
+                                    label=fname,
+                                    kind=types.CompletionItemKind.Field,
+                                    detail=str(ftype),
+                                    insert_text=f"{fname}: $0",
+                                    insert_text_format=types.InsertTextFormat.Snippet,
+                                ))
+                        if items:
+                            return types.CompletionList(is_incomplete=False, items=items)
+                break
+        i -= 1
+    return None
+
 
 @server.feature(
     types.TEXT_DOCUMENT_COMPLETION,
@@ -27,14 +198,28 @@ def completions(ls: LanguageServer, params: types.CompletionParams):
     logger.debug("completions: %s at %d:%d", params.text_document.uri,
                  params.position.line, params.position.character)
     uri = params.text_document.uri
-    result = _cache.get(uri)
     doc = ls.workspace.get_text_document(uri)
+
+    # Try fresh parse with fake identifier for accurate completions
+    filepath = _uri_to_path(uri)
+    result = completion_validate(
+        doc.source, filepath,
+        params.position.line, params.position.character,
+    )
+    # Fall back to cache if fresh parse produced nothing
+    if result.program is None:
+        result = _cache.get(uri)
 
     lines = doc.source.splitlines()
     if params.position.line >= len(lines):
         return None
     line_text = lines[params.position.line]
     col = params.position.character
+
+    # Import context: module names or imported item names
+    import_result = _complete_import(line_text, col, filepath)
+    if import_result is not None:
+        return import_result
 
     # Dot context: struct field or module function completion
     if col > 0 and line_text[col - 1] == ".":
@@ -66,6 +251,11 @@ def completions(ls: LanguageServer, params: types.CompletionParams):
             return types.CompletionList(is_incomplete=False, items=items)
 
         return _complete_dot(result, params.position, prefix)
+
+    # Struct literal context: suggest remaining fields
+    struct_lit_result = _complete_struct_literal(line_text, col, result, doc.source, params.position)
+    if struct_lit_result is not None:
+        return struct_lit_result
 
     return _complete_general(result, params.position)
 
@@ -189,7 +379,7 @@ def _is_complex_builtin_pipe_compatible(
     # Categories that operate on arrays/scalars of any float type
     _FLOAT_ARRAY_CATEGORIES = {
         "reduction", "shape", "array_manip", "sorting", "cumulative",
-        "two_arg_elementwise", "clip", "stop_grad", "where",
+        "two_arg_elementwise", "clip", "stop_grad", "where", "einsum",
     }
     # Categories that require specific shapes
     _ARRAY_ONLY_CATEGORIES = {"conv_pool", "linalg"}
@@ -230,9 +420,15 @@ def _pipe_completions(
     """Build completion items for functions compatible with piping from expr_type."""
     items: list[types.CompletionItem] = []
     dot_col = position.character - 1  # 0-indexed position of the '.'
+    # Range covering the dot — used by additional_text_edits to replace '.' with ' |> '
     dot_range = types.Range(
         start=types.Position(line=position.line, character=dot_col),
         end=types.Position(line=position.line, character=dot_col + 1),
+    )
+    # Zero-width range at cursor position — used by text_edit for filtering/insertion
+    cursor_range = types.Range(
+        start=types.Position(line=position.line, character=position.character),
+        end=types.Position(line=position.line, character=position.character),
     )
 
     seen: set[str] = set()
@@ -249,7 +445,12 @@ def _pipe_completions(
             documentation=types.MarkupContent(
                 kind=types.MarkupKind.Markdown, value=doc_text,
             ) if doc_text else None,
-            text_edit=types.TextEdit(range=dot_range, new_text=f" |> {name}($0)"),
+            # text_edit at cursor position (VS Code uses this range for filtering)
+            text_edit=types.TextEdit(range=cursor_range, new_text=f"{name}($0)"),
+            # additional_text_edits replaces the dot with ' |> '
+            additional_text_edits=[
+                types.TextEdit(range=dot_range, new_text=" |> "),
+            ],
             insert_text_format=types.InsertTextFormat.Snippet,
             sort_text=f"1_{name}",
         )
@@ -315,6 +516,10 @@ def _annotation_matches_type(ann, expr_type: MaomiType, struct_defs: dict) -> bo
     """Check if a type annotation's base matches the expression type (for pipe completion)."""
     base = ann.base
 
+    # Single uppercase letter = type variable, matches anything (check first!)
+    if len(base) == 1 and base.isupper():
+        return True
+
     # Struct name match
     if isinstance(expr_type, StructType):
         return base == expr_type.name
@@ -327,10 +532,6 @@ def _annotation_matches_type(ann, expr_type: MaomiType, struct_defs: dict) -> bo
         expr_base = expr_type.base
 
     if expr_base and base == expr_base:
-        return True
-
-    # Single uppercase letter = type variable, matches anything
-    if len(base) == 1 and base.isupper():
         return True
 
     return False
@@ -449,6 +650,8 @@ def _complete_general(result: AnalysisResult | None, position: types.Position):
 
         # Variables in scope
         for var_name, var_type in _vars_in_scope(result, position):
+            if var_name == _FAKE_ID or var_name.startswith("__maomi"):
+                continue
             items.append(types.CompletionItem(
                 label=var_name,
                 kind=types.CompletionItemKind.Variable,
@@ -496,7 +699,13 @@ def _collect_scope_vars(
                 stmt.span.line_start == line and stmt.span.col_end < col
             ):
                 typ = type_map.get(id(stmt.value))
-                variables.append((stmt.name, typ))
+                # Replace earlier binding with same name (shadowing)
+                for i, (vname, _) in enumerate(variables):
+                    if vname == stmt.name:
+                        variables[i] = (stmt.name, typ)
+                        break
+                else:
+                    variables.append((stmt.name, typ))
 
         if isinstance(stmt, ExprStmt):
             _collect_from_expr(stmt.expr, line, col, type_map, variables)
@@ -513,10 +722,20 @@ def _collect_from_expr(
         return
 
     if isinstance(expr, ScanExpr):
-        # carry_var and elem_vars are in scope inside the body
         variables.append((expr.carry_var, None))
         for ev in expr.elem_vars:
             variables.append((ev, None))
+        _collect_scope_vars(expr.body, line, col, type_map, variables)
+
+    elif isinstance(expr, FoldExpr):
+        variables.append((expr.carry_var, None))
+        for ev in expr.elem_vars:
+            variables.append((ev, None))
+        _collect_scope_vars(expr.body, line, col, type_map, variables)
+
+    elif isinstance(expr, WhileExpr):
+        variables.append((expr.state_var, None))
+        _collect_scope_vars(expr.cond, line, col, type_map, variables)
         _collect_scope_vars(expr.body, line, col, type_map, variables)
 
     elif isinstance(expr, MapExpr):
@@ -524,5 +743,8 @@ def _collect_from_expr(
         _collect_scope_vars(expr.body, line, col, type_map, variables)
 
     elif isinstance(expr, IfExpr):
-        _collect_scope_vars(expr.then_block, line, col, type_map, variables)
-        _collect_scope_vars(expr.else_block, line, col, type_map, variables)
+        # Only collect from the branch containing the cursor (prevent scope leakage)
+        if _span_contains(expr.then_block.span, line, col):
+            _collect_scope_vars(expr.then_block, line, col, type_map, variables)
+        elif _span_contains(expr.else_block.span, line, col):
+            _collect_scope_vars(expr.else_block, line, col, type_map, variables)

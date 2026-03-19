@@ -47,8 +47,10 @@ class TestSingleTokens:
         assert lex("* *") == [(TokenType.STAR, "*"), (TokenType.STAR, "*")]
         assert lex("- >") == [(TokenType.MINUS, "-"), (TokenType.GT, ">")]
         assert lex("= =") == [(TokenType.ASSIGN, "="), (TokenType.ASSIGN, "=")]
-        with pytest.raises(Exception):
-            lex("! =")  # bare '!' is no longer valid
+        # bare '!' is invalid — lexer recovers and skips it
+        lexer = Lexer("! =")
+        lexer.tokenize()
+        assert len(lexer.errors) >= 1
         assert lex("< =") == [(TokenType.LT, "<"), (TokenType.ASSIGN, "=")]
 
 
@@ -182,8 +184,10 @@ class TestLineColTracking:
 
 class TestErrors:
     def test_unexpected_character(self):
-        with pytest.raises(LexerError, match="unexpected character"):
-            Lexer("$").tokenize()
+        lexer = Lexer("$")
+        lexer.tokenize()
+        assert len(lexer.errors) >= 1
+        assert "unexpected character" in lexer.errors[0].message
 
 
 class TestFullProgram:

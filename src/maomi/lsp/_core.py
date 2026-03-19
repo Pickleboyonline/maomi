@@ -48,26 +48,26 @@ def validate(source: str, filename: str) -> tuple[list[types.Diagnostic], Analys
     logger.debug("Validating %s (%d chars)", filename, len(source))
     diagnostics: list[types.Diagnostic] = []
 
-    try:
-        tokens = Lexer(source, filename=filename).tokenize()
-    except LexerError as e:
-        logger.debug("Lexer error in %s: %s", filename, e.message)
+    lexer = Lexer(source, filename=filename)
+    tokens = lexer.tokenize()
+    for e in lexer.errors:
         diagnostics.append(_error_to_diagnostic(e))
+
+    parser = Parser(tokens, filename=filename)
+    program = parser.parse()
+    for e in parser.errors:
+        diagnostics.append(_error_to_diagnostic(e))
+
+    # If nothing parsed at all, treat as total failure
+    if not program.functions and not program.struct_defs:
         return diagnostics, _EMPTY_RESULT
 
-    try:
-        program = Parser(tokens, filename=filename).parse()
-    except ParseError as e:
-        logger.debug("Parse error in %s: %s", filename, e.message)
-        diagnostics.append(_error_to_diagnostic(e))
-        return diagnostics, _EMPTY_RESULT
-
+    # Resolver — if it fails, use pre-resolve program
     try:
         program = resolve(program, filename)
     except MaomiError as e:
         logger.debug("Resolve error in %s: %s", filename, e.message)
         diagnostics.append(_error_to_diagnostic(e))
-        return diagnostics, _EMPTY_RESULT
 
     checker = TypeChecker(filename=filename)
     type_errors = checker.check(program)
@@ -85,15 +85,62 @@ def validate(source: str, filename: str) -> tuple[list[types.Diagnostic], Analys
 def _error_to_diagnostic(e: MaomiError) -> types.Diagnostic:
     line = max(0, e.line - 1)
     col = max(0, e.col - 1)
+    col_end = max(col + 1, e.col_end - 1) if hasattr(e, 'col_end') else col + 1
     return types.Diagnostic(
         range=types.Range(
             start=types.Position(line=line, character=col),
-            end=types.Position(line=line, character=col + 1),
+            end=types.Position(line=line, character=col_end),
         ),
         message=e.message,
         severity=types.DiagnosticSeverity.Error,
         source="maomi",
     )
+
+
+_FAKE_ID = "__mao_cmplt__"
+
+
+def completion_validate(
+    source: str, filename: str, line_0: int, col_0: int,
+) -> AnalysisResult:
+    """Run parse/check with a fake identifier at cursor for fresh completions.
+
+    Inserts a synthetic identifier at the cursor so incomplete expressions
+    (e.g., 'x.') become valid (e.g., 'x.__mao_cmplt__'). The result is used
+    only for the current completion request — never cached.
+    """
+    modified = _insert_fake_id(source, line_0, col_0)
+    try:
+        tokens = Lexer(modified, filename=filename).tokenize()
+    except LexerError:
+        return _EMPTY_RESULT
+    parser = Parser(tokens, filename=filename)
+    try:
+        program = parser.parse()
+    except Exception:
+        return _EMPTY_RESULT
+    if not program.functions and not program.struct_defs:
+        return _EMPTY_RESULT
+    try:
+        program = resolve(program, filename)
+    except MaomiError:
+        pass  # use pre-resolve program
+    try:
+        checker = TypeChecker(filename=filename)
+        checker.check(program)
+    except Exception:
+        return AnalysisResult(program, {}, {}, {})
+    return AnalysisResult(program, checker.type_map, dict(checker.fn_table), dict(checker.struct_defs))
+
+
+def _insert_fake_id(source: str, line_0: int, col_0: int) -> str:
+    """Insert _FAKE_ID at the given 0-indexed position in source."""
+    lines = source.splitlines(keepends=True)
+    if line_0 >= len(lines):
+        return source
+    line = lines[line_0]
+    lines[line_0] = line[:col_0] + _FAKE_ID + line[col_0:]
+    return "".join(lines)
 
 
 # ---------------------------------------------------------------------------

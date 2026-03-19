@@ -31,6 +31,7 @@ from .ast_nodes import (
     IndexExpr,
     IndexComponent,
     TypeAnnotation,
+    ErrorExpr,
     Expr,
 )
 from .types import MaomiType, ScalarType, ArrayType, StructType, StructArrayType, WildcardArrayType, StringType, TypeVar, F32, F64, I32, I64, BOOL, STRING, FLOAT_BASES
@@ -495,6 +496,8 @@ class TypeChecker:
 
     def _infer_inner(self, expr: Expr, env: TypeEnv) -> MaomiType | None:
         match expr:
+            case ErrorExpr():
+                return None
             case IntLiteral():
                 return I32
             case FloatLiteral():

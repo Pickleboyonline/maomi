@@ -5,7 +5,7 @@ from lsprotocol import types
 from ..ast_nodes import (
     FnDef, Block, LetStmt, ExprStmt, Param,
     BinOp, UnaryOp, IfExpr, CallExpr, ScanExpr, WhileExpr, MapExpr,
-    GradExpr, ValueAndGradExpr, CastExpr, FoldExpr,
+    GradExpr, ValueAndGradExpr, CastExpr, FoldExpr, ArrayLiteral,
     Identifier, StructLiteral, FieldAccess, WithExpr, IndexExpr, StructDef,
 )
 
@@ -48,13 +48,25 @@ def _children_of(node):
             yield init
             yield from seqs
             yield body
+        case FoldExpr(init=init, sequences=seqs, body=body):
+            yield init
+            yield from seqs
+            yield body
+        case WhileExpr(init=init, cond=cond, body=body):
+            yield init
+            yield cond
+            yield body
         case MapExpr(sequence=seq, body=body):
             yield seq
             yield body
+        case CastExpr(expr=e):
+            yield e
         case GradExpr(expr=e):
             yield e
         case ValueAndGradExpr(expr=e):
             yield e
+        case ArrayLiteral(elements=elems):
+            yield from elems
         case StructLiteral(fields=fields):
             for _, expr in fields:
                 yield expr

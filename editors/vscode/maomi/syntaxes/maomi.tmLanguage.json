@@ -23,7 +23,7 @@
   "repository": {
     "doc-comments": {
       "match": "///.*$",
-      "name": "comment.block.documentation.maomi"
+      "name": "comment.line.documentation.maomi"
     },
     "comments": {
       "match": "//.*$",

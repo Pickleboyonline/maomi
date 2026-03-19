@@ -48,6 +48,7 @@ class StructDef:
     span: Span
     doc: str | None = field(default=None, compare=False)
     canonical_name: str | None = field(default=None, compare=False)
+    field_name_spans: list[Span] = field(default_factory=list, compare=False)
 
 
 # ---------- Function ----------
@@ -408,8 +409,19 @@ class _SortGrad:
     span: Span
 
 
+@dataclass
+class ErrorExpr:
+    """Sentinel node for a recovered section of broken code.
+
+    Produced by the parser during error recovery. Downstream passes
+    (type checker, LSP) recognize this and skip it gracefully.
+    """
+    message: str
+    span: Span
+
+
 # Union types for convenience
-Expr = IntLiteral | FloatLiteral | BoolLiteral | StringLiteral | Identifier | UnaryOp | BinOp | IfExpr | CallExpr | ScanExpr | WhileExpr | MapExpr | GradExpr | ValueAndGradExpr | CastExpr | FoldExpr | ArrayLiteral | StructLiteral | FieldAccess | WithExpr | IndexExpr | _ScanGrad | _WhileGrad | _IndexGrad | _StructArrayIndexGrad | _GatherGrad | _Conv2dGrad | _MaxPoolGrad | _AvgPoolGrad | _FoldGrad | _BroadcastExpr | _CumsumGrad | _SortGrad
+Expr = IntLiteral | FloatLiteral | BoolLiteral | StringLiteral | Identifier | UnaryOp | BinOp | IfExpr | CallExpr | ScanExpr | WhileExpr | MapExpr | GradExpr | ValueAndGradExpr | CastExpr | FoldExpr | ArrayLiteral | StructLiteral | FieldAccess | WithExpr | IndexExpr | ErrorExpr | _ScanGrad | _WhileGrad | _IndexGrad | _StructArrayIndexGrad | _GatherGrad | _Conv2dGrad | _MaxPoolGrad | _AvgPoolGrad | _FoldGrad | _BroadcastExpr | _CumsumGrad | _SortGrad
 Stmt = LetStmt | ExprStmt
 
 
@@ -422,6 +434,10 @@ class ImportDecl:
     alias: str | None          # from "as nn", None = derive from module_path
     names: list[str] | None    # { relu, linear } or None = qualified import
     span: Span
+    # Per-part spans for semantic highlighting
+    module_span: Span | None = field(default=None, compare=False)    # span of module name/path token
+    alias_span: Span | None = field(default=None, compare=False)     # span of alias name (after 'as')
+    name_spans: list[Span] = field(default_factory=list, compare=False)  # spans of each imported name
 
 
 # ---------- Program ----------

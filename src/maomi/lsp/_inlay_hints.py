@@ -3,7 +3,7 @@ from __future__ import annotations
 from pygls.lsp.server import LanguageServer
 from lsprotocol import types
 
-from ..ast_nodes import Block, LetStmt, ExprStmt, ScanExpr, MapExpr, IfExpr
+from ..ast_nodes import Block, LetStmt, ExprStmt, ScanExpr, MapExpr, IfExpr, FoldExpr, WhileExpr
 from ._core import server, _cache, AnalysisResult, _local_functions
 
 
@@ -48,6 +48,17 @@ def _inlay_collect_from_expr(expr, type_map, start_line, end_line, hints, source
             expr.body, type_map, start_line, end_line, hints, source_lines,
         )
     elif isinstance(expr, MapExpr):
+        _inlay_collect_hints(
+            expr.body, type_map, start_line, end_line, hints, source_lines,
+        )
+    elif isinstance(expr, FoldExpr):
+        _inlay_collect_hints(
+            expr.body, type_map, start_line, end_line, hints, source_lines,
+        )
+    elif isinstance(expr, WhileExpr):
+        _inlay_collect_hints(
+            expr.cond, type_map, start_line, end_line, hints, source_lines,
+        )
         _inlay_collect_hints(
             expr.body, type_map, start_line, end_line, hints, source_lines,
         )

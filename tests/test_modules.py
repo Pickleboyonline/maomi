@@ -133,7 +133,7 @@ class TestResolver:
         path = _fixture("uses_mathlib.mao")
         program = _parse_file(path)
         resolved = resolve(program, path)
-        assert resolved.imports == []
+        assert len(resolved.imports) == 1  # preserved for LSP semantic tokens
         fn_names = {fn.name for fn in resolved.functions}
         assert "mathlib.double" in fn_names
         assert "mathlib.square" in fn_names
