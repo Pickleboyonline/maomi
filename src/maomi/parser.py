@@ -424,7 +424,7 @@ class Parser:
             tok = self._expect(TokenType.INT_LIT)
             max_iters = int(tok.value)
             if max_iters <= 0:
-                self._error(f"limit must be positive, got {max_iters}")
+                raise self._error(f"limit must be positive, got {max_iters}")
         cond = self._parse_block()
         self._expect(TokenType.DO)
         body = self._parse_block()
@@ -492,7 +492,7 @@ class Parser:
         self._expect(TokenType.COMMA)
         tok = self._advance()
         if tok.type not in self._CAST_TYPE_TOKENS:
-            self._error(f"cast: expected a type (f32, f64, bf16, i32, i64, bool), got '{tok.value}'")
+            raise self._error(f"cast: expected a type (f32, f64, bf16, i32, i64, bool), got '{tok.value}'")
         target = self._CAST_TYPE_TOKENS[tok.type]
         self._expect(TokenType.RPAREN)
         return CastExpr(expr, target, self._span_from(start))
