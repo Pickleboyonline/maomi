@@ -7,7 +7,7 @@ from ..builtins import ELEMENTWISE as _EW_REGISTRY, COMPLEX as _CX_REGISTRY
 _KEYWORDS = [
     "fn", "let", "if", "else", "scan", "map", "grad", "value_and_grad", "cast", "fold",
     "struct", "with", "import", "from", "in", "true", "false",
-    "while", "do", "limit", "type",
+    "while", "do", "limit", "type", "comptime",
 ]
 
 _TYPE_NAMES = ["f32", "f64", "bf16", "i32", "i64", "bool"]
@@ -18,7 +18,7 @@ _BUILTINS = sorted(set(_EW_REGISTRY.keys()) | set(_CX_REGISTRY.keys()))
 _BUILTIN_SET = set(_BUILTINS)
 
 _BUILTIN_NAMESPACES: dict[str, list[str]] = {
-    "random": ["key", "split", "uniform", "normal", "bernoulli", "categorical", "truncated_normal"],
+    "random": ["key", "split", "uniform", "normal", "bernoulli", "categorical", "truncated_normal", "exponential", "randint"],
 }
 
 # Signature and doc data derived from registry

@@ -387,7 +387,7 @@ def _is_pipe_compatible(
             return expr_type.base in FLOAT_BASES
         if isinstance(expr_type, WildcardArrayType):
             return expr_type.base in FLOAT_BASES
-        if isinstance(expr_type, StructType):
+        if isinstance(expr_type, (StructType, StructArrayType)):
             return True
         return False
 
@@ -412,6 +412,13 @@ def _is_pipe_compatible(
     if isinstance(expr_type, StructType) and isinstance(first, StructType):
         return first.name == expr_type.name
 
+    # StructArrayType — extract struct_type for compatibility check
+    if isinstance(expr_type, StructArrayType):
+        if isinstance(first, StructArrayType):
+            return first.struct_type.name == expr_type.struct_type.name
+        if isinstance(first, StructType):
+            return first.name == expr_type.struct_type.name
+
     return False
 
 
@@ -432,7 +439,7 @@ def _is_complex_builtin_pipe_compatible(
             return expr_type.base in FLOAT_BASES
         if isinstance(expr_type, WildcardArrayType):
             return expr_type.base in FLOAT_BASES
-        if isinstance(expr_type, StructType):
+        if isinstance(expr_type, (StructType, StructArrayType)):
             # reductions like sum work on structs, shape ops generally don't
             return category in {"reduction", "stop_grad"}
         return False
@@ -540,11 +547,15 @@ def _pipe_completions(
             first_ann = fn.params[0].type_annotation
             if _annotation_matches_type(first_ann, expr_type, result.struct_defs):
                 seen.add(fn.name)
-                ann_strs = [f"{p.name}: {_annotation_str(p.type_annotation)}" for p in fn.params]
-                detail = f"({', '.join(ann_strs)}) -> {_annotation_str(fn.return_type)}"
-                items.append(_make_item(fn.name, detail, fn.doc))
+                items.append(_make_item(fn.name, _fn_detail_from_ast(fn), fn.doc))
 
     return items
+
+
+def _fn_detail_from_ast(fn) -> str:
+    """Build a detail string like '(x: f32, y: f32) -> f32' from an AST FnDef."""
+    ann_strs = [f"{p.name}: {_annotation_str(p.type_annotation)}" for p in fn.params]
+    return f"({', '.join(ann_strs)}) -> {_annotation_str(fn.return_type)}"
 
 
 def _annotation_str(ann) -> str:
@@ -570,6 +581,10 @@ def _annotation_matches_type(ann, expr_type: MaomiType, struct_defs: dict) -> bo
     if isinstance(expr_type, StructType):
         return base == expr_type.name
 
+    # StructArrayType — match struct name
+    if isinstance(expr_type, StructArrayType) and base == expr_type.struct_type.name:
+        return True
+
     # Scalar/array base match
     expr_base = None
     if isinstance(expr_type, (ScalarType, ArrayType)):
@@ -585,7 +600,9 @@ def _annotation_matches_type(ann, expr_type: MaomiType, struct_defs: dict) -> bo
 
 def _complete_module(result: AnalysisResult | None, module_name: str):
     """Complete functions and structs from an imported module (e.g., 'cnn.' -> cnn.relu, cnn.Point)."""
-    if not result or not result.fn_table or not module_name:
+    if not result or not module_name:
+        return None
+    if not result.fn_table and not result.program:
         return None
     prefix = module_name + "."
     items: list[types.CompletionItem] = []
@@ -609,6 +626,26 @@ def _complete_module(result: AnalysisResult | None, module_name: str):
                 kind=types.MarkupKind.Markdown, value=doc,
             ) if doc else None,
         ))
+
+    # B1: Generic/wildcard/comptime functions not in fn_table for this module
+    mod_fn_seen = {item.label for item in items}
+    if result.program:
+        for fn in result.program.functions:
+            if not fn.name.startswith(prefix):
+                continue
+            short_name = fn.name[len(prefix):]
+            if "$" in short_name or short_name in mod_fn_seen:
+                continue
+            detail = _fn_detail_from_ast(fn)
+            doc = fn_docs.get(fn.name) or fn.doc
+            items.append(types.CompletionItem(
+                label=short_name,
+                kind=types.CompletionItemKind.Function,
+                detail=detail,
+                documentation=types.MarkupContent(
+                    kind=types.MarkupKind.Markdown, value=doc,
+                ) if doc else None,
+            ))
 
     # G12: Also include structs from the module
     if result.struct_defs:
@@ -685,10 +722,12 @@ def _complete_general(result: AnalysisResult | None, position: types.Position):
         # Build fn doc lookup
         fn_docs = {f.name: f.doc for f in result.program.functions if f.doc}
         # User-defined functions
+        user_fn_seen: set[str] = set()
         for name, sig in result.fn_table.items():
             # B1: Filter monomorphized $-copies and module-qualified names
             if name in _BUILTIN_SET or "." in name or "$" in name:
                 continue
+            user_fn_seen.add(name)
             params = ", ".join(
                 f"{n}: {t}" for n, t in zip(sig.param_names, sig.param_types)
             )
@@ -701,6 +740,22 @@ def _complete_general(result: AnalysisResult | None, position: types.Position):
                     kind=types.MarkupKind.Markdown, value=doc,
                 ) if doc else None,
                 sort_text=f"1_{name}",
+            ))
+
+        # B1: Generic/wildcard/comptime functions not in fn_table
+        for fn in result.program.functions:
+            if fn.name in user_fn_seen or fn.name in _BUILTIN_SET:
+                continue
+            if "." in fn.name or "$" in fn.name or fn.source_file is not None:
+                continue
+            items.append(types.CompletionItem(
+                label=fn.name,
+                kind=types.CompletionItemKind.Function,
+                detail=_fn_detail_from_ast(fn),
+                documentation=types.MarkupContent(
+                    kind=types.MarkupKind.Markdown, value=fn.doc,
+                ) if fn.doc else None,
+                sort_text=f"1_{fn.name}",
             ))
 
         # Struct names
