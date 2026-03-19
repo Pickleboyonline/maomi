@@ -284,13 +284,28 @@ def _sem_collect_tokens(node, tokens: list, param_names: set[str],
 
     if isinstance(node, CallExpr):
         call_type = _ST_BUILTIN_FUNCTION if node.callee in _BUILTIN_SET else _ST_FUNCTION
-        tokens.append((
-            node.span.line_start - 1,
-            node.span.col_start - 1,
-            len(node.callee),
-            call_type,
-            0,
-        ))
+        # Search source text for callee name — node.span.col_start can be wrong
+        # for desugared pipe expressions (x |> f() becomes f(x) with span at x)
+        callee_name = node.callee.split("$")[0]  # strip monomorphization suffix
+        callee_emitted = False
+        if source_lines is not None:
+            pos = _find_keyword_in_source(
+                source_lines, callee_name,
+                node.span.line_start, node.span.col_start,
+                node.span.line_end, node.span.col_end,
+            )
+            if pos:
+                tokens.append((pos[0] - 1, pos[1] - 1, len(callee_name), call_type, 0))
+                callee_emitted = True
+        if not callee_emitted:
+            # Fallback: use span start (may be wrong for pipes, but best effort)
+            tokens.append((
+                node.span.line_start - 1,
+                node.span.col_start - 1,
+                len(callee_name),
+                call_type,
+                0,
+            ))
         for arg in node.args:
             _recurse(arg)
         return
