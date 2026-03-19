@@ -13,6 +13,9 @@ class Lexer:
         self.errors: list[LexerError] = []
 
     def tokenize(self) -> list[Token]:
+        # Strip UTF-8 BOM if present at start of file
+        if self.source.startswith('\ufeff'):
+            self.source = self.source[1:]
         while self.pos < len(self.source):
             if self._skip_whitespace_and_comments():
                 continue  # doc comment emitted, re-enter skip loop
@@ -43,6 +46,17 @@ class Lexer:
         if ch == "\n":
             self.line += 1
             self.col = 1
+        elif ch == "\r":
+            # CR-only line ending (old Mac-style): treat as line break
+            # unless followed by \n (Windows-style \r\n), in which case
+            # skip the \r and let \n handle the line increment
+            if self.pos < len(self.source) and self.source[self.pos] == "\n":
+                # \r\n: don't increment line yet, \n will do it
+                self.col += 1
+            else:
+                # bare \r: treat as line break
+                self.line += 1
+                self.col = 1
         else:
             self.col += 1
         return ch
@@ -70,7 +84,7 @@ class Lexer:
         return False
 
     def _skip_line_comment(self):
-        while self.pos < len(self.source) and self.source[self.pos] != "\n":
+        while self.pos < len(self.source) and self.source[self.pos] not in ("\n", "\r"):
             self._advance()
 
     def _read_doc_comment(self):
@@ -82,7 +96,7 @@ class Lexer:
         if self.pos < len(self.source) and self.source[self.pos] == " ":
             self._advance()
         start = self.pos
-        while self.pos < len(self.source) and self.source[self.pos] != "\n":
+        while self.pos < len(self.source) and self.source[self.pos] not in ("\n", "\r"):
             self._advance()
         text = self.source[start:self.pos]
         self._add(TokenType.DOC_COMMENT, text, line, col)
@@ -239,7 +253,7 @@ class Lexer:
                 self._advance()
                 self._add(TokenType.STRING_LIT, "".join(chars), line, col)
                 return
-            if ch == "\n":
+            if ch in ("\n", "\r"):
                 self._error("unterminated string literal")
             chars.append(ch)
             self._advance()

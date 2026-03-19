@@ -468,6 +468,7 @@ class TypeChecker:
             f"unknown type: '{ta.base}'",
             ta.span.line_start,
             ta.span.col_start,
+            ta.span.col_end,
         )
         return None
 
@@ -558,6 +559,7 @@ class TypeChecker:
                     f"type mismatch in let binding '{stmt.name}': declared {declared} but got {inferred}",
                     stmt.span.line_start,
                     stmt.span.col_start,
+                    stmt.span.col_end,
                 )
             env.define(stmt.name, declared or inferred)
         else:
@@ -832,10 +834,10 @@ class TypeChecker:
         if inner_type is None:
             return None
         if expr.target_type not in self._CAST_BASES:
-            self._error(f"cast: unknown target type '{expr.target_type}'", expr.span.line_start, expr.span.col_start)
+            self._error(f"cast: unknown target type '{expr.target_type}'", expr.span.line_start, expr.span.col_start, expr.span.col_end)
             return None
         if isinstance(inner_type, StructType):
-            self._error("cast: cannot cast struct types", expr.span.line_start, expr.span.col_start)
+            self._error("cast: cannot cast struct types", expr.span.line_start, expr.span.col_start, expr.span.col_end)
             return None
         if isinstance(inner_type, ScalarType):
             return ScalarType(expr.target_type)
@@ -944,13 +946,14 @@ class TypeChecker:
     def _check_struct_literal(self, expr: StructLiteral, env: TypeEnv) -> MaomiType | None:
         stype = self.struct_defs.get(expr.name)
         if stype is None:
-            self._error(f"unknown struct: '{expr.name}'", expr.span.line_start, expr.span.col_start)
+            self._error(f"unknown struct: '{expr.name}'", expr.span.line_start, expr.span.col_start, expr.span.col_end)
             return None
 
         if len(expr.fields) != len(stype.fields):
             self._error(
                 f"struct '{expr.name}' has {len(stype.fields)} fields, got {len(expr.fields)}",
                 expr.span.line_start, expr.span.col_start,
+                expr.span.col_end,
             )
             return None
 
@@ -959,6 +962,7 @@ class TypeChecker:
                 self._error(
                     f"struct '{expr.name}': expected field '{expected_name}', got '{given_name}'",
                     given_expr.span.line_start, given_expr.span.col_start,
+                    given_expr.span.col_end,
                 )
                 return None
             given_type = self._infer(given_expr, env)
@@ -966,6 +970,7 @@ class TypeChecker:
                 self._error(
                     f"struct '{expr.name}' field '{given_name}': expected {expected_type}, got {given_type}",
                     given_expr.span.line_start, given_expr.span.col_start,
+                    given_expr.span.col_end,
                 )
 
         return stype
@@ -993,12 +998,14 @@ class TypeChecker:
             self._error(
                 f"struct '{obj_type.name}' has no field '{expr.field}'",
                 expr.span.line_start, expr.span.col_start,
+                expr.span.col_end,
             )
             return None
         if not isinstance(obj_type, StructType):
             self._error(
                 f"field access on non-struct type: {obj_type}",
                 expr.span.line_start, expr.span.col_start,
+                expr.span.col_end,
             )
             return None
         for field_name, field_type in obj_type.fields:
@@ -1007,6 +1014,7 @@ class TypeChecker:
         self._error(
             f"struct '{obj_type.name}' has no field '{expr.field}'",
             expr.span.line_start, expr.span.col_start,
+            expr.span.col_end,
         )
         return None
 
@@ -1234,9 +1242,9 @@ class TypeChecker:
         if op == "not":
             if t == BOOL or (isinstance(t, ArrayType) and t.base == "bool"):
                 return t
-            self._error(f"'not' requires bool operand, got {t}", expr.span.line_start, expr.span.col_start)
+            self._error(f"'not' requires bool operand, got {t}", expr.span.line_start, expr.span.col_start, expr.span.col_end)
             return None
-        self._error(f"invalid unary {op} on type {t}", expr.span.line_start, expr.span.col_start)
+        self._error(f"invalid unary {op} on type {t}", expr.span.line_start, expr.span.col_start, expr.span.col_end)
         return None
 
     def _check_binop(self, op: str, left: Expr, right: Expr, expr: Expr, env: TypeEnv) -> MaomiType | None:
@@ -1255,6 +1263,7 @@ class TypeChecker:
                 self._error(
                     f"'{op}' requires bool operands, got {lt} and {rt}",
                     expr.span.line_start, expr.span.col_start,
+                    expr.span.col_end,
                 )
                 return None
             result = self._broadcast(lt, rt)
@@ -1262,6 +1271,7 @@ class TypeChecker:
                 self._error(
                     f"'{op}': mismatched shapes {lt} and {rt}",
                     expr.span.line_start, expr.span.col_start,
+                    expr.span.col_end,
                 )
                 return None
             return result
@@ -1273,6 +1283,7 @@ class TypeChecker:
                     f"comparison {op}: mismatched types {lt} and {rt}",
                     expr.span.line_start,
                     expr.span.col_start,
+                    expr.span.col_end,
                 )
                 return None
             # Comparison result is bool with the broadcast shape
@@ -1290,6 +1301,7 @@ class TypeChecker:
                 f"operator {op}: expected numeric types, got {lt} and {rt}",
                 expr.span.line_start,
                 expr.span.col_start,
+                expr.span.col_end,
             )
             return None
 
@@ -1299,6 +1311,7 @@ class TypeChecker:
                 f"operator {op}: mismatched types {lt} and {rt}",
                 expr.span.line_start,
                 expr.span.col_start,
+                expr.span.col_end,
             )
             return None
 
@@ -1312,18 +1325,21 @@ class TypeChecker:
                 self._error(
                     f"operator {op}: not supported between struct types",
                     expr.span.line_start, expr.span.col_start,
+                    expr.span.col_end,
                 )
                 return None
             if lt.name != rt.name:
                 self._error(
                     f"operator {op}: mismatched struct types {lt.name} and {rt.name}",
                     expr.span.line_start, expr.span.col_start,
+                    expr.span.col_end,
                 )
                 return None
             if not _struct_has_numeric_leaves(lt):
                 self._error(
                     f"operator {op}: struct {lt.name} has non-numeric fields",
                     expr.span.line_start, expr.span.col_start,
+                    expr.span.col_end,
                 )
                 return None
             return lt
@@ -1364,6 +1380,7 @@ class TypeChecker:
         self._error(
             f"operator {op}: unsupported for struct types ({lt} and {rt})",
             expr.span.line_start, expr.span.col_start,
+            expr.span.col_end,
         )
         return None
 
@@ -1373,6 +1390,7 @@ class TypeChecker:
                 f"matmul (@): both operands must be arrays, got {lt} and {rt}",
                 expr.span.line_start,
                 expr.span.col_start,
+                expr.span.col_end,
             )
             return None
 
@@ -1381,6 +1399,7 @@ class TypeChecker:
                 f"matmul (@): base type mismatch: {lt.base} vs {rt.base}",
                 expr.span.line_start,
                 expr.span.col_start,
+                expr.span.col_end,
             )
             return None
 
@@ -1389,6 +1408,7 @@ class TypeChecker:
                 f"matmul (@): operands must have at least 1 dimension",
                 expr.span.line_start,
                 expr.span.col_start,
+                expr.span.col_end,
             )
             return None
 
@@ -1400,6 +1420,7 @@ class TypeChecker:
                 f"matmul (@): dimension mismatch: left has {left_contract}, right has {right_contract}",
                 expr.span.line_start,
                 expr.span.col_start,
+                expr.span.col_end,
             )
             return None
 
@@ -1423,6 +1444,7 @@ class TypeChecker:
                     f"if condition must be bool, got {cond_type}",
                     expr.condition.span.line_start,
                     expr.condition.span.col_start,
+                    expr.condition.span.col_end,
                 )
 
         if then_type is None or else_type is None:
@@ -1434,6 +1456,7 @@ class TypeChecker:
                 f"if/else branches have different types: {then_type} vs {else_type}",
                 expr.span.line_start,
                 expr.span.col_start,
+                expr.span.col_end,
             )
             return None
 

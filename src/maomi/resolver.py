@@ -58,7 +58,7 @@ class _ResolveContext:
             module_name = imp.alias if imp.alias else _stem(imp.module_path)
 
             # Get prefixed functions and struct_defs for this module (cached)
-            prefixed_fns, prefixed_structs = self._load_module(mod_path, module_name)
+            prefixed_fns, prefixed_structs = self._load_module(mod_path, module_name, importing_file=file_path, import_node=imp)
 
             if imp.names is not None:
                 # from math import { relu, Point };
@@ -144,15 +144,20 @@ class _ResolveContext:
         return Program(program.imports, all_structs, merged_fns, program.span,
                        type_aliases=program.type_aliases)
 
-    def _load_module(self, mod_path: str, module_name: str) -> tuple[list[FnDef], list[StructDef]]:
+    def _load_module(self, mod_path: str, module_name: str, importing_file: str | None = None, import_node: ImportDecl | None = None) -> tuple[list[FnDef], list[StructDef]]:
         cache_key = f"{mod_path}::{module_name}"
         if cache_key in self._cache:
             return self._cache[cache_key]
 
+        # Use the importing file and import node's span for error reporting
+        err_file = importing_file if importing_file else mod_path
+        err_line = import_node.span.line_start if import_node else 0
+        err_col = import_node.span.col_start if import_node else 0
+
         if mod_path in self._resolving:
             raise MaomiError(
                 f"circular import detected: {mod_path}",
-                mod_path, 0, 0,
+                err_file, err_line, err_col,
             )
 
         self._resolving.add(mod_path)
@@ -162,7 +167,7 @@ class _ResolveContext:
         except FileNotFoundError:
             raise MaomiError(
                 f"imported module not found: {mod_path}",
-                mod_path, 0, 0,
+                err_file, err_line, err_col,
             )
 
         tokens = Lexer(source, filename=mod_path).tokenize()
