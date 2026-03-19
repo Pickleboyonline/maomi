@@ -13,7 +13,7 @@ from ..lexer import Lexer
 from ..parser import Parser
 from ..resolver import resolve
 from ..type_checker import TypeChecker
-from ..errors import MaomiError, LexerError, ParseError
+from ..errors import MaomiError, MaomiTypeError, LexerError, ParseError
 from ..ast_nodes import Program, FnDef
 from ..types import MaomiType
 
@@ -62,17 +62,28 @@ def validate(source: str, filename: str) -> tuple[list[types.Diagnostic], Analys
         diagnostics.append(_error_to_diagnostic(e))
         return diagnostics, _EMPTY_RESULT
 
+    if not program.functions and not program.struct_defs and not program.type_aliases:
+        return diagnostics, AnalysisResult(program, {}, {}, {})
+
     try:
         program = resolve(program, filename)
     except MaomiError as e:
         logger.debug("Resolve error in %s: %s", filename, e.message)
         diagnostics.append(_error_to_diagnostic(e))
         return diagnostics, _EMPTY_RESULT
+    except Exception:
+        logger.debug("Unexpected resolver error in %s", filename, exc_info=True)
+        return diagnostics, _EMPTY_RESULT
 
     checker = TypeChecker(filename=filename)
-    type_errors = checker.check(program)
-    for e in type_errors:
+    try:
+        type_errors = checker.check(program)
+        for e in type_errors:
+            diagnostics.append(_error_to_diagnostic(e))
+    except MaomiTypeError as e:
         diagnostics.append(_error_to_diagnostic(e))
+    except Exception:
+        logger.debug("Unexpected type-checker error in %s", filename, exc_info=True)
 
     logger.info("Validated %s: %d diagnostics, %d types, %d functions",
                 filename, len(diagnostics), len(checker.type_map), len(checker.fn_table))
@@ -85,13 +96,16 @@ def validate(source: str, filename: str) -> tuple[list[types.Diagnostic], Analys
 def _error_to_diagnostic(e: MaomiError) -> types.Diagnostic:
     line = max(0, e.line - 1)
     col = max(0, e.col - 1)
+    severity = types.DiagnosticSeverity.Error
+    if getattr(e, "severity", None) == "warning":
+        severity = types.DiagnosticSeverity.Warning
     return types.Diagnostic(
         range=types.Range(
             start=types.Position(line=line, character=col),
             end=types.Position(line=line, character=col + 1),
         ),
         message=e.message,
-        severity=types.DiagnosticSeverity.Error,
+        severity=severity,
         source="maomi",
     )
 
