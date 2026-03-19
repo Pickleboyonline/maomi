@@ -94,7 +94,7 @@ def validate(source: str, filename: str) -> tuple[list[types.Diagnostic], Analys
 def _error_to_diagnostic(e: MaomiError) -> types.Diagnostic:
     line = max(0, e.line - 1)
     col = max(0, e.col - 1)
-    col_end = max(col + 1, e.col_end - 1) if hasattr(e, 'col_end') else col + 1
+    col_end = max(col + 1, e.col_end - 1)
     severity = types.DiagnosticSeverity.Error
     if getattr(e, "severity", None) == "warning":
         severity = types.DiagnosticSeverity.Warning
