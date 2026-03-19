@@ -34,6 +34,33 @@ def _build_folding_ranges(result: AnalysisResult) -> list[types.FoldingRange]:
     for fn in _local_functions(result.program):
         _fold_collect_ranges_fn(fn, ranges)
 
+    # Doc comment folding: consecutive /// lines -> FoldingRangeKind.Comment
+    source_lines = result.source.splitlines() if result.source else []
+    i = 0
+    while i < len(source_lines):
+        if source_lines[i].lstrip().startswith("///"):
+            start = i
+            while i < len(source_lines) and source_lines[i].lstrip().startswith("///"):
+                i += 1
+            if i - start >= 2:
+                ranges.append(types.FoldingRange(
+                    start_line=start, end_line=i - 1,
+                    kind=types.FoldingRangeKind.Comment,
+                ))
+        else:
+            i += 1
+
+    # Import block folding: consecutive imports -> FoldingRangeKind.Imports
+    if len(result.program.imports) >= 2:
+        imports = result.program.imports
+        start_line = imports[0].span.line_start - 1  # 0-indexed
+        end_line = imports[-1].span.line_end - 1  # 0-indexed
+        if end_line > start_line:
+            ranges.append(types.FoldingRange(
+                start_line=start_line, end_line=end_line,
+                kind=types.FoldingRangeKind.Imports,
+            ))
+
     return ranges
 
 
