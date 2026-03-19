@@ -123,6 +123,66 @@ COMPARISON_OPS = {"==", "!=", "<", ">", "<=", ">="}
 ARITHMETIC_OPS = {"+", "-", "*", "/", "**", "@"}
 
 
+def _edit_distance(a: str, b: str) -> int:
+    """Levenshtein edit distance."""
+    if len(a) < len(b):
+        return _edit_distance(b, a)
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a):
+        curr = [i + 1]
+        for j, cb in enumerate(b):
+            curr.append(min(prev[j + 1] + 1, curr[j] + 1, prev[j] + (0 if ca == cb else 1)))
+        prev = curr
+    return prev[-1]
+
+
+def _find_similar(name: str, candidates: list[str], max_results: int = 3) -> list[str]:
+    """Find similar names using edit distance."""
+    max_dist = max(len(name) // 3, 2) if len(name) >= 4 else 1
+    results = []
+    for c in candidates:
+        if c == name or c.startswith("_"):
+            continue
+        dist = _edit_distance(name, c)
+        if dist <= max_dist:
+            results.append((dist, c))
+    # Case-insensitive fallback
+    if not results:
+        name_lower = name.lower()
+        for c in candidates:
+            if c.lower() == name_lower and c != name:
+                results.append((0, c))
+    results.sort()
+    return [c for _, c in results[:max_results]]
+
+
+def _collect_env_names(env: TypeEnv) -> list[str]:
+    """Collect all variable names from a TypeEnv scope chain."""
+    names: list[str] = []
+    current = env
+    while current is not None:
+        names.extend(current.bindings.keys())
+        current = current.parent
+    return names
+
+
+def _available_fields_hint(fields: list[tuple[str, object]]) -> str | None:
+    """Build an 'Available fields: ...' hint from a struct's field list, or None."""
+    names = [name for name, _ in fields]
+    return f"Available fields: {', '.join(names)}" if names else None
+
+
+def _cast_hint(lt: MaomiType, rt: MaomiType) -> str | None:
+    """Build a 'Use cast(...)' hint when two operand types differ in base type, or None."""
+    lt_base = _base_of(lt) if isinstance(lt, (ScalarType, ArrayType)) else None
+    rt_base = _base_of(rt) if isinstance(rt, (ScalarType, ArrayType)) else None
+    if lt_base and rt_base and lt_base != rt_base:
+        return f"Use cast(expr, {lt_base}) or cast(expr, {rt_base}) to convert types."
+    return None
+
+
 def _try_negative_literal(expr) -> int | None:
     """If expr is UnaryOp('-', IntLiteral(n)), return -n. Otherwise None."""
     if isinstance(expr, UnaryOp) and expr.op == "-" and isinstance(expr.operand, IntLiteral):
@@ -266,6 +326,8 @@ class TypeChecker:
         self.type_map: dict[int, MaomiType] = {}  # id(expr) -> inferred type
         self._generic_fns: dict[str, FnDef] = {}   # name -> FnDef with wildcard types
         self._program: Program | None = None
+        self._fn_spans: dict[str, tuple] = {}       # name -> (line, col, col_end)
+        self._struct_def_spans: dict[str, tuple] = {}  # name -> (line, col, col_end)
 
     def check(self, program: Program) -> list[MaomiTypeError]:
         self._program = program
@@ -283,29 +345,37 @@ class TypeChecker:
                 self.type_aliases[ta.name] = resolved
 
         # Pass 0: register all struct definitions and check for duplicate fields
-        seen_struct_names: set[str] = set()
+        seen_struct_names: dict[str, tuple] = {}  # name -> (line, col, col_end)
         for sd in program.struct_defs:
             if sd.name in seen_struct_names:
+                first = seen_struct_names[sd.name]
                 self._error(
                     f"duplicate struct name '{sd.name}'",
                     sd.span.line_start,
                     sd.span.col_start,
+                    secondary_labels=[("first defined here", self.filename, first[0], first[1], first[2])],
                 )
-            seen_struct_names.add(sd.name)
+            else:
+                seen_struct_names[sd.name] = (sd.span.line_start, sd.span.col_start, sd.span.col_end)
+            self._struct_def_spans[sd.name] = (sd.span.line_start, sd.span.col_start, sd.span.col_end)
             self._check_struct_duplicate_fields(sd)
             self._register_struct(sd)
 
         # Pass 1: register all function signatures, checking for duplicate names
-        seen_fn_names: set[str] = set()
+        seen_fn_names: dict[str, tuple] = {}  # name -> (line, col, col_end)
         for fn in program.functions:
             if fn.name in seen_fn_names:
+                first = seen_fn_names[fn.name]
                 self._error(
                     f"duplicate function name '{fn.name}'",
                     fn.span.line_start,
                     fn.span.col_start,
                     fn.span.col_start + len("fn ") + len(fn.name),
+                    secondary_labels=[("first defined here", self.filename, first[0], first[1], first[2])],
                 )
-            seen_fn_names.add(fn.name)
+            else:
+                seen_fn_names[fn.name] = (fn.span.line_start, fn.span.col_start, fn.span.col_start + len("fn ") + len(fn.name))
+            self._fn_spans[fn.name] = (fn.span.line_start, fn.span.col_start, fn.span.col_start + len("fn ") + len(fn.name))
             sig = self._resolve_signature(fn)
             if sig:
                 if self._is_generic_sig(sig):
@@ -325,6 +395,12 @@ class TypeChecker:
         seen: dict[str, int] = {}  # field_name -> index
         for i, (field_name, field_ta) in enumerate(sd.fields):
             if field_name in seen:
+                # Build secondary label pointing to first definition
+                first_idx = seen[field_name]
+                first_labels = []
+                if hasattr(sd, 'field_name_spans') and first_idx < len(sd.field_name_spans):
+                    fs = sd.field_name_spans[first_idx]
+                    first_labels = [("first defined here", self.filename, fs.line_start, fs.col_start, fs.col_end)]
                 # Use field_name_spans if available, otherwise fall back to field type span
                 if hasattr(sd, 'field_name_spans') and i < len(sd.field_name_spans):
                     span = sd.field_name_spans[i]
@@ -333,12 +409,14 @@ class TypeChecker:
                         span.line_start,
                         span.col_start,
                         span.col_end,
+                        secondary_labels=first_labels or None,
                     )
                 else:
                     self._error(
                         f"duplicate field '{field_name}' in struct '{sd.name}'",
                         field_ta.span.line_start,
                         field_ta.span.col_start,
+                        secondary_labels=first_labels or None,
                     )
             else:
                 seen[field_name] = i
@@ -409,12 +487,25 @@ class TypeChecker:
         while expr.args and expr.args[-1] is None:
             expr.args.pop()
 
-    def _error(self, msg: str, line: int, col: int, col_end: int | None = None):
+    def _error(self, msg: str, line: int, col: int, col_end: int | None = None,
+               hint: str | None = None, secondary_labels: list | None = None):
         key = (line, col, msg)
         if key in self._seen_errors:
             return
         self._seen_errors.add(key)
-        self.errors.append(MaomiTypeError(msg, self.filename, line, col, col_end))
+        err = MaomiTypeError(msg, self.filename, line, col, col_end)
+        if hint is not None:
+            err.hint = hint
+        if secondary_labels:
+            err.secondary_labels = secondary_labels
+        self.errors.append(err)
+
+    def _fn_def_labels(self, name: str) -> list | None:
+        """Build secondary label pointing to a function's definition, or None."""
+        span = self._fn_spans.get(name)
+        if span:
+            return [("function defined here", self.filename, span[0], span[1], span[2])]
+        return None
 
     # -- Signature resolution --
 
@@ -464,11 +555,15 @@ class TypeChecker:
         # Type variable: single uppercase letter (A-Z)
         if len(ta.base) == 1 and ta.base.isupper() and ta.dims is None:
             return TypeVar(ta.base)
+        all_type_names = list(self._BASE_TYPES) + list(self.struct_defs.keys()) + list(self.type_aliases.keys())
+        similar = _find_similar(ta.base, all_type_names)
+        hint = f"Did you mean '{similar[0]}'?" if similar else None
         self._error(
             f"unknown type: '{ta.base}'",
             ta.span.line_start,
             ta.span.col_start,
             ta.span.col_end,
+            hint=hint,
         )
         return None
 
@@ -482,16 +577,19 @@ class TypeChecker:
                 env.define(p.name, t)
 
         # Check for duplicate parameter names
-        seen_params: set[str] = set()
+        seen_params: dict[str, tuple] = {}  # name -> (line, col, col_end)
         for p in fn.params:
             if p.name in seen_params:
+                first_p = seen_params[p.name]
                 self._error(
                     f"duplicate parameter name '{p.name}' in function '{fn.name}'",
                     p.span.line_start,
                     p.span.col_start,
                     p.span.col_end,
+                    secondary_labels=[("first defined here", self.filename, first_p[0], first_p[1], first_p[2])],
                 )
-            seen_params.add(p.name)
+            else:
+                seen_params[p.name] = (p.span.line_start, p.span.col_start, p.span.col_end)
 
         body_type = self._check_block(fn.body, env)
         if body_type is None:
@@ -510,6 +608,9 @@ class TypeChecker:
             return
 
         expected = self._resolve_type_annotation(fn.return_type)
+        ret_span = fn.return_type.span
+        ret_labels = [("return type declared here", self.filename,
+                        ret_span.line_start, ret_span.col_start, ret_span.col_end)]
         if expected and isinstance(expected, WildcardArrayType):
             # Wildcard return type: accept any array/scalar with matching base type.
             # The body determines the concrete return type (used by _check_generic_call).
@@ -519,12 +620,16 @@ class TypeChecker:
                 f"return type mismatch: function '{fn.name}' declares {expected} but body returns {body_type}",
                 fn.body.span.line_end,
                 fn.body.span.col_end,
+                secondary_labels=ret_labels,
+                hint=f"The function declares return type {expected} but the body evaluates to {body_type}.",
             )
         elif expected and not self._types_compatible(body_type, expected):
             self._error(
                 f"return type mismatch: function '{fn.name}' declares {expected} but body returns {body_type}",
                 fn.body.span.line_end,
                 fn.body.span.col_end,
+                secondary_labels=ret_labels,
+                hint=f"The function declares return type {expected} but the body evaluates to {body_type}.",
             )
 
     def _check_block(self, block: Block, env: TypeEnv) -> MaomiType | None:
@@ -618,7 +723,10 @@ class TypeChecker:
             case Identifier(name=name):
                 t = env.lookup(name)
                 if t is None:
-                    self._error(f"undefined variable: '{name}'", expr.span.line_start, expr.span.col_start, expr.span.col_end)
+                    scope_vars = _collect_env_names(env)
+                    similar = _find_similar(name, scope_vars)
+                    hint = f"Did you mean '{similar[0]}'?" if similar else None
+                    self._error(f"undefined variable: '{name}'", expr.span.line_start, expr.span.col_start, expr.span.col_end, hint=hint)
                 return t
             case UnaryOp(op=op, operand=operand):
                 return self._check_unary(op, operand, expr, env)
@@ -809,7 +917,8 @@ class TypeChecker:
                         break
                 if found is None:
                     self._error(f"{context}: struct '{current.name}' has no field '{field_name}'",
-                                span.line_start, span.col_start)
+                                span.line_start, span.col_start,
+                                hint=_available_fields_hint(current.fields))
                     return None
                 current = found
             return current
@@ -976,14 +1085,22 @@ class TypeChecker:
     def _check_struct_literal(self, expr: StructLiteral, env: TypeEnv) -> MaomiType | None:
         stype = self.struct_defs.get(expr.name)
         if stype is None:
-            self._error(f"unknown struct: '{expr.name}'", expr.span.line_start, expr.span.col_start, expr.span.col_end)
+            struct_names = list(self.struct_defs.keys())
+            similar = _find_similar(expr.name, struct_names)
+            hint = f"Did you mean '{similar[0]}'?" if similar else None
+            self._error(f"unknown struct: '{expr.name}'", expr.span.line_start, expr.span.col_start, expr.span.col_end, hint=hint)
             return None
 
         if len(expr.fields) != len(stype.fields):
+            sd_span = self._struct_def_spans.get(expr.name)
+            sd_labels = [("struct defined here", self.filename, sd_span[0], sd_span[1], sd_span[2])] if sd_span else []
+            expected_fields = [fn for fn, _ in stype.fields]
             self._error(
                 f"struct '{expr.name}' has {len(stype.fields)} fields, got {len(expr.fields)}",
                 expr.span.line_start, expr.span.col_start,
                 expr.span.col_end,
+                secondary_labels=sd_labels or None,
+                hint=f"Expected fields: {', '.join(expected_fields)}" if expected_fields else None,
             )
             return None
 
@@ -1029,6 +1146,7 @@ class TypeChecker:
                 f"struct '{obj_type.name}' has no field '{expr.field}'",
                 expr.span.line_start, expr.span.col_start,
                 expr.span.col_end,
+                hint=_available_fields_hint(obj_type.struct_type.fields),
             )
             return None
         if not isinstance(obj_type, StructType):
@@ -1045,6 +1163,7 @@ class TypeChecker:
             f"struct '{obj_type.name}' has no field '{expr.field}'",
             expr.span.line_start, expr.span.col_start,
             expr.span.col_end,
+            hint=_available_fields_hint(obj_type.fields),
         )
         return None
 
@@ -1079,6 +1198,7 @@ class TypeChecker:
                     self._error(
                         f"struct '{current_type.name}' has no field '{field_name}'",
                         value_expr.span.line_start, value_expr.span.col_start,
+                        hint=_available_fields_hint(current_type.fields),
                     )
                     break
             else:
@@ -1314,6 +1434,7 @@ class TypeChecker:
                     expr.span.line_start,
                     expr.span.col_start,
                     expr.span.col_end,
+                    hint=_cast_hint(lt, rt),
                 )
                 return None
             # Comparison result is bool with the broadcast shape
@@ -1342,6 +1463,7 @@ class TypeChecker:
                 expr.span.line_start,
                 expr.span.col_start,
                 expr.span.col_end,
+                hint=_cast_hint(lt, rt),
             )
             return None
 
@@ -1738,11 +1860,16 @@ class TypeChecker:
             # Check for generic (wildcard) function
             if expr.callee in self._generic_fns:
                 return self._check_generic_call(expr, env)
+            fn_names = [n for n in list(self.fn_table.keys()) + list(self._generic_fns.keys())
+                        if not n.startswith("_")]
+            similar = _find_similar(expr.callee, fn_names)
+            hint = f"Did you mean '{similar[0]}'?" if similar else None
             self._error(
                 f"undefined function: '{expr.callee}'",
                 expr.span.line_start,
                 expr.span.col_start,
                 expr.span.col_start + len(expr.callee),
+                hint=hint,
             )
             return None
 
@@ -1755,6 +1882,7 @@ class TypeChecker:
                 expr.span.line_start,
                 expr.span.col_start,
                 expr.span.col_end,
+                secondary_labels=self._fn_def_labels(expr.callee),
             )
             return None
 
@@ -3659,6 +3787,8 @@ class TypeChecker:
                     arg_span.line_start,
                     arg_span.col_start,
                     arg_span.col_end,
+                    secondary_labels=self._fn_def_labels(expr.callee),
+                    hint=f"Use cast(expr, {param_type.base}) to convert.",
                 )
                 return False
             return True
@@ -3751,6 +3881,7 @@ class TypeChecker:
             arg_span.line_start,
             arg_span.col_start,
             arg_span.col_end,
+            secondary_labels=self._fn_def_labels(expr.callee),
         )
         return False
 
