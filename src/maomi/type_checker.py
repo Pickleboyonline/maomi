@@ -262,6 +262,7 @@ class TypeChecker:
         self.struct_defs: dict[str, StructType] = {}
         self.type_aliases: dict[str, MaomiType] = {}
         self.errors: list[MaomiTypeError] = []
+        self._seen_errors: set[tuple[int, int, str]] = set()
         self.type_map: dict[int, MaomiType] = {}  # id(expr) -> inferred type
         self._generic_fns: dict[str, FnDef] = {}   # name -> FnDef with wildcard types
         self._program: Program | None = None
@@ -270,12 +271,27 @@ class TypeChecker:
         self._program = program
         # Pass 0a: register type aliases (before structs, since structs may use aliases)
         for ta in program.type_aliases:
+            if ta.type_annotation.base == ta.name:
+                self._error(
+                    f"self-referential type alias: '{ta.name}'",
+                    ta.type_annotation.span.line_start,
+                    ta.type_annotation.span.col_start,
+                )
+                continue
             resolved = self._resolve_type_annotation(ta.type_annotation)
             if resolved is not None:
                 self.type_aliases[ta.name] = resolved
 
         # Pass 0: register all struct definitions and check for duplicate fields
+        seen_struct_names: set[str] = set()
         for sd in program.struct_defs:
+            if sd.name in seen_struct_names:
+                self._error(
+                    f"duplicate struct name '{sd.name}'",
+                    sd.span.line_start,
+                    sd.span.col_start,
+                )
+            seen_struct_names.add(sd.name)
             self._check_struct_duplicate_fields(sd)
             self._register_struct(sd)
 
@@ -394,6 +410,10 @@ class TypeChecker:
             expr.args.pop()
 
     def _error(self, msg: str, line: int, col: int, col_end: int | None = None):
+        key = (line, col, msg)
+        if key in self._seen_errors:
+            return
+        self._seen_errors.add(key)
         self.errors.append(MaomiTypeError(msg, self.filename, line, col, col_end))
 
     # -- Signature resolution --
