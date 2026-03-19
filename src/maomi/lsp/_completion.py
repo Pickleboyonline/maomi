@@ -9,7 +9,7 @@ from lsprotocol import types
 
 from ..ast_nodes import Block, LetStmt, ExprStmt, ScanExpr, FoldExpr, WhileExpr, MapExpr, IfExpr
 from ..types import MaomiType, ScalarType, ArrayType, StructType, StructArrayType, WildcardArrayType, TypeVar, FLOAT_BASES
-from ._core import server, _cache, AnalysisResult, _local_functions, _uri_to_path
+from ._core import server, _cache, AnalysisResult, _local_functions, completion_validate, _uri_to_path, _FAKE_ID
 from ._ast_utils import _span_contains, _find_node_at
 from ._builtin_data import (
     _KEYWORDS, _TYPE_NAMES, _BUILTINS, _BUILTIN_SET,
@@ -252,7 +252,6 @@ def completions(ls: LanguageServer, params: types.CompletionParams):
     col = min(col, len(line_text))
 
     # Import context: module names or imported item names
-    filepath = _uri_to_path(uri)
     import_result = _complete_import(line_text, col, filepath)
     if import_result is not None:
         return import_result
