@@ -10,7 +10,7 @@ from ..ast_nodes import (
     GradExpr, ValueAndGradExpr, CastExpr,
     Identifier, IntLiteral, FloatLiteral, BoolLiteral, StringLiteral,
     StructLiteral, FieldAccess, StructDef, TypeAlias, TypeAnnotation,
-    ImportDecl,
+    ImportDecl, WithExpr,
 )
 from ._core import server, _cache, _local_functions
 from ._ast_utils import _children_of
@@ -100,8 +100,42 @@ def _sem_collect_import(imp: ImportDecl, tokens: list):
         tokens.append((ns.line_start - 1, ns.col_start - 1, ns.col_end - ns.col_start, _ST_FUNCTION, 0))
 
 
-def _sem_collect_tokens(node, tokens: list, param_names: set[str]):
+def _find_keyword_in_source(
+    source_lines: list[str] | None, keyword: str,
+    line_start: int, col_start: int, line_end: int, col_end: int,
+) -> tuple[int, int] | None:
+    """Search source text for a keyword within a span region (1-indexed).
+
+    Returns (line_1indexed, col_1indexed) or None if not found.
+    """
+    if source_lines is None:
+        return None
+    for line_num in range(line_start, line_end + 1):
+        line_idx = line_num - 1
+        if line_idx < 0 or line_idx >= len(source_lines):
+            continue
+        line_text = source_lines[line_idx]
+        search_start = (col_start - 1) if line_num == line_start else 0
+        search_end = (col_end - 1) if line_num == line_end else len(line_text)
+        idx = line_text.find(keyword, search_start, search_end)
+        if idx >= 0:
+            # Make sure it's a whole word (not part of a longer identifier)
+            # Check character before
+            if idx > 0 and (line_text[idx - 1].isalnum() or line_text[idx - 1] == '_'):
+                continue
+            # Check character after
+            end_idx = idx + len(keyword)
+            if end_idx < len(line_text) and (line_text[end_idx].isalnum() or line_text[end_idx] == '_'):
+                continue
+            return (line_num, idx + 1)
+    return None
+
+
+def _sem_collect_tokens(node, tokens: list, param_names: set[str],
+                        source_lines: list[str] | None = None):
     """Recursively collect semantic tokens from AST nodes."""
+    _recurse = lambda n: _sem_collect_tokens(n, tokens, param_names, source_lines)
+
     if isinstance(node, FnDef):
         # "fn" keyword
         tokens.append((
@@ -123,8 +157,8 @@ def _sem_collect_tokens(node, tokens: list, param_names: set[str]):
         _sem_add_type_annotation(node.return_type, tokens)
         fn_param_names = {p.name for p in node.params}
         for p in node.params:
-            _sem_collect_tokens(p, tokens, fn_param_names)
-        _sem_collect_tokens(node.body, tokens, fn_param_names)
+            _sem_collect_tokens(p, tokens, fn_param_names, source_lines)
+        _sem_collect_tokens(node.body, tokens, fn_param_names, source_lines)
         return
 
     if isinstance(node, Param):
@@ -209,10 +243,21 @@ def _sem_collect_tokens(node, tokens: list, param_names: set[str]):
         return
 
     if isinstance(node, BinOp):
-        _sem_collect_tokens(node.left, tokens, param_names)
-        _sem_collect_tokens(node.right, tokens, param_names)
-        # Emit operator token if both operands are on the same line
-        if node.left.span.line_end == node.right.span.line_start:
+        _recurse(node.left)
+        _recurse(node.right)
+        # Emit operator token — search source text for exact position
+        if source_lines is not None and node.left.span.line_end == node.right.span.line_start:
+            line_idx = node.left.span.line_end - 1  # 0-indexed
+            if 0 <= line_idx < len(source_lines):
+                line_text = source_lines[line_idx]
+                search_start = node.left.span.col_end - 1  # 0-indexed
+                search_end = node.right.span.col_start - 1  # 0-indexed
+                op_str = node.op
+                op_idx = line_text.find(op_str, search_start, search_end)
+                if op_idx >= 0:
+                    tokens.append((line_idx, op_idx, len(op_str), _ST_OPERATOR, 0))
+        elif source_lines is None and node.left.span.line_end == node.right.span.line_start:
+            # Fallback heuristic when no source lines available
             op_len = len(node.op)
             op_col = node.right.span.col_start - op_len - 1
             if op_col >= node.left.span.col_end:
@@ -234,7 +279,7 @@ def _sem_collect_tokens(node, tokens: list, param_names: set[str]):
             tt,
             0,
         ))
-        _sem_collect_tokens(node.operand, tokens, param_names)
+        _recurse(node.operand)
         return
 
     if isinstance(node, CallExpr):
@@ -247,7 +292,7 @@ def _sem_collect_tokens(node, tokens: list, param_names: set[str]):
             0,
         ))
         for arg in node.args:
-            _sem_collect_tokens(arg, tokens, param_names)
+            _recurse(arg)
         return
 
     if isinstance(node, StructLiteral):
@@ -258,12 +303,30 @@ def _sem_collect_tokens(node, tokens: list, param_names: set[str]):
             _ST_STRUCT,
             0,
         ))
-        for _, expr in node.fields:
-            _sem_collect_tokens(expr, tokens, param_names)
+        # G14: Emit property tokens for field names in struct literal
+        if source_lines is not None:
+            # Search source text for each field name position
+            search_line_start = node.span.line_start
+            search_col_start = node.span.col_start + len(node.name)
+            for field_name, expr in node.fields:
+                pos = _find_keyword_in_source(
+                    source_lines, field_name,
+                    search_line_start, search_col_start,
+                    expr.span.line_start, expr.span.col_start,
+                )
+                if pos is not None:
+                    tokens.append((pos[0] - 1, pos[1] - 1, len(field_name), _ST_PROPERTY, 0))
+                    # Advance search start past this field's value for the next field
+                    search_line_start = expr.span.line_end
+                    search_col_start = expr.span.col_end
+                _recurse(expr)
+        else:
+            for _, expr in node.fields:
+                _recurse(expr)
         return
 
     if isinstance(node, FieldAccess):
-        _sem_collect_tokens(node.object, tokens, param_names)
+        _recurse(node.object)
         tokens.append((
             node.span.line_end - 1,
             node.span.col_end - len(node.field) - 1,
@@ -271,6 +334,20 @@ def _sem_collect_tokens(node, tokens: list, param_names: set[str]):
             _ST_PROPERTY,
             0,
         ))
+        return
+
+    if isinstance(node, WithExpr):
+        _recurse(node.base)
+        # Search for "with" keyword between base expr and first update
+        pos = _find_keyword_in_source(
+            source_lines, "with",
+            node.base.span.line_end, node.base.span.col_end,
+            node.span.line_end, node.span.col_end,
+        )
+        if pos is not None:
+            tokens.append((pos[0] - 1, pos[1] - 1, 4, _ST_KEYWORD, 0))
+        for _, expr in node.updates:
+            _recurse(expr)
         return
 
     if isinstance(node, (IntLiteral, FloatLiteral)):
@@ -318,7 +395,7 @@ def _sem_collect_tokens(node, tokens: list, param_names: set[str]):
             _ST_VARIABLE,
             _MOD_DECLARATION | _MOD_READONLY,
         ))
-        _sem_collect_tokens(node.value, tokens, param_names)
+        _recurse(node.value)
         return
 
     if isinstance(node, IfExpr):
@@ -329,9 +406,17 @@ def _sem_collect_tokens(node, tokens: list, param_names: set[str]):
             _ST_KEYWORD,
             _MOD_CONTROL_FLOW,
         ))
-        _sem_collect_tokens(node.condition, tokens, param_names)
-        _sem_collect_tokens(node.then_block, tokens, param_names)
-        _sem_collect_tokens(node.else_block, tokens, param_names)
+        _recurse(node.condition)
+        _recurse(node.then_block)
+        # G13: "else" keyword between then_block and else_block
+        pos = _find_keyword_in_source(
+            source_lines, "else",
+            node.then_block.span.line_end, node.then_block.span.col_end,
+            node.else_block.span.line_start, node.else_block.span.col_start,
+        )
+        if pos is not None:
+            tokens.append((pos[0] - 1, pos[1] - 1, 4, _ST_KEYWORD, _MOD_CONTROL_FLOW))
+        _recurse(node.else_block)
         return
 
     if isinstance(node, (ScanExpr, FoldExpr)):
@@ -343,10 +428,19 @@ def _sem_collect_tokens(node, tokens: list, param_names: set[str]):
             _ST_KEYWORD,
             _MOD_CONTROL_FLOW,
         ))
-        _sem_collect_tokens(node.init, tokens, param_names)
+        # G13: "in" keyword between variables and init expression
+        # The "in" is between the closing ) of vars and the ( of init/sequences
+        pos = _find_keyword_in_source(
+            source_lines, "in",
+            node.span.line_start, node.span.col_start + len(kw),
+            node.init.span.line_start, node.init.span.col_start,
+        )
+        if pos is not None:
+            tokens.append((pos[0] - 1, pos[1] - 1, 2, _ST_KEYWORD, _MOD_CONTROL_FLOW))
+        _recurse(node.init)
         for seq in node.sequences:
-            _sem_collect_tokens(seq, tokens, param_names)
-        _sem_collect_tokens(node.body, tokens, param_names)
+            _recurse(seq)
+        _recurse(node.body)
         return
 
     if isinstance(node, WhileExpr):
@@ -357,9 +451,26 @@ def _sem_collect_tokens(node, tokens: list, param_names: set[str]):
             _ST_KEYWORD,
             _MOD_CONTROL_FLOW,
         ))
-        _sem_collect_tokens(node.init, tokens, param_names)
-        _sem_collect_tokens(node.cond, tokens, param_names)
-        _sem_collect_tokens(node.body, tokens, param_names)
+        _recurse(node.init)
+        # G13: "limit" keyword if max_iters is present
+        if node.max_iters is not None:
+            pos = _find_keyword_in_source(
+                source_lines, "limit",
+                node.span.line_start, node.span.col_start,
+                node.cond.span.line_start, node.cond.span.col_start,
+            )
+            if pos is not None:
+                tokens.append((pos[0] - 1, pos[1] - 1, 5, _ST_KEYWORD, _MOD_CONTROL_FLOW))
+        # G13: "do" keyword between cond and body
+        pos = _find_keyword_in_source(
+            source_lines, "do",
+            node.cond.span.line_end, node.cond.span.col_end,
+            node.body.span.line_start, node.body.span.col_start,
+        )
+        if pos is not None:
+            tokens.append((pos[0] - 1, pos[1] - 1, 2, _ST_KEYWORD, _MOD_CONTROL_FLOW))
+        _recurse(node.cond)
+        _recurse(node.body)
         return
 
     if isinstance(node, MapExpr):
@@ -370,8 +481,16 @@ def _sem_collect_tokens(node, tokens: list, param_names: set[str]):
             _ST_KEYWORD,
             _MOD_CONTROL_FLOW,
         ))
-        _sem_collect_tokens(node.sequence, tokens, param_names)
-        _sem_collect_tokens(node.body, tokens, param_names)
+        # G13: "in" keyword between elem_var and sequence
+        pos = _find_keyword_in_source(
+            source_lines, "in",
+            node.span.line_start, node.span.col_start + 3,
+            node.sequence.span.line_start, node.sequence.span.col_start,
+        )
+        if pos is not None:
+            tokens.append((pos[0] - 1, pos[1] - 1, 2, _ST_KEYWORD, _MOD_CONTROL_FLOW))
+        _recurse(node.sequence)
+        _recurse(node.body)
         return
 
     if isinstance(node, (GradExpr, ValueAndGradExpr)):
@@ -383,7 +502,7 @@ def _sem_collect_tokens(node, tokens: list, param_names: set[str]):
             _ST_KEYWORD,
             0,
         ))
-        _sem_collect_tokens(node.expr, tokens, param_names)
+        _recurse(node.expr)
         return
 
     if isinstance(node, CastExpr):
@@ -394,11 +513,11 @@ def _sem_collect_tokens(node, tokens: list, param_names: set[str]):
             _ST_KEYWORD,
             0,
         ))
-        _sem_collect_tokens(node.expr, tokens, param_names)
+        _recurse(node.expr)
         return
 
     for child in _children_of(node):
-        _sem_collect_tokens(child, tokens, param_names)
+        _sem_collect_tokens(child, tokens, param_names, source_lines)
 
 
 def _sem_add_type_annotation(ta: TypeAnnotation, tokens: list):
@@ -443,7 +562,8 @@ def semantic_tokens_full(ls: LanguageServer, params: types.SemanticTokensParams)
     # Comments (doc and regular) are consumed by the parser and don't appear
     # in the AST. Scan the source directly to emit comment tokens.
     doc = ls.workspace.get_text_document(uri)
-    for i, line in enumerate(doc.source.splitlines()):
+    source_lines = doc.source.splitlines()
+    for i, line in enumerate(source_lines):
         stripped = line.lstrip()
         if stripped.startswith("//"):
             col = len(line) - len(stripped)
@@ -453,13 +573,13 @@ def semantic_tokens_full(ls: LanguageServer, params: types.SemanticTokensParams)
         _sem_collect_import(imp, tokens)
 
     for ta in result.program.type_aliases:
-        _sem_collect_tokens(ta, tokens, set())
+        _sem_collect_tokens(ta, tokens, set(), source_lines)
 
     for sd in result.program.struct_defs:
-        _sem_collect_tokens(sd, tokens, set())
+        _sem_collect_tokens(sd, tokens, set(), source_lines)
 
     for fn in _local_functions(result.program):
-        _sem_collect_tokens(fn, tokens, set())
+        _sem_collect_tokens(fn, tokens, set(), source_lines)
 
     data = _sem_delta_encode(tokens)
     return types.SemanticTokens(data=data)
