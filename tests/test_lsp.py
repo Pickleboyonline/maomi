@@ -586,7 +586,8 @@ class TestGoToDefinition:
         found = _goto_find_definition(field_node, fn, result)
         assert found is not None
         defn_span, _ = found
-        assert defn_span == struct_def.span
+        # Should jump to the specific field span, not the entire struct
+        assert defn_span == struct_def.field_name_spans[0]
 
     def test_returns_none_for_builtin(self):
         source = "fn f(x: f32) -> f32 { exp(x) }"

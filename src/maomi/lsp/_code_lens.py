@@ -3,7 +3,7 @@ from __future__ import annotations
 from pygls.lsp.server import LanguageServer
 from lsprotocol import types
 
-from ..types import ArrayType, WildcardArrayType
+from ..types import ArrayType, WildcardArrayType, StructType, StructArrayType
 from ._core import server, _cache, AnalysisResult, _local_functions
 from ._ast_utils import _span_to_range
 from ._references import _refs_collect_all
@@ -27,6 +27,7 @@ def _build_code_lenses(result: AnalysisResult, uri: str) -> list[types.CodeLens]
         if sig is not None:
             all_concrete = all(
                 not isinstance(pt, WildcardArrayType)
+                and not isinstance(pt, (StructType, StructArrayType))
                 and not (isinstance(pt, ArrayType) and any(isinstance(d, str) for d in pt.dims))
                 for pt in sig.param_types
             )

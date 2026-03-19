@@ -137,7 +137,12 @@ def _goto_find_definition(node, fn, result):
         if isinstance(typ, StructType):
             for sdef in program.struct_defs:
                 if sdef.name == typ.name:
-                    return sdef.span, None
+                    # Try to jump to the specific field span
+                    if sdef.field_name_spans:
+                        for i, (fname, _) in enumerate(sdef.fields):
+                            if fname == node.field and i < len(sdef.field_name_spans):
+                                return sdef.field_name_spans[i], getattr(sdef, 'source_file', None)
+                    return sdef.span, getattr(sdef, 'source_file', None)
         return None
 
     if isinstance(node, Param):
