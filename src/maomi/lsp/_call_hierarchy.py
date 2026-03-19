@@ -5,7 +5,7 @@ from lsprotocol import types
 
 from ..ast_nodes import FnDef, CallExpr, Identifier
 from ._core import server, _cache, AnalysisResult, _local_functions
-from ._ast_utils import _find_node_at, _span_to_range, _children_of
+from ._ast_utils import _find_node_at, _span_to_range, _children_of, _name_range
 
 
 def _collect_calls_to(node, target_name: str, spans: list):
@@ -24,15 +24,28 @@ def _collect_all_calls(node, calls_dict: dict):
         _collect_all_calls(child, calls_dict)
 
 
-def _make_hierarchy_item(fn: FnDef, uri: str) -> types.CallHierarchyItem:
+def _make_hierarchy_item(fn: FnDef, uri: str, source_lines: list[str] | None = None) -> types.CallHierarchyItem:
     """Build a CallHierarchyItem for a FnDef."""
+    selection = _name_range(fn.name, fn.span, source_lines) if source_lines else _span_to_range(fn.span)
     return types.CallHierarchyItem(
         name=fn.name,
         kind=types.SymbolKind.Function,
         uri=uri,
         range=_span_to_range(fn.span),
-        selection_range=_span_to_range(fn.span),
+        selection_range=selection,
     )
+
+
+def _is_called_as_function(node, enclosing_fn):
+    """Check if an Identifier is used as a function callee in the enclosing function."""
+    def _walk(n):
+        if isinstance(n, CallExpr) and n.callee == node.name:
+            return True
+        for child in _children_of(n):
+            if _walk(child):
+                return True
+        return False
+    return _walk(enclosing_fn.body)
 
 
 def _call_hierarchy_prepare(
@@ -46,6 +59,7 @@ def _call_hierarchy_prepare(
     col = col_0 + 1
     local_fns = _local_functions(result.program)
     fn_names = {fn.name for fn in local_fns}
+    source_lines = result.source.splitlines() if result.source else []
 
     # Find the node at cursor
     target_name = None
@@ -57,7 +71,9 @@ def _call_hierarchy_prepare(
             elif isinstance(node, CallExpr):
                 target_name = node.callee
             elif isinstance(node, Identifier) and node.name in fn_names:
-                target_name = node.name
+                # E4: Only treat as function ref if it's actually called
+                if _is_called_as_function(node, fn):
+                    target_name = node.name
             break
 
     if target_name is None:
@@ -66,7 +82,7 @@ def _call_hierarchy_prepare(
     # Find the FnDef for that name
     for fn in local_fns:
         if fn.name == target_name:
-            return [_make_hierarchy_item(fn, uri)]
+            return [_make_hierarchy_item(fn, uri, source_lines)]
 
     return None
 
@@ -78,13 +94,14 @@ def _call_hierarchy_incoming(
     if not result or not result.program:
         return []
 
+    source_lines = result.source.splitlines() if result.source else []
     incoming: list[types.CallHierarchyIncomingCall] = []
     for fn in _local_functions(result.program):
         spans: list = []
         _collect_calls_to(fn.body, fn_name, spans)
         if spans:
             incoming.append(types.CallHierarchyIncomingCall(
-                from_=_make_hierarchy_item(fn, uri),
+                from_=_make_hierarchy_item(fn, uri, source_lines),
                 from_ranges=[_span_to_range(s) for s in spans],
             ))
 
@@ -98,6 +115,7 @@ def _call_hierarchy_outgoing(
     if not result or not result.program:
         return []
 
+    source_lines = result.source.splitlines() if result.source else []
     local_fns = _local_functions(result.program)
     fn_by_name = {fn.name: fn for fn in local_fns}
 
@@ -115,7 +133,7 @@ def _call_hierarchy_outgoing(
         if callee_fn is None:
             continue
         outgoing.append(types.CallHierarchyOutgoingCall(
-            to=_make_hierarchy_item(callee_fn, uri),
+            to=_make_hierarchy_item(callee_fn, uri, source_lines),
             from_ranges=[_span_to_range(s) for s in spans],
         ))
 
