@@ -10,15 +10,33 @@ from ._core import server, _cache
 logger = logging.getLogger("maomi-lsp")
 
 
+def _effective_braces(line: str) -> str:
+    """Return line with comment removed and string contents neutralized for brace counting."""
+    result = []
+    in_string = False
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if ch == '"' and (i == 0 or line[i - 1] != '\\'):
+            in_string = not in_string
+            result.append(ch)
+        elif not in_string and ch == '/' and i + 1 < len(line) and line[i + 1] == '/':
+            break  # rest is comment
+        elif in_string:
+            # Replace braces in strings with neutral chars
+            result.append('_' if ch in '{}' else ch)
+        else:
+            result.append(ch)
+        i += 1
+    return ''.join(result)
+
+
 def _compute_brace_depth(lines: list[str], target_line: int) -> int:
     """Count net { minus } through all lines before *target_line*."""
     depth = 0
     for i in range(target_line):
-        for ch in lines[i]:
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
+        effective = _effective_braces(lines[i])
+        depth += effective.count("{") - effective.count("}")
     return max(0, depth)
 
 
@@ -147,6 +165,7 @@ def _format_line_content(stripped: str) -> str:
 
 def _format_document(source: str) -> list[types.TextEdit]:
     """Format a .mao source string, returning a list of TextEdits."""
+    # Line endings are normalized to \n by splitlines + join.
     lines = source.splitlines()
     formatted_lines: list[str] = []
     depth = 0
@@ -169,8 +188,9 @@ def _format_document(source: str) -> list[types.TextEdit]:
         content = _format_line_content(stripped)
         formatted_lines.append("    " * line_depth + content)
 
-        # Update depth for next line
-        depth += stripped.count("{") - stripped.count("}")
+        # Update depth for next line — ignore braces inside comments and strings
+        effective = _effective_braces(stripped)
+        depth += effective.count("{") - effective.count("}")
         depth = max(0, depth)
 
     result = "\n".join(formatted_lines)
