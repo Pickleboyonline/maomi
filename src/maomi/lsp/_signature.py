@@ -7,6 +7,72 @@ from ._core import server, _cache
 from ._builtin_data import _BUILTIN_SIGNATURES, _BUILTIN_DOCS
 
 
+def _is_inside_string(line_text: str, col: int) -> int | None:
+    """Check if ``col`` is inside a string literal in *line_text*.
+
+    Returns the index of the opening quote if inside a string, else ``None``.
+    """
+    in_string = False
+    string_start = -1
+    i = 0
+    while i < len(line_text):
+        ch = line_text[i]
+        if ch == '"' and (i == 0 or line_text[i - 1] != '\\'):
+            if not in_string:
+                in_string = True
+                string_start = i
+            else:
+                if col > string_start and col <= i:
+                    return string_start
+                in_string = False
+                string_start = -1
+        if i == col and in_string:
+            return string_start
+        i += 1
+    # col is past end of processed chars but still inside an unclosed string
+    if in_string and col > string_start:
+        return string_start
+    return None
+
+
+def _extract_func_name(line_text: str, paren_pos: int) -> str | None:
+    """Extract the function name immediately before an opening paren.
+
+    Skips whitespace between the name and ``(``, then reads an identifier
+    (including dots for qualified names).  Returns ``None`` if no name found.
+    """
+    j = paren_pos - 1
+    while j >= 0 and line_text[j] == ' ':
+        j -= 1
+    end = j + 1
+    while j >= 0 and (line_text[j].isalnum() or line_text[j] in ('_', '.')):
+        j -= 1
+    name = line_text[j + 1:end]
+    return name or None
+
+
+def _detect_named_arg(line_text: str, arg_start: int, col: int) -> str | None:
+    """Detect if the cursor is inside a named argument (``name=value``).
+
+    Checks both the ``value`` position (``=`` appears before *col* in the arg
+    text) and the ``name``/``=`` position (cursor is on or before the ``=``).
+    """
+    current_arg = line_text[arg_start:col].strip()
+    if '=' in current_arg:
+        return current_arg.split('=')[0].strip() or None
+
+    # Cursor may be on the name or '=' itself — look forward from arg_start
+    rest = line_text[arg_start:]
+    eq_pos = rest.find('=')
+    if eq_pos >= 0:
+        abs_eq = arg_start + eq_pos
+        if col <= abs_eq + 1:
+            candidate = rest[:eq_pos].strip()
+            if candidate.isidentifier():
+                return candidate
+    return None
+
+
 def _sig_parse_call_context(
     source: str, position: types.Position,
 ) -> tuple[str | None, int, str | None]:
@@ -26,18 +92,25 @@ def _sig_parse_call_context(
     line = position.line
     col = position.character
     line_text = lines[line]
-    i = min(col - 1, len(line_text) - 1)
+
+    # B14: If cursor is inside a string literal, adjust scan start to before
+    # the opening quote so the backward scanner doesn't get confused.
+    string_open = _is_inside_string(line_text, col)
+    if string_open is not None:
+        i = string_open - 1
+    else:
+        i = min(col - 1, len(line_text) - 1)
 
     # Track the start of the current argument (for named-arg detection)
     arg_start: int | None = None
     cursor_line = line
+    named_param: str | None = None
 
     while line >= 0:
         while i >= 0:
             ch = line_text[i]
             # Skip characters inside string literals
             if ch == '"' and (i == 0 or line_text[i - 1] != '\\'):
-                # Scan backward to find the matching quote
                 i -= 1
                 while i >= 0:
                     if line_text[i] == '"' and (i == 0 or line_text[i - 1] != '\\'):
@@ -52,26 +125,21 @@ def _sig_parse_call_context(
                     # Found the opening paren — extract function name
                     if arg_start is None and line == cursor_line:
                         arg_start = i + 1
-                    j = i - 1
-                    while j >= 0 and line_text[j] == ' ':
-                        j -= 1
-                    end = j + 1
-                    while j >= 0 and (line_text[j].isalnum() or line_text[j] in ('_', '.')):
-                        j -= 1
-                    name = line_text[j + 1:end]
+                    name = _extract_func_name(line_text, i)
                     if name:
-                        # Check for named argument on the cursor line
-                        named_param: str | None = None
                         if arg_start is not None and line == cursor_line:
-                            current_arg = lines[cursor_line][arg_start:col].strip()
-                            if '=' in current_arg:
-                                named_param = current_arg.split('=')[0].strip()
+                            named_param = _detect_named_arg(
+                                lines[cursor_line], arg_start, col,
+                            )
                         return name, comma_count, named_param
                     return None, 0, None
                 depth -= 1
             elif ch == ',' and depth == 0:
                 if comma_count == 0 and line == cursor_line:
                     arg_start = i + 1
+                    named_param = _detect_named_arg(
+                        lines[cursor_line], arg_start, col,
+                    )
                 comma_count += 1
             i -= 1
 
@@ -79,6 +147,13 @@ def _sig_parse_call_context(
         if line >= 0:
             line_text = lines[line]
             i = len(line_text) - 1
+
+    # E2: If backward scan didn't find a function, check if cursor is at '('
+    line_text = lines[position.line]
+    if col < len(line_text) and line_text[col] == '(':
+        name = _extract_func_name(line_text, col)
+        if name:
+            return name, 0, None
 
     return None, 0, None
 
