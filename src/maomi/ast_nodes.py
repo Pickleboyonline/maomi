@@ -48,6 +48,7 @@ class StructDef:
     span: Span
     doc: str | None = field(default=None, compare=False)
     canonical_name: str | None = field(default=None, compare=False)
+    field_name_spans: list[Span] = field(default_factory=list, compare=False)
 
 
 # ---------- Function ----------

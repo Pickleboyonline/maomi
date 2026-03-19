@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from pygls.lsp.server import LanguageServer
 from lsprotocol import types
 
@@ -56,6 +58,11 @@ def selection_ranges(ls: LanguageServer, params: types.SelectionRangeParams):
             for sd in result.program.struct_defs:
                 if hasattr(sd, "span") and _span_contains(sd.span, line, col):
                     ancestors.append(sd)
+                    # Check if cursor falls within any field_name_span
+                    for fspan in sd.field_name_spans:
+                        if _span_contains(fspan, line, col):
+                            ancestors.append(SimpleNamespace(span=fspan))
+                            break
                     break
 
         chain = _sel_build_chain(ancestors)

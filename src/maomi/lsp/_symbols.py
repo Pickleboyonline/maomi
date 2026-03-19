@@ -4,44 +4,53 @@ from pygls.lsp.server import LanguageServer
 from lsprotocol import types
 
 from ._core import server, _cache, AnalysisResult, _local_functions
-from ._ast_utils import _span_to_range
+from ._ast_utils import _span_to_range, _name_range
 
 
 def _build_document_symbols(result: AnalysisResult) -> list[types.DocumentSymbol] | None:
     if not result or not result.program:
         return None
 
+    source_lines = result.source.splitlines() if result.source else []
+
     symbols: list[types.DocumentSymbol] = []
 
     for ta in result.program.type_aliases:
         r = _span_to_range(ta.span)
+        sel = _name_range(ta.name, ta.span, source_lines)
         symbols.append(types.DocumentSymbol(
             name=ta.name,
             kind=types.SymbolKind.TypeParameter,
             range=r,
-            selection_range=r,
+            selection_range=sel,
         ))
 
     for sd in result.program.struct_defs:
         r = _span_to_range(sd.span)
+        sel = _name_range(sd.name, sd.span, source_lines)
         children = []
-        for field_name, field_type_ann in sd.fields:
+        for i, (field_name, field_type_ann) in enumerate(sd.fields):
+            if i < len(sd.field_name_spans):
+                field_range = _span_to_range(sd.field_name_spans[i])
+            else:
+                field_range = r  # fallback to struct range
             children.append(types.DocumentSymbol(
                 name=field_name,
                 kind=types.SymbolKind.Property,
-                range=r,
-                selection_range=r,
+                range=field_range,
+                selection_range=field_range,
             ))
         symbols.append(types.DocumentSymbol(
             name=sd.name,
             kind=types.SymbolKind.Struct,
             range=r,
-            selection_range=r,
+            selection_range=sel,
             children=children,
         ))
 
     for fn in _local_functions(result.program):
         r = _span_to_range(fn.span)
+        sel = _name_range(fn.name, fn.span, source_lines)
         children = []
         for param in fn.params:
             pr = _span_to_range(param.span)
@@ -55,7 +64,7 @@ def _build_document_symbols(result: AnalysisResult) -> list[types.DocumentSymbol
             name=fn.name,
             kind=types.SymbolKind.Function,
             range=r,
-            selection_range=r,
+            selection_range=sel,
             children=children,
         ))
 

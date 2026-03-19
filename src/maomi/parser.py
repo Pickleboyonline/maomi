@@ -172,20 +172,23 @@ class Parser:
         name = self._expect(TokenType.IDENT).value
         self._expect(TokenType.LBRACE)
         fields: list[tuple[str, TypeAnnotation]] = []
+        field_name_spans: list[Span] = []
         if not self._check(TokenType.RBRACE):
-            field_name = self._expect(TokenType.IDENT).value
+            ftok = self._expect(TokenType.IDENT)
+            field_name_spans.append(Span(ftok.line, ftok.col, ftok.line, ftok.col + len(ftok.value)))
             self._expect(TokenType.COLON)
             field_type = self._parse_type()
-            fields.append((field_name, field_type))
+            fields.append((ftok.value, field_type))
             while self._match(TokenType.COMMA):
                 if self._check(TokenType.RBRACE):
                     break  # trailing comma
-                field_name = self._expect(TokenType.IDENT).value
+                ftok = self._expect(TokenType.IDENT)
+                field_name_spans.append(Span(ftok.line, ftok.col, ftok.line, ftok.col + len(ftok.value)))
                 self._expect(TokenType.COLON)
                 field_type = self._parse_type()
-                fields.append((field_name, field_type))
+                fields.append((ftok.value, field_type))
         self._expect(TokenType.RBRACE)
-        return StructDef(name, fields, self._span_from(start), doc=doc)
+        return StructDef(name, fields, self._span_from(start), doc=doc, field_name_spans=field_name_spans)
 
     # -- Type alias --
 
