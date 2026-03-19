@@ -63,16 +63,17 @@ def validate(source: str, filename: str) -> tuple[list[types.Diagnostic], Analys
     if not program.functions and not program.struct_defs and not program.type_aliases:
         return diagnostics, _EMPTY_RESULT
 
-    # Resolver — if it fails, use pre-resolve program
+    # Resolver — if it fails, use pre-resolve program so completions/hover still work
+    pre_resolve_program = program
     try:
         program = resolve(program, filename)
     except MaomiError as e:
         logger.debug("Resolve error in %s: %s", filename, e.message)
         diagnostics.append(_error_to_diagnostic(e))
-        return diagnostics, _EMPTY_RESULT
+        return diagnostics, AnalysisResult(pre_resolve_program, {}, {}, {}, source=source)
     except Exception:
         logger.debug("Unexpected resolver error in %s", filename, exc_info=True)
-        return diagnostics, _EMPTY_RESULT
+        return diagnostics, AnalysisResult(pre_resolve_program, {}, {}, {}, source=source)
 
     checker = TypeChecker(filename=filename)
     try:
