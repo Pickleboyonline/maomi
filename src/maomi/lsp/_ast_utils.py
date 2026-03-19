@@ -107,6 +107,24 @@ def _span_to_range(span) -> types.Range:
     )
 
 
+def _name_range(name: str, span, source_lines: list[str]) -> types.Range:
+    """Compute a range covering just *name* within the source region of *span*.
+
+    Searches the first line of the span (starting from col_start) for the name
+    text.  Falls back to the full span range when the name cannot be located.
+    """
+    line_idx = span.line_start - 1
+    if 0 <= line_idx < len(source_lines):
+        line_text = source_lines[line_idx]
+        idx = line_text.find(name, span.col_start - 1)
+        if idx >= 0:
+            return types.Range(
+                start=types.Position(line=line_idx, character=idx),
+                end=types.Position(line=line_idx, character=idx + len(name)),
+            )
+    return _span_to_range(span)
+
+
 def classify_symbol(node, line=None, col=None, struct_names=None):
     """Determine the symbol name and kind from the node under cursor.
 

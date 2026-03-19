@@ -26,6 +26,7 @@ class AnalysisResult:
     type_map: dict[int, MaomiType]
     fn_table: dict
     struct_defs: dict
+    source: str = ""
 
 
 _EMPTY_RESULT = AnalysisResult(None, {}, {}, {})
@@ -88,6 +89,7 @@ def validate(source: str, filename: str) -> tuple[list[types.Diagnostic], Analys
 
     return diagnostics, AnalysisResult(
         program, checker.type_map, dict(checker.fn_table), dict(checker.struct_defs),
+        source=source,
     )
 
 
