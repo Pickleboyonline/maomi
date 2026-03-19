@@ -59,7 +59,7 @@ def validate(source: str, filename: str) -> tuple[list[types.Diagnostic], Analys
         diagnostics.append(_error_to_diagnostic(e))
 
     # If nothing parsed at all, treat as total failure
-    if not program.functions and not program.struct_defs:
+    if not program.functions and not program.struct_defs and not program.type_aliases:
         return diagnostics, _EMPTY_RESULT
 
     # Resolver — if it fails, use pre-resolve program
