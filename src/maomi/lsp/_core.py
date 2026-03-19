@@ -85,6 +85,15 @@ def validate(source: str, filename: str) -> tuple[list[types.Diagnostic], Analys
     except Exception:
         logger.debug("Unexpected type-checker error in %s", filename, exc_info=True)
 
+    # Run warning analysis
+    try:
+        from ..warnings import analyze as analyze_warnings
+        warn_results = analyze_warnings(program, filename, fn_table=checker.fn_table)
+        for w in warn_results:
+            diagnostics.extend(_warning_to_diagnostics(w))
+    except Exception:
+        pass  # Warning analysis failure should not break validation
+
     logger.info("Validated %s: %d diagnostics, %d types, %d functions",
                 filename, len(diagnostics), len(checker.type_map), len(checker.fn_table))
 
@@ -101,6 +110,32 @@ def _error_to_diagnostic(e: MaomiError) -> types.Diagnostic:
     severity = types.DiagnosticSeverity.Error
     if getattr(e, "severity", None) == "warning":
         severity = types.DiagnosticSeverity.Warning
+
+    # Secondary labels -> related_information
+    related = None
+    secondary = getattr(e, "secondary_labels", [])
+    if secondary:
+        related = []
+        for label in secondary:
+            if hasattr(label, "text"):
+                text = label.text
+                fname = label.filename
+                ln, c, ce = label.line, label.col, label.col_end
+            elif isinstance(label, (tuple, list)) and len(label) >= 5:
+                text, fname, ln, c, ce = label[0], label[1], label[2], label[3], label[4]
+            else:
+                continue
+            related.append(types.DiagnosticRelatedInformation(
+                location=types.Location(
+                    uri=f"file://{fname}",
+                    range=types.Range(
+                        start=types.Position(line=max(0, ln - 1), character=max(0, c - 1)),
+                        end=types.Position(line=max(0, ln - 1), character=max(0, ce - 1)),
+                    ),
+                ),
+                message=text,
+            ))
+
     return types.Diagnostic(
         range=types.Range(
             start=types.Position(line=line, character=col),
@@ -109,7 +144,33 @@ def _error_to_diagnostic(e: MaomiError) -> types.Diagnostic:
         message=e.message,
         severity=severity,
         source="maomi",
+        related_information=related if related else None,
     )
+
+
+def _warning_to_diagnostics(w) -> list[types.Diagnostic]:
+    """Convert a Warning object to LSP Diagnostics (warning + optional hint)."""
+    line = max(0, w.line - 1)
+    col = max(0, w.col - 1)
+    col_end = max(col + 1, w.col_end - 1)
+    diag_range = types.Range(
+        start=types.Position(line=line, character=col),
+        end=types.Position(line=line, character=col_end),
+    )
+    result = [types.Diagnostic(
+        range=diag_range,
+        message=w.message,
+        severity=types.DiagnosticSeverity.Warning,
+        source="maomi",
+    )]
+    if w.hint:
+        result.append(types.Diagnostic(
+            range=diag_range,
+            message=f"hint: {w.hint}",
+            severity=types.DiagnosticSeverity.Hint,
+            source="maomi",
+        ))
+    return result
 
 
 _FAKE_ID = "__mao_cmplt__"
