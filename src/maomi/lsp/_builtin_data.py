@@ -36,7 +36,7 @@ for _name, _b in _CX_REGISTRY.items():
 _BUILTIN_SET.add("config")
 bisect.insort(_BUILTINS, "config")
 _BUILTIN_SIGNATURES["config"] = (["key"], ["str"], "f32 | i32 | str")
-_BUILTIN_DOCS["config"] = "Read a compile-time constant from the config TOML file. Usage: config(\"lr\")"
+_BUILTIN_DOCS["config"] = "Read a compile-time constant from the config TOML file. Must be used in a typed let binding: let lr: f32 = config(\"lr\")"
 
 # ---------------------------------------------------------------------------
 # Category labels for completion detail (LSP-only, not a language feature)

@@ -540,6 +540,11 @@ class TypeChecker:
         return None
 
     def _check_let(self, stmt: LetStmt, env: TypeEnv):
+        # config() requires a typed let binding — handle before _infer
+        if isinstance(stmt.value, CallExpr) and stmt.value.callee == "config":
+            self._check_config_binding(stmt, env)
+            return
+
         inferred = self._infer(stmt.value, env)
         if inferred is None:
             return
@@ -564,6 +569,31 @@ class TypeChecker:
             env.define(stmt.name, declared or inferred)
         else:
             env.define(stmt.name, inferred)
+
+    _CONFIG_TYPES = {F32, F64, I32, I64, BOOL}
+
+    def _check_config_binding(self, stmt: LetStmt, env: TypeEnv):
+        """Validate config() in a typed let binding and use the annotation as the type."""
+        expr = stmt.value
+        if len(expr.args) != 1 or not isinstance(expr.args[0], StringLiteral):
+            self._error("config() requires exactly one string argument",
+                        expr.span.line_start, expr.span.col_start)
+            return
+        if stmt.type_annotation is None:
+            self._error(
+                "config() requires a type annotation: let x: f32 = config(\"key\")",
+                expr.span.line_start, expr.span.col_start)
+            return
+        declared = self._resolve_type_annotation(stmt.type_annotation)
+        if declared is None:
+            return
+        if declared not in self._CONFIG_TYPES:
+            self._error(
+                f"config() type must be a scalar (f32, f64, i32, i64, bool), got {declared}",
+                stmt.type_annotation.span.line_start, stmt.type_annotation.span.col_start)
+            return
+        self.type_map[id(expr)] = declared
+        env.define(stmt.name, declared)
 
     # -- Expression type inference --
 
@@ -1695,14 +1725,13 @@ class TypeChecker:
         if expr.callee in ("tril", "triu"):
             return self._check_tril_triu(expr, env)
 
-        # config() — compile-time constant, resolved before codegen.
-        # Type is unknown at check time; default to f32 (most common for hyperparams).
+        # config() must be used in a typed let binding (handled by _check_config_binding).
+        # If we reach here, config() was used outside a let — error.
         if expr.callee == "config":
-            if len(expr.args) != 1 or not isinstance(expr.args[0], StringLiteral):
-                self._error("config() requires exactly one string argument",
-                            expr.span.line_start, expr.span.col_start)
-                return None
-            return F32
+            self._error(
+                "config() must be used in a typed let binding: let x: type = config(\"key\")",
+                expr.span.line_start, expr.span.col_start)
+            return None
 
         sig = self.fn_table.get(expr.callee)
         if sig is None:
