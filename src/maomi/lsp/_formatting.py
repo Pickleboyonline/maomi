@@ -125,9 +125,10 @@ def _find_matching_brace(source: str, line_0: int, col_0: int) -> types.Position
         # Search forward for matching '}'
         depth = 0
         for i in range(line_0, len(lines)):
+            effective = _effective_braces(lines[i])
             start_col = col_0 if i == line_0 else 0
-            for j in range(start_col, len(lines[i])):
-                c = lines[i][j]
+            for j in range(start_col, len(effective)):
+                c = effective[j]
                 if c == '{':
                     depth += 1
                 elif c == '}':
@@ -138,11 +139,12 @@ def _find_matching_brace(source: str, line_0: int, col_0: int) -> types.Position
         # Search backward for matching '{'
         depth = 0
         for i in range(line_0, -1, -1):
-            end_col = col_0 if i == line_0 else len(lines[i]) - 1
+            effective = _effective_braces(lines[i])
+            end_col = col_0 if i == line_0 else len(effective) - 1
             for j in range(end_col, -1, -1):
-                if j >= len(lines[i]):
+                if j >= len(effective):
                     continue
-                c = lines[i][j]
+                c = effective[j]
                 if c == '}':
                     depth += 1
                 elif c == '{':

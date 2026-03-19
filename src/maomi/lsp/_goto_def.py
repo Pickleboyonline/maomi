@@ -91,11 +91,18 @@ def _goto_find_binding_in_expr(name, expr, line, col):
 
 
 def _goto_find_binding(name, fn, line, col):
-    """Find where a variable name is bound in the enclosing function."""
+    """Find where a variable name is bound in the enclosing function.
+
+    Check let stmts first so that shadowed variables resolve to the let,
+    not the param.
+    """
+    block_match = _goto_find_binding_in_block(name, fn.body, line, col)
+    if block_match is not None:
+        return block_match
     for param in fn.params:
         if param.name == name:
             return param.span
-    return _goto_find_binding_in_block(name, fn.body, line, col)
+    return None
 
 
 def _goto_find_definition(node, fn, result):
@@ -131,6 +138,14 @@ def _goto_find_definition(node, fn, result):
             for sdef in program.struct_defs:
                 if sdef.name == typ.name:
                     return sdef.span, None
+        return None
+
+    if isinstance(node, Param):
+        ta = node.type_annotation
+        if ta:
+            for sdef in program.struct_defs:
+                if sdef.name == ta.base:
+                    return sdef.span, getattr(sdef, 'source_file', None)
         return None
 
     return None

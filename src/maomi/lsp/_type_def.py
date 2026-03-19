@@ -3,7 +3,7 @@ from __future__ import annotations
 from lsprotocol import types
 
 from ..ast_nodes import FnDef, LetStmt, Param, Identifier
-from ..types import StructType
+from ..types import StructType, StructArrayType
 from ._core import server, _cache, _local_functions
 from ._ast_utils import _find_node_at, _span_to_range
 
@@ -25,6 +25,8 @@ def _goto_type_definition(node, fn, result):
     # For LetStmt, look up the type of the value expression.
     if isinstance(node, LetStmt):
         typ = result.type_map.get(id(node.value))
+        if isinstance(typ, StructArrayType):
+            typ = typ.struct_type
         if isinstance(typ, StructType):
             for sdef in program.struct_defs:
                 if sdef.name == typ.name:
@@ -34,6 +36,8 @@ def _goto_type_definition(node, fn, result):
     # For Identifier and other expressions, look up type_map.
     node_id = id(node)
     typ = result.type_map.get(node_id)
+    if isinstance(typ, StructArrayType):
+        typ = typ.struct_type
     if isinstance(typ, StructType):
         for sdef in program.struct_defs:
             if sdef.name == typ.name:

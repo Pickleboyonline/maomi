@@ -3,7 +3,7 @@ from __future__ import annotations
 from pygls.lsp.server import LanguageServer
 from lsprotocol import types
 
-from ..ast_nodes import FnDef, Block, StructDef, ScanExpr, MapExpr, FoldExpr, WhileExpr
+from ..ast_nodes import FnDef, StructDef, IfExpr, ScanExpr, MapExpr, FoldExpr, WhileExpr
 from ._core import server, _cache, AnalysisResult, _local_functions
 from ._ast_utils import _children_of
 
@@ -11,7 +11,7 @@ from ._ast_utils import _children_of
 def _fold_collect_ranges(node, ranges: list):
     """Recursively collect folding ranges from AST nodes."""
     if hasattr(node, 'span') and node.span.line_end > node.span.line_start:
-        if isinstance(node, (StructDef, ScanExpr, MapExpr, FoldExpr, WhileExpr, Block)):
+        if isinstance(node, (StructDef, IfExpr, ScanExpr, MapExpr, FoldExpr, WhileExpr)):
             ranges.append(types.FoldingRange(
                 start_line=node.span.line_start - 1,
                 end_line=node.span.line_end - 1,

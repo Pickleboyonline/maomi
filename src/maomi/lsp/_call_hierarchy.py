@@ -128,9 +128,7 @@ def prepare_call_hierarchy(ls: LanguageServer, params: types.CallHierarchyPrepar
     result = _cache.get(uri)
     if not result or not result.program:
         return None
-    line = params.position.line + 1
-    col = params.position.character + 1
-    return _call_hierarchy_prepare(result, uri, line, col)
+    return _call_hierarchy_prepare(result, uri, params.position.line, params.position.character)
 
 
 @server.feature(types.CALL_HIERARCHY_INCOMING_CALLS)

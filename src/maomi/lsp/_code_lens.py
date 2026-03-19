@@ -11,6 +11,8 @@ from ._references import _refs_collect_all
 
 def _build_code_lenses(result: AnalysisResult, uri: str) -> list[types.CodeLens]:
     """Build code lenses for each function: 'Run' and 'N references'."""
+    if not result.program:
+        return []
     lenses: list[types.CodeLens] = []
 
     for fn in _local_functions(result.program):
