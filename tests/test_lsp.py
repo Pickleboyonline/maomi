@@ -937,7 +937,7 @@ class TestSignatureHelp:
     def test_parse_call_context_at_open_paren(self):
         source = "fn f(x: f32) -> f32 { exp(x) }"
         # Cursor right after "exp(" — character 27 is right after the '('
-        name, idx = _sig_parse_call_context(source, types.Position(line=0, character=27))
+        name, idx, _ = _sig_parse_call_context(source, types.Position(line=0, character=27))
         assert name == "exp"
         assert idx == 0
 
@@ -945,14 +945,14 @@ class TestSignatureHelp:
         source = "fn f(a: f32, b: f32) -> f32 { helper(a, b) }"
         # Cursor after the comma+space, on 'b' — should be param index 1
         # "helper(a, b)" — 'h' starts at col 30, '(' at 36, 'a' at 37, ',' at 38, ' ' at 39, 'b' at 40
-        name, idx = _sig_parse_call_context(source, types.Position(line=0, character=40))
+        name, idx, _ = _sig_parse_call_context(source, types.Position(line=0, character=40))
         assert name == "helper"
         assert idx == 1
 
     def test_parse_call_context_third_param(self):
         source = "fn f(a: f32) -> f32 { random.uniform(k, 0.0, 1.0, 4) }"
         # Cursor after second comma — should be param index 2
-        name, idx = _sig_parse_call_context(source, types.Position(line=0, character=48))
+        name, idx, _ = _sig_parse_call_context(source, types.Position(line=0, character=48))
         assert name == "random.uniform"
         assert idx == 2
 
@@ -970,14 +970,14 @@ class TestSignatureHelp:
 
     def test_no_signature_outside_call(self):
         source = "fn f(x: f32) -> f32 { x }"
-        name, idx = _sig_parse_call_context(source, types.Position(line=0, character=23))
+        name, idx, _ = _sig_parse_call_context(source, types.Position(line=0, character=23))
         assert name is None
 
     def test_nested_calls_inner(self):
         source = "fn f(x: f32) -> f32 { exp(log(x)) }"
         # Cursor inside log( — after the inner '(' — should return "log", not "exp"
         # "exp(log(x))" — 'e' at 22, '(' at 25, 'l' at 26, 'o' at 27, 'g' at 28, '(' at 29, 'x' at 30
-        name, idx = _sig_parse_call_context(source, types.Position(line=0, character=30))
+        name, idx, _ = _sig_parse_call_context(source, types.Position(line=0, character=30))
         assert name == "log"
         assert idx == 0
 
@@ -985,21 +985,21 @@ class TestSignatureHelp:
         source = "fn f(x: f32) -> f32 { exp(log(x), y) }"
         # Cursor after the comma in exp(..., y) — between log(x) and y
         # exp(log(x), y) — '(' at 25, 'log(x)' fills 26-30, ')' at 31, ',' at 32, ' ' at 33, 'y' at 34
-        name, idx = _sig_parse_call_context(source, types.Position(line=0, character=34))
+        name, idx, _ = _sig_parse_call_context(source, types.Position(line=0, character=34))
         assert name == "exp"
         assert idx == 1
 
     def test_multiline_call(self):
         source = "fn f(a: f32, b: f32) -> f32 {\n    helper(\n        a,\n        b\n    )\n}"
         # Cursor on line 3 (the 'b' line), character 8 — after the comma on prev line
-        name, idx = _sig_parse_call_context(source, types.Position(line=3, character=9))
+        name, idx, _ = _sig_parse_call_context(source, types.Position(line=3, character=9))
         assert name == "helper"
         assert idx == 1
 
     def test_empty_args(self):
         source = "fn f() -> f32 { helper() }"
         # Cursor right after "helper(" — inside empty parens
-        name, idx = _sig_parse_call_context(source, types.Position(line=0, character=23))
+        name, idx, _ = _sig_parse_call_context(source, types.Position(line=0, character=23))
         assert name == "helper"
         assert idx == 0
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import bisect
+
 from ..builtins import ELEMENTWISE as _EW_REGISTRY, COMPLEX as _CX_REGISTRY
 
 _KEYWORDS = [
@@ -32,7 +34,7 @@ for _name, _b in _CX_REGISTRY.items():
 
 # config() — compile-time constant from TOML (not in builtins registry)
 _BUILTIN_SET.add("config")
-_BUILTINS.append("config")
+bisect.insort(_BUILTINS, "config")
 _BUILTIN_SIGNATURES["config"] = (["key"], ["str"], "f32 | i32 | str")
 _BUILTIN_DOCS["config"] = "Read a compile-time constant from the config TOML file. Usage: config(\"lr\")"
 

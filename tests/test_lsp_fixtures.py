@@ -116,7 +116,8 @@ def _rename_count(source, line_0, col_0, new_name):
 def _sig_help_at(source, line_0, col_0):
     """Get (fn_name, param_index) from signature help context."""
     pos = types.Position(line=line_0, character=col_0)
-    return _sig_parse_call_context(source, pos)
+    name, idx, _ = _sig_parse_call_context(source, pos)
+    return name, idx
 
 
 def _inlay_hint_count(source, start_line_1, end_line_1):
