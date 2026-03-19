@@ -243,6 +243,36 @@ def _is_numeric(t: MaomiType) -> bool:
     return False
 
 
+# Literal auto-promotion: safe widening only
+_LITERAL_PROMOTION: dict[str, frozenset[str]] = {
+    "i32": frozenset({"i64", "f32", "f64", "bf16"}),
+    "f32": frozenset({"f64"}),
+}
+
+
+def _is_promotable_literal(expr) -> bool:
+    """Is this AST node a numeric literal (or negated literal) eligible for promotion?"""
+    if isinstance(expr, (IntLiteral, FloatLiteral)):
+        return True
+    if isinstance(expr, UnaryOp) and expr.op == "-":
+        return isinstance(expr.operand, (IntLiteral, FloatLiteral))
+    return False
+
+
+def _literal_base(expr) -> str | None:
+    """Return the base type string of a promotable literal, or None."""
+    if isinstance(expr, IntLiteral):
+        return "i32"
+    if isinstance(expr, FloatLiteral):
+        return "f32"
+    if isinstance(expr, UnaryOp) and expr.op == "-":
+        if isinstance(expr.operand, IntLiteral):
+            return "i32"
+        if isinstance(expr.operand, FloatLiteral):
+            return "f32"
+    return None
+
+
 def _struct_has_float_leaves(t: StructType) -> bool:
     """Check that all leaf fields of a struct are float types."""
     for _, ft in t.fields:
@@ -624,13 +654,21 @@ class TypeChecker:
                 hint=f"The function declares return type {expected} but the body evaluates to {body_type}.",
             )
         elif expected and not self._types_compatible(body_type, expected):
-            self._error(
-                f"return type mismatch: function '{fn.name}' declares {expected} but body returns {body_type}",
-                fn.body.span.line_end,
-                fn.body.span.col_end,
-                secondary_labels=ret_labels,
-                hint=f"The function declares return type {expected} but the body evaluates to {body_type}.",
-            )
+            # Try literal promotion for return expression
+            expected_base = expected.base if isinstance(expected, (ScalarType, ArrayType)) else None
+            if expected_base and fn.body.expr is not None:
+                promo = self._maybe_promote_literal(fn.body.expr, expected_base)
+                if promo:
+                    fn.body.expr = promo[0]
+                    body_type = promo[1]
+            if not self._types_compatible(body_type, expected):
+                self._error(
+                    f"return type mismatch: function '{fn.name}' declares {expected} but body returns {body_type}",
+                    fn.body.span.line_end,
+                    fn.body.span.col_end,
+                    secondary_labels=ret_labels,
+                    hint=f"The function declares return type {expected} but the body evaluates to {body_type}.",
+                )
 
     def _check_block(self, block: Block, env: TypeEnv) -> MaomiType | None:
         child_env = env.child()
@@ -665,12 +703,20 @@ class TypeChecker:
         if stmt.type_annotation is not None:
             declared = self._resolve_type_annotation(stmt.type_annotation)
             if declared and not self._types_compatible(inferred, declared):
-                self._error(
-                    f"type mismatch in let binding '{stmt.name}': declared {declared} but got {inferred}",
-                    stmt.span.line_start,
-                    stmt.span.col_start,
-                    stmt.span.col_end,
-                )
+                # Try literal promotion
+                declared_base = declared.base if isinstance(declared, (ScalarType, ArrayType)) else None
+                if declared_base:
+                    promo = self._maybe_promote_literal(stmt.value, declared_base)
+                    if promo:
+                        stmt.value = promo[0]
+                        inferred = promo[1]
+                if not self._types_compatible(inferred, declared):
+                    self._error(
+                        f"type mismatch in let binding '{stmt.name}': declared {declared} but got {inferred}",
+                        stmt.span.line_start,
+                        stmt.span.col_start,
+                        stmt.span.col_end,
+                    )
             env.define(stmt.name, declared or inferred)
         else:
             env.define(stmt.name, inferred)
@@ -966,6 +1012,20 @@ class TypeChecker:
 
         return StructType("_ValueAndGrad", (("value", expr_type), ("gradient", wrt_type)))
 
+    def _maybe_promote_literal(self, expr, target_base: str) -> tuple[CastExpr, ScalarType] | None:
+        """If expr is a promotable literal whose base can widen to target_base,
+        wrap in CastExpr, register in type_map, and return (cast, promoted_type).
+        Returns None if not applicable."""
+        from_base = _literal_base(expr)
+        if from_base is None or from_base == target_base:
+            return None
+        if target_base not in _LITERAL_PROMOTION.get(from_base, frozenset()):
+            return None
+        cast = CastExpr(expr, target_base, expr.span)
+        promoted = ScalarType(target_base)
+        self.type_map[id(cast)] = promoted
+        return (cast, promoted)
+
     _CAST_BASES = {"f32", "f64", "bf16", "i32", "i64", "bool"}
 
     def _check_cast(self, expr: CastExpr, env: TypeEnv) -> MaomiType | None:
@@ -1104,7 +1164,7 @@ class TypeChecker:
             )
             return None
 
-        for (given_name, given_expr), (expected_name, expected_type) in zip(expr.fields, stype.fields):
+        for i, ((given_name, given_expr), (expected_name, expected_type)) in enumerate(zip(expr.fields, stype.fields)):
             if given_name != expected_name:
                 self._error(
                     f"struct '{expr.name}': expected field '{expected_name}', got '{given_name}'",
@@ -1114,11 +1174,19 @@ class TypeChecker:
                 return None
             given_type = self._infer(given_expr, env)
             if given_type is not None and not self._types_compatible(given_type, expected_type):
-                self._error(
-                    f"struct '{expr.name}' field '{given_name}': expected {expected_type}, got {given_type}",
-                    given_expr.span.line_start, given_expr.span.col_start,
-                    given_expr.span.col_end,
-                )
+                # Try literal promotion for struct fields
+                exp_base = expected_type.base if isinstance(expected_type, (ScalarType, ArrayType)) else None
+                if exp_base:
+                    promo = self._maybe_promote_literal(given_expr, exp_base)
+                    if promo:
+                        expr.fields[i] = (given_name, promo[0])
+                        given_type = promo[1]
+                if not self._types_compatible(given_type, expected_type):
+                    self._error(
+                        f"struct '{expr.name}' field '{given_name}': expected {expected_type}, got {given_type}",
+                        given_expr.span.line_start, given_expr.span.col_start,
+                        given_expr.span.col_end,
+                    )
 
         return stype
 
@@ -1427,6 +1495,17 @@ class TypeChecker:
             return result
 
         if op in COMPARISON_OPS:
+            # Literal promotion for comparisons
+            if _base_of(lt) != _base_of(rt):
+                promo = self._maybe_promote_literal(left, _base_of(rt))
+                if promo:
+                    expr.left = promo[0]
+                    lt = promo[1]
+                else:
+                    promo = self._maybe_promote_literal(right, _base_of(lt))
+                    if promo:
+                        expr.right = promo[0]
+                        rt = promo[1]
             result_shape = self._broadcast(lt, rt)
             if result_shape is None:
                 self._error(
@@ -1455,6 +1534,18 @@ class TypeChecker:
                 expr.span.col_end,
             )
             return None
+
+        # Literal promotion for arithmetic
+        if _base_of(lt) != _base_of(rt):
+            promo = self._maybe_promote_literal(left, _base_of(rt))
+            if promo:
+                expr.left = promo[0]
+                lt = promo[1]
+            else:
+                promo = self._maybe_promote_literal(right, _base_of(lt))
+                if promo:
+                    expr.right = promo[0]
+                    rt = promo[1]
 
         result = self._broadcast(lt, rt)
         if result is None:
@@ -1601,6 +1692,24 @@ class TypeChecker:
 
         if then_type is None or else_type is None:
             return then_type or else_type
+
+        # Literal promotion for if/else branches
+        then_base = then_type.base if isinstance(then_type, (ScalarType, ArrayType)) else None
+        else_base = else_type.base if isinstance(else_type, (ScalarType, ArrayType)) else None
+        if then_base and else_base and then_base != else_base:
+            if expr.then_block.expr is not None:
+                promo = self._maybe_promote_literal(expr.then_block.expr, else_base)
+                if promo:
+                    expr.then_block.expr = promo[0]
+                    then_type = promo[1]
+            # Re-check after first promotion attempt
+            then_base2 = then_type.base if isinstance(then_type, (ScalarType, ArrayType)) else None
+            if then_base2 and else_base and then_base2 != else_base:
+                if expr.else_block.expr is not None:
+                    promo = self._maybe_promote_literal(expr.else_block.expr, then_base2)
+                    if promo:
+                        expr.else_block.expr = promo[0]
+                        else_type = promo[1]
 
         result = self._broadcast(then_type, else_type)
         if result is None:
@@ -1913,6 +2022,16 @@ class TypeChecker:
                 arg_base = arg_type.base if isinstance(arg_type, (ScalarType, ArrayType)) else None
                 if arg_base in FLOAT_BASES and arg_base != "f32":
                     continue
+
+            # Literal promotion for function arguments
+            param_base = param_type.base if isinstance(param_type, (ScalarType, ArrayType)) else None
+            arg_base2 = arg_type.base if isinstance(arg_type, (ScalarType, ArrayType)) else None
+            if param_base and arg_base2 and arg_base2 != param_base:
+                promo = self._maybe_promote_literal(expr.args[i], param_base)
+                if promo:
+                    expr.args[i] = promo[0]
+                    arg_type = promo[1]
+                    arg_types[i] = arg_type
 
             if not self._unify_arg(arg_type, param_type, substitution, expr, i):
                 continue
@@ -3451,6 +3570,15 @@ class TypeChecker:
                     return None
             else:
                 # Non-wildcard param — normal type unification (handles symbolic dims)
+                # Literal promotion for generic function arguments
+                param_base = param_type.base if isinstance(param_type, (ScalarType, ArrayType)) else None
+                arg_base = arg_type.base if isinstance(arg_type, (ScalarType, ArrayType)) else None
+                if param_base and arg_base and arg_base != param_base:
+                    promo = self._maybe_promote_literal(expr.args[i], param_base)
+                    if promo:
+                        expr.args[i] = promo[0]
+                        arg_type = promo[1]
+                        arg_types[i] = arg_type
                 if not self._unify_arg(arg_type, param_type, substitution, expr, i):
                     return None
 
